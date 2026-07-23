@@ -9,8 +9,8 @@ No AI agent, strategy, broker adapter, or UI action may bypass these rules.
 ## Core Rules
 
 1. Development and testing are paper-trading only.
-2. AI may propose trades but may never directly submit broker orders.
-3. Every trade must pass through strategy validation, risk, permissions, portfolio checks, execution validation, and a broker adapter.
+2. AI may propose trades but may never directly submit broker orders, and has no authority to directly access or call the Execution Engine or Broker Adapter. This applies identically to every configured AI provider — local or cloud, regardless of vendor.
+3. Every trade must pass through the canonical TradeValidationPipeline in full (ARCHITECTURE.md §14) — no stage may be skipped, reordered, renamed, or duplicated.
 4. Win rate alone is never sufficient to judge a strategy.
 5. Small sample sizes must not be presented as strong evidence.
 6. Backtests must protect against look-ahead bias, survivorship bias, data leakage, invalid fills, and unrealistic liquidity assumptions.

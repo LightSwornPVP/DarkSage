@@ -302,9 +302,43 @@ Future:
 
 - Live broker adapters
 
-Required flow:
+### Canonical Trade Validation Pipeline (`TradeValidationPipeline`)
 
-Strategy / AI → Trade Proposal → Signal Validator → Risk Engine → Permissions Engine → Portfolio Check → Execution Engine → BrokerAdapter
+This is the single authoritative definition of the trade pipeline. Every other document (PROJECT_SPEC.md, SECURITY_RULES.md, TRADING_RULES.md, ROADMAP.md) must either point to this section or repeat these exact 12 stages, in this exact order, with no renaming, omission, duplication, or reordering. The canonical stage names also live in machine-readable form at `docs/pipeline-stages.txt`, checked by `scripts/verify-foundation.sh`.
+
+```
+AI / Strategy Engine
+→ Trade Proposal
+→ Signal Validator
+→ Strategy Validation
+→ Risk Engine
+→ Permissions Engine
+→ Portfolio / Exposure Checks
+→ Buying Power Checks
+→ Market Condition Checks
+→ Order Validation
+→ Execution Engine
+→ Broker Adapter
+```
+
+The AI / Strategy Engine may create or explain a Trade Proposal. It has no authority to bypass any downstream stage, and no authority to directly access or call the Execution Engine or Broker Adapter under any circumstance, regardless of confidence, urgency, or which AI provider generated the proposal.
+
+| Stage | Also previously called | Responsibility |
+|---|---|---|
+| AI / Strategy Engine | "Strategy / AI" | Produces a Trade Proposal from a signal and strategy logic. Advisory only — cannot submit orders or call any stage past Order Validation directly. |
+| Trade Proposal | — | The candidate trade, not yet validated. Carries the signal, strategy, and proposed size/direction. |
+| Signal Validator | "Signal validation" | Validates the signal itself: fresh data, valid symbol/instrument, well-formed fields, detected patterns/indicators present. Does not evaluate the strategy or the order. |
+| Strategy Validation | "Strategy validation" | Confirms the strategy that produced the signal is currently eligible to trade: status (not Suspended), current version, minimum sample-size/confidence met. |
+| Risk Engine | — | Trade- and account-level risk limits: max risk per trade, daily/weekly loss limits, strategy drawdown limits, volatility/liquidity/spread checks. |
+| Permissions Engine | — | Instrument- and account-level permission checks: allowed instrument category, signal-grade restrictions, account trading permissions. |
+| Portfolio / Exposure Checks | "Portfolio Check", "Portfolio exposure checks" | Whole-portfolio context: position sizing vs. portfolio, sector/factor/correlated exposure across existing positions. |
+| Buying Power Checks | "Buying-power checks" | Confirms sufficient cash/margin/buying power exists for the proposed order size. |
+| Market Condition Checks | "Market-condition checks" | Market open/halted state, data staleness, extreme volatility/circuit-breaker conditions. |
+| Order Validation | "Execution validation", "Order Validator" | Final pre-submission checks on the order itself: valid quantity/instrument, duplicate-order/idempotency check, correct account/environment (paper vs. live), well-formed order fields. Last gate before the Execution Engine. |
+| Execution Engine | — | System component (not a check) that manages order lifecycle and submits to the Broker Adapter once Order Validation passes. |
+| Broker Adapter | "Broker", "BrokerAdapter", "PaperBroker" | Provider-specific adapter that communicates with the actual paper or live broker. |
+
+AI may never bypass or shortcut any stage of this pipeline.
 
 ## 15. Auto-Trader Architecture
 
@@ -420,14 +454,40 @@ Modules:
 
 - `local/`
 - `cloud/`
+- `providers/`
 - `agents/`
 - `orchestrator/`
 
 AI is advisory and may not bypass deterministic safety systems.
 
+### AI Provider Interface
+
+All AI providers, local and cloud, implement a common interface (e.g. `complete()`, `chat()`, `stream()`) so feature code and the orchestrator never depend on a vendor-specific SDK directly.
+
+Initial provider adapters, each behind the same interface:
+
+- Local (llama.cpp-compatible / ONNX / other efficient local runtime)
+- OpenAI
+- Anthropic
+- Google Gemini
+- Custom OpenAI-compatible endpoint
+
+Adding, removing, or replacing a provider must not require changes to Sage, signal analysis, research summaries, or strategy explanation code — only a new adapter implementing the existing interface. This avoids vendor lock-in.
+
+### Per-Feature Provider Configuration
+
+The orchestrator resolves, per AI feature, which configured provider/model to use. Initial features requiring independent selection:
+
+- Sage chat
+- Deep signal analysis
+- Research / news summaries
+- Strategy explanations
+
+Provider/model configuration is authoritative in the backend, not solely in the desktop or mobile client, consistent with the backend being the source of truth for application state.
+
 ## 23. Local AI
 
-Local AI is the default for routine work.
+Local AI is the default and preferred provider for routine work.
 
 Possible runtimes:
 
@@ -437,7 +497,16 @@ Possible runtimes:
 
 ## 24. Cloud AI
 
-Cloud AI is optional and must never be required for basic DarkSage operation.
+Cloud AI is optional, configured per-provider with the user's own API key, and must never be required for basic DarkSage operation.
+
+Cloud AI must never be required for deterministic scanning, indicators, risk calculations, backtesting, portfolio math, or trade validation. Those remain deterministic local code regardless of AI provider configuration.
+
+### Credential Storage
+
+- API keys must never be committed, logged, or exposed in frontend/client source.
+- Development may use environment variables or `.env` files excluded by `.gitignore`.
+- Production credentials must use secure OS/application credential storage (e.g. OS keychain/credential manager) or an encrypted secrets vault — not plaintext files.
+- A future Settings > AI Providers UI must support add, test, edit, disable, and remove for provider credentials, and must never redisplay a stored key in full once saved.
 
 ## 25. Notifications
 
@@ -486,6 +555,7 @@ Requires hardened security, broker reconciliation, monitoring, fail-safe control
 
 - Never commit credentials
 - Never hard-code API keys
+- AI provider API keys (OpenAI, Anthropic, Google Gemini, custom endpoints, and future providers) are secrets: never committed, logged, or exposed in frontend source; production keys use OS credential storage or an encrypted secrets vault
 - Use environment variables or secure credential storage
 - Separate paper and live credentials
 - Use least privilege

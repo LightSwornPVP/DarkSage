@@ -28,6 +28,8 @@ Priority order when documents conflict:
 
 Security and trading safety always take priority.
 
+This priority order is fixed and formal. Any local, tool-specific, or machine-local development-tool configuration (tracked or untracked) is a convenience summary only — it never overrides this order or any of the six documents above, and it never becomes authoritative project governance by virtue of a development tool reading it automatically.
+
 ## Scope Control
 
 Agents must not invent major architectural changes without explicit approval.
@@ -172,10 +174,13 @@ Owns:
 
 - `ai/local/`
 - `ai/cloud/`
+- `ai/providers/`
 - `ai/agents/`
 - `ai/orchestrator/`
 
 AI functionality remains advisory.
+
+Provider adapters (OpenAI, Anthropic, Google Gemini, custom OpenAI-compatible endpoints, local) must implement the common provider interface and must never handle broker credentials, submit broker orders, or bypass the risk/permissions pipeline. The AI Agent is responsible for ensuring provider API keys are never logged, committed, or exposed in frontend source.
 
 ### QA Agent
 
@@ -279,17 +284,61 @@ Do not automatically add:
 
 without explicit approval.
 
-## Shell Safety
+User-configured cloud AI providers (OpenAI, Anthropic, Google Gemini, custom OpenAI-compatible endpoints) are an exception: users may opt in and supply their own API key for their own usage. This is not DarkSage adding a recurring paid service — local AI must remain the default, no provider may be pre-selected or required, and no install may silently default to a cloud provider or ship a bundled/shared API key.
 
-Destructive commands require explicit approval.
+## Command Approval Policy
 
-Examples:
+Routine, non-destructive repository operations should proceed without requesting approval each time.
 
-- Deleting large directories
-- Resetting databases
-- Force-pushing Git history
-- Deleting unmerged branches
-- Changing system security settings
+Pre-approved, safe to run without asking:
+
+- `git status`
+- `git diff`
+- `git diff --check`
+- `git log`
+- `git grep`
+- `git ls-files`
+- `git check-ignore`
+- Reading files
+- Listing directories
+- Running project-local tests
+- Running linters
+- Running formatting checks
+- Running verification scripts
+- Checking installed tool versions
+- Checking whether commands/tools exist
+- Creating temporary test files that are automatically restored or deleted
+- Negative tests that intentionally verify a validation script fails correctly, provided the original file is restored automatically
+- Read-only network fetches to official upstream documentation or repositories, when needed to verify versions, SHAs, schemas, or configuration
+
+Do not repeatedly request approval for substantially similar safe commands. Batch related safe checks together instead of prompting separately for each one.
+
+Explicit approval is still required before:
+
+- Deleting or permanently overwriting user data
+- Destructive git operations
+- Force pushes
+- History rewrites
+- Hard resets
+- Deleting branches containing unmerged work
+- Installing or removing system-wide software
+- Modifying system settings
+- Changing credentials or secrets
+- Publishing releases
+- Merging pull requests
+- Pushing directly to protected branches
+- Sending external communications
+- Making purchases or enabling paid services
+- Enabling live trading
+- Placing real-money trades
+- Connecting real-money broker execution
+- Emergency Flatten actions on a live account
+- Any other irreversible or materially risky action
+
+When uncertain, distinguish:
+
+1. Routine, reversible development operations — proceed.
+2. Destructive, external, financial, credential-related, live-trading, or irreversible operations — request approval.
 
 ## Documentation
 

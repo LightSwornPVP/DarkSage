@@ -255,13 +255,23 @@ Exit criteria:
 
 ---
 
-# Phase 6 — Local AI and Sage
+# Phase 6 — Local AI, Cloud Providers, and Sage
 
-Goal: add low-cost AI assistance without making AI authoritative.
+Goal: add low-cost AI assistance without making AI authoritative, and let users optionally bring their own cloud AI providers.
+
+During Phase 6, all AI output — local or any configured cloud provider — is research/display/advisory only: chat responses, signal explanations, candidate review, portfolio commentary, strategy summaries. AI cannot produce an executable broker order and cannot bypass any deterministic control. Executable trade proposals remain disabled in this phase regardless of AI confidence or user request, until the full canonical TradeValidationPipeline (ARCHITECTURE.md §14) exists, is implemented, and is approved — see Phase 7.
 
 - Local model manager
 - Hardware detection
 - llama.cpp-compatible runtime
+- AI provider abstraction/interface (common `complete()`/`chat()`/`stream()` contract)
+- OpenAI provider adapter
+- Anthropic provider adapter
+- Google Gemini provider adapter
+- Custom OpenAI-compatible endpoint adapter
+- Per-feature provider/model selection (Sage chat, deep signal analysis, research/news summaries, strategy explanations)
+- Secure credential storage (OS credential store / encrypted vault) for provider API keys
+- Settings > AI Providers UI (add, test, edit, disable, remove provider credentials)
 - Model selection
 - Sage chat
 - Signal explanations
@@ -271,15 +281,17 @@ Goal: add low-cost AI assistance without making AI authoritative.
 - Strategy summaries
 - AI abstention
 - Confidence-source separation
-- Optional cloud AI adapter
 - Cloud AI cost controls
 - Model comparison metrics
 
 Exit criteria:
 
-- Core app works without cloud AI
-- AI cannot bypass deterministic rules
+- Core app works with zero cloud AI providers configured
+- A cloud provider (OpenAI, Anthropic, Gemini, or custom endpoint) can be added or swapped per feature without changing feature code
+- Deterministic scanning, indicators, risk calculations, backtesting, portfolio math, and trade validation never depend on cloud AI
+- AI cannot bypass deterministic rules, regardless of which provider is configured
 - AI output is validated before use
+- No provider API key ever appears in commits, logs, or frontend/client source
 
 ---
 
@@ -312,6 +324,7 @@ Goal: automatically execute approved strategies in paper mode.
 Exit criteria:
 
 - No live trading exists
+- Full canonical TradeValidationPipeline (ARCHITECTURE.md §14) is implemented and independently reviewed before any executable trade proposal is enabled
 - Duplicate-order tests pass
 - Risk engine cannot be bypassed
 - Emergency Stop passes tests

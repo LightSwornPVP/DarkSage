@@ -322,11 +322,25 @@ Use secure platform storage where sensitive local data is required.
 
 For iOS, use Keychain.
 
-## AI Privacy
+## AI Privacy and Provider Credentials
 
 Local and cloud AI should not receive credentials or unnecessary sensitive account data.
 
-Cloud AI must remain optional.
+Cloud AI must remain optional. The application must function fully with zero cloud AI provider configured.
+
+DarkSage supports multiple user-configurable AI providers (initially: local, OpenAI, Anthropic, Google Gemini, and custom OpenAI-compatible endpoints) behind a common interface. Provider API keys must be treated as credentials:
+
+- Never committed to source control
+- Never logged, including in debug/verbose logs
+- Never exposed in frontend/client source or bundled JavaScript
+- Never sent to any provider other than the one the user configured for that key
+- Not stored as plaintext where an OS/application secure credential store is available
+- Production credentials must use OS credential storage (e.g. Windows Credential Manager, macOS Keychain) or an encrypted secrets vault
+- Development may use `.env` files excluded by `.gitignore`
+
+A future Settings > AI Providers UI must support adding, testing, editing, disabling, and removing provider credentials, and must never redisplay a stored key in full once saved.
+
+No AI provider, local or cloud, may communicate directly with a broker or bypass the canonical TradeValidationPipeline (full definition: ARCHITECTURE.md §14). No provider may directly access or call the Execution Engine or Broker Adapter. This applies identically regardless of vendor.
 
 ## Security Testing
 

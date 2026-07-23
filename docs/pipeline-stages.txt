@@ -1,0 +1,12 @@
+AI / Strategy Engine
+Trade Proposal
+Signal Validator
+Strategy Validation
+Risk Engine
+Permissions Engine
+Portfolio / Exposure Checks
+Buying Power Checks
+Market Condition Checks
+Order Validation
+Execution Engine
+Broker Adapter

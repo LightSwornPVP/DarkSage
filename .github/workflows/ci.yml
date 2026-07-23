@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -10,34 +13,82 @@ jobs:
   secret-scan:
     name: Secret scanning
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4.4.0 (the current commit the mutable "v4" tag resolves to as of 2026-07-22)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+      # gitleaks-action v2.3.9 (latest explicitly tagged 2.x release as of 2026-07-22).
+      # On a push event this scans the pushed commits; on a pull_request event it scans the
+      # PR diff against base. fetch-depth: 0 makes full history available to the action but
+      # does not itself force a full-history scan on every run — see docs/secret-scanning.md
+      # for how to run a guaranteed full-history scan.
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.1"
+
+  foundation-checks:
+    name: Foundation checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write # required for reviewdog's github-check reporter to post a Check Run
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # actionlint v1.73.0 — validates this workflow file's own syntax and common mistakes
+      # reporter: github-check posts via the Checks API against the commit SHA, not a PR —
+      # unlike github-pr-check/github-pr-review, it behaves identically on push and pull_request.
+      # fail_level: error makes this step (and therefore the job) exit non-zero on any lint error,
+      # regardless of event type or reporter.
+      - name: Lint workflow syntax
+        uses: reviewdog/action-actionlint@50842263c20a7c46bd0065b9e624d3c569db061e # v1.73.0
+        with:
+          reporter: github-check
+          fail_level: error
+
+      # lychee-action v2.9.0 — actively maintained link checker; replaces the archived
+      # gaurav-nelson/github-action-markdown-link-check
+      - name: Check markdown links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --config .github/lychee.toml "*.md" "**/*.md"
+          fail: true
+
+      - name: Run foundation verification checks
+        run: bash scripts/verify-foundation.sh
 
   # Placeholder — filled in once backend/app exists (Phase 1).
+  # Do not copy-paste a mutable version tag here — look up and pin a real commit SHA
+  # for each action at the time this is enabled, the same way the jobs above do.
   # backend:
   #   name: Backend (Python / FastAPI)
   #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: read
   #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
+  #     - uses: actions/checkout@<pin-a-real-sha-before-enabling>
+  #     - uses: actions/setup-python@<pin-a-real-sha-before-enabling>
   #       with:
   #         python-version: "3.12"
   #     - run: pip install -r backend/requirements.txt
   #     - run: pytest backend
 
   # Placeholder — filled in once apps/desktop exists (Phase 1).
+  # Do not copy-paste a mutable version tag here — look up and pin a real commit SHA
+  # for each action at the time this is enabled, the same way the jobs above do.
   # frontend:
   #   name: Frontend (Electron / React / TypeScript)
   #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: read
   #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-node@v4
+  #     - uses: actions/checkout@<pin-a-real-sha-before-enabling>
+  #     - uses: actions/setup-node@<pin-a-real-sha-before-enabling>
   #       with:
   #         node-version: "20"
   #     - run: npm ci --prefix apps/desktop

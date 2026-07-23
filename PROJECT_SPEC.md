@@ -62,21 +62,26 @@ Live trading will remain disabled until:
 
 ### 2.3 AI Never Directly Controls the Broker
 
-The AI may propose trades.
+The AI may create or explain a Trade Proposal.
 
-Every trade must pass through:
+Every trade must pass through the canonical TradeValidationPipeline, defined once in ARCHITECTURE.md §14 and repeated here exactly:
 
-1. Signal validation
-2. Strategy validation
-3. Risk engine
-4. Permissions engine
-5. Portfolio exposure checks
-6. Buying-power checks
-7. Market-condition checks
-8. Execution validation
-9. Broker adapter
+```
+AI / Strategy Engine
+→ Trade Proposal
+→ Signal Validator
+→ Strategy Validation
+→ Risk Engine
+→ Permissions Engine
+→ Portfolio / Exposure Checks
+→ Buying Power Checks
+→ Market Condition Checks
+→ Order Validation
+→ Execution Engine
+→ Broker Adapter
+```
 
-AI may never bypass these systems.
+AI has no authority to bypass any stage, and no authority to directly access or call the Execution Engine or Broker Adapter under any circumstance.
 
 ---
 
@@ -535,19 +540,29 @@ Examples of rejection reasons:
 
 Initial execution mode is paper only.
 
-Pipeline:
+Every trade passes through the canonical TradeValidationPipeline (ARCHITECTURE.md §14), repeated here exactly:
 
-Strategy / AI
+```
+AI / Strategy Engine
 → Trade Proposal
 → Signal Validator
+→ Strategy Validation
 → Risk Engine
 → Permissions Engine
-→ Portfolio Check
-→ Paper Broker
-→ Position Monitoring
-→ Exit Logic
-→ Trade Journal
-→ Performance Update
+→ Portfolio / Exposure Checks
+→ Buying Power Checks
+→ Market Condition Checks
+→ Order Validation
+→ Execution Engine
+→ Broker Adapter
+```
+
+Once past the Broker Adapter (which resolves to the Paper Broker implementation in Phase 7), paper-specific post-trade stages follow:
+
+1. Position Monitoring
+2. Exit Logic
+3. Trade Journal
+4. Performance Update
 
 ---
 
@@ -645,9 +660,23 @@ Potential features include:
 
 ## 23. AI Architecture
 
+### AI Provider Abstraction
+
+DarkSage must support multiple AI providers behind a single common interface, so providers can be added, replaced, or removed without rewriting business logic.
+
+Initial supported providers:
+
+- Local models (default)
+- OpenAI
+- Anthropic
+- Google Gemini
+- Custom OpenAI-compatible endpoints
+
+Users configure cloud providers with their own API keys. DarkSage does not bundle, subsidize, or require cloud AI usage.
+
 ### Local AI
 
-Default mode.
+Default and preferred mode.
 
 Uses local models for:
 
@@ -660,10 +689,11 @@ Uses local models for:
 Goal:
 
 - No token cost for routine analysis
+- The application must work fully with no cloud AI provider configured
 
 ### Cloud AI
 
-Optional.
+Optional. User-configured, using the user's own API key.
 
 Used for:
 
@@ -673,7 +703,26 @@ Used for:
 - Macro synthesis
 - Earnings transcript analysis
 
-Cloud AI must never be required for basic operation.
+Cloud AI must never be required for basic operation. Cloud AI must never be required for deterministic scanning, indicators, risk calculations, backtesting, portfolio math, or trade validation — these remain deterministic local code regardless of which AI providers are configured.
+
+### Per-Feature Provider Selection
+
+Users may independently select the provider and model used for each AI feature, including:
+
+- Sage chat
+- Deep signal analysis
+- Research / news summaries
+- Strategy explanations
+
+Changing the provider/model for one feature must not affect the others. Configuration is authoritative in the backend, not the client.
+
+### Credential Handling
+
+See SECURITY_RULES.md for full requirements. Summary:
+
+- API keys are never committed, logged, or exposed in frontend/client source.
+- Production credentials use secure OS/application credential storage or an encrypted secrets vault, not plaintext, where avoidable.
+- No AI provider may bypass or shortcut the canonical TradeValidationPipeline (Section 2.3; full definition ARCHITECTURE.md §14), regardless of which provider generated the proposal. No provider may directly access or call the Execution Engine or Broker Adapter.
 
 ---
 
@@ -847,7 +896,8 @@ Database:
 AI:
 - Local-first
 - llama.cpp / compatible runtime
-- Optional cloud AI
+- Pluggable provider interface (OpenAI, Anthropic, Google Gemini, custom OpenAI-compatible endpoints, local)
+- Optional cloud AI, user-supplied API keys
 
 Source Control:
 - GitHub

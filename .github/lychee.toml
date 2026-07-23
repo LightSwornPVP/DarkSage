@@ -1,0 +1,8 @@
+exclude = [
+  "^http://localhost",
+  "^https://localhost",
+]
+retry_wait_time = 2
+max_retries = 2
+timeout = 10
+accept = [200, 206, 429]
