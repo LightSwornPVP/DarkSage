@@ -25,6 +25,7 @@ from backend.app.backtesting.errors import (
     InvalidBacktestConfigError,
     InvalidExecutionConfigError,
     InvalidHistoryError,
+    InvalidPartitionError,
 )
 from backend.app.backtesting.execution import ExecutionSimulator, SimulatedFill
 from backend.app.backtesting.metrics import (
@@ -34,6 +35,16 @@ from backend.app.backtesting.metrics import (
     compute_trade_excursion,
 )
 from backend.app.backtesting.portfolio import Portfolio
+from backend.app.backtesting.validation import (
+    DatePartition,
+    WalkForwardResult,
+    WalkForwardWindow,
+    WalkForwardWindowResult,
+    generate_walk_forward_windows,
+    run_walk_forward,
+    split_periods,
+    validate_no_overlap,
+)
 from backend.app.backtesting.types import (
     FLAT_POSITION,
     BacktestResult,
@@ -52,6 +63,7 @@ __all__ = [
     "BacktestRun",
     "BacktestStep",
     "CostConfig",
+    "DatePartition",
     "EquityObservation",
     "ExecutionConfig",
     "ExecutionSimulator",
@@ -60,6 +72,7 @@ __all__ = [
     "InvalidBacktestConfigError",
     "InvalidExecutionConfigError",
     "InvalidHistoryError",
+    "InvalidPartitionError",
     "PerformanceMetrics",
     "Portfolio",
     "PositionSizingConfig",
@@ -68,9 +81,16 @@ __all__ = [
     "SimulatedTrade",
     "StrategyParameterValue",
     "TradeExcursion",
+    "WalkForwardResult",
+    "WalkForwardWindow",
+    "WalkForwardWindowResult",
     "compute_performance_metrics",
     "compute_run_id",
     "compute_trade_excursion",
+    "generate_walk_forward_windows",
     "iter_backtest_steps",
+    "run_walk_forward",
+    "split_periods",
     "validate_backtest_history",
+    "validate_no_overlap",
 ]

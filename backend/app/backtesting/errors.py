@@ -31,3 +31,10 @@ class InsufficientHistoryError(BacktestError):
 class InvalidExecutionConfigError(BacktestError):
     """A cost/execution configuration is ambiguous or invalid (e.g. a
     negative commission rate, an unrecognized fill-timing rule)."""
+
+
+class InvalidPartitionError(BacktestError):
+    """A date partition (train/validation/test, or a walk-forward window)
+    is malformed, overlaps another partition, or cannot be constructed
+    from the given bounds — e.g. windows that don't fit, or an
+    out-of-sample period that overlaps its own in-sample period."""
