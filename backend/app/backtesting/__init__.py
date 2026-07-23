@@ -46,6 +46,7 @@ from backend.app.backtesting.comparison import (
     compare_two,
 )
 from backend.app.backtesting.portfolio import Portfolio
+from backend.app.backtesting.replay import HistoricalReplay, ReplaySnapshot, ReplayState
 from backend.app.backtesting.robustness import (
     MonteCarloConfig,
     MonteCarloResult,
@@ -88,6 +89,7 @@ __all__ = [
     "DatePartition",
     "ExperimentEntry",
     "ExperimentRegistry",
+    "HistoricalReplay",
     "EquityObservation",
     "ExecutionConfig",
     "ExecutionSimulator",
@@ -107,6 +109,8 @@ __all__ = [
     "PositionSizingConfig",
     "PositionState",
     "RankedEntry",
+    "ReplaySnapshot",
+    "ReplayState",
     "SimulatedFill",
     "SimulatedTrade",
     "StrategyParameterValue",
