@@ -1,0 +1,73 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / JavaScript
+node_modules/
+dist/
+build/
+out/
+.next/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Electron
+release/
+*.asar
+
+# Databases / local data
+*.db
+*.sqlite
+*.sqlite3
+data/local/
+data/cache/
+
+# AI models
+models/
+*.gguf
+*.onnx
+*.bin
+
+# IDE / OS
+.vscode/settings.local.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Credentials / keys
+*.pem
+*.key
+*.p12
+*.pfx
+credentials/
+secrets/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Local test artifacts
+artifacts/
+reports/local/
