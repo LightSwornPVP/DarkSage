@@ -14,18 +14,43 @@ from backend.app.scanner.filters import (
     PriceRangeFilter,
 )
 from backend.app.scanner.scanner import Scanner
-from backend.app.scanner.types import FilterOutcome, ScanCandidate, ScanContext, ScanResult
+from backend.app.scanner.scoring import (
+    LiquidityQualityComponent,
+    MomentumComponent,
+    ScanScorer,
+    ScoreComponentFn,
+    TrendStructureComponent,
+    VolatilityContextComponent,
+    VolumeParticipationComponent,
+)
+from backend.app.scanner.types import (
+    FilterOutcome,
+    ScanCandidate,
+    ScanContext,
+    ScanResult,
+    ScanScore,
+    ScoreComponent,
+)
 
 __all__ = [
     "Filter",
     "FilterOutcome",
     "IndicatorRangeFilter",
     "LiquidityFilter",
+    "LiquidityQualityComponent",
     "MinimumVolumeFilter",
+    "MomentumComponent",
     "MovingAverageAlignmentFilter",
     "PriceRangeFilter",
     "ScanCandidate",
     "ScanContext",
     "ScanResult",
+    "ScanScore",
+    "ScanScorer",
     "Scanner",
+    "ScoreComponent",
+    "ScoreComponentFn",
+    "TrendStructureComponent",
+    "VolatilityContextComponent",
+    "VolumeParticipationComponent",
 ]
