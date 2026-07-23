@@ -21,10 +21,16 @@ from shared.models.candle import Candle
 _HUNDRED = Decimal(100)
 
 
+_FIFTY = Decimal(50)
+
+
 def _rsi_from_averages(avg_gain: Decimal, avg_loss: Decimal) -> Decimal:
+    if avg_gain == 0 and avg_loss == 0:
+        # A fully flat window: no gains and no losses is neutral/no-momentum,
+        # not maximum strength — 50, not 100.
+        return _FIFTY
     if avg_loss == 0:
-        # No losses in the window (including the all-flat case) — maximum
-        # strength reading, not a division by zero.
+        # No losses, but some gains — maximum strength, not a division by zero.
         return _HUNDRED
     relative_strength = avg_gain / avg_loss
     return _HUNDRED - (_HUNDRED / (Decimal(1) + relative_strength))

@@ -4,13 +4,16 @@ credentials) with canned CSV fixtures matching stooq.com's documented format.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
-from backend.app.market_data.errors import ProviderDataError, ProviderUnsupportedOperationError, StaleDataError
+from backend.app.market_data.errors import ProviderDataError, ProviderUnsupportedOperationError
+from backend.app.market_data.last_price import LastPrice, ensure_freshness_eligible
 from backend.app.market_data.providers.stooq import StooqProvider
 from shared.models.candle import Timeframe
+from shared.models.quote import Quote
 
 QUOTE_CSV = (
     "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
@@ -64,44 +67,69 @@ def test_provider_name() -> None:
     assert _make_provider(transport=_FakeTransport()).name == "stooq"
 
 
-async def test_get_quote_parses_and_normalizes() -> None:
-    transport = _FakeTransport(quote_csv=QUOTE_CSV)
-    provider = _make_provider(transport=transport)
-
-    quote = await provider.get_quote("aapl")
-
-    assert quote.symbol == "AAPL"  # canonical symbol, not the vendor-suffixed one
-    assert quote.last.__class__.__name__ == "Decimal"
-    assert str(quote.last) == "191.0000"
-    assert quote.bid == quote.ask == quote.last  # stooq has no real bid/ask (see module docstring)
-    assert quote.timestamp == datetime(2026, 1, 1, 21, 59, 59, tzinfo=timezone.utc)
-    assert "aapl.us" in transport.urls[0]
+# --- get_quote: Stooq has no real bid/ask, so it must not exist as a Quote
+# (blocker 2) — the provider must fail closed instead of fabricating a spread.
 
 
-async def test_get_quote_raises_provider_data_error_on_no_data() -> None:
-    provider = _make_provider(transport=_FakeTransport(quote_csv=QUOTE_CSV_NO_DATA))
-    with pytest.raises(ProviderDataError):
-        await provider.get_quote("nope")
-
-
-async def test_get_quote_raises_stale_data_error_when_too_old() -> None:
-    provider = _make_provider(
-        transport=_FakeTransport(quote_csv=QUOTE_CSV),
-        max_quote_age=timedelta(hours=1),
-        clock=lambda: datetime(2026, 1, 1, 23, 59, 59, tzinfo=timezone.utc),
-    )
-    with pytest.raises(StaleDataError):
+async def test_get_quote_is_not_supported_and_never_fabricates_a_spread() -> None:
+    provider = _make_provider(transport=_FakeTransport(quote_csv=QUOTE_CSV))
+    with pytest.raises(ProviderUnsupportedOperationError):
         await provider.get_quote("aapl")
 
 
-async def test_get_quote_accepts_fresh_data_within_max_age() -> None:
-    provider = _make_provider(
-        transport=_FakeTransport(quote_csv=QUOTE_CSV),
-        max_quote_age=timedelta(hours=1),
-        clock=lambda: datetime(2026, 1, 1, 22, 30, 0, tzinfo=timezone.utc),
+def test_stooq_provider_has_no_way_to_produce_a_quote_object() -> None:
+    # Structural check, not just behavioral: nothing in this module builds a
+    # Quote from Stooq data at all (no normalize_quote/RawQuote usage left).
+    import inspect
+
+    import backend.app.market_data.providers.stooq as stooq_module
+
+    source = inspect.getsource(stooq_module)
+    assert "normalize_quote" not in source
+    assert "RawQuote" not in source
+
+
+# --- get_last_price: the honest, structurally distinct replacement ---
+
+
+async def test_get_last_price_parses_and_normalizes() -> None:
+    transport = _FakeTransport(quote_csv=QUOTE_CSV)
+    provider = _make_provider(transport=transport)
+
+    last_price = await provider.get_last_price("aapl")
+
+    assert isinstance(last_price, LastPrice)
+    assert not isinstance(last_price, Quote)  # structurally distinct — never masquerades as a real Quote
+    assert last_price.symbol == "AAPL"  # canonical symbol, not the vendor-suffixed one
+    assert str(last_price.price) == "191.0000"
+    assert last_price.timestamp == datetime(2026, 1, 1, 21, 59, 59, tzinfo=timezone.utc)
+    assert last_price.timestamp_basis == "unverified"  # Stooq's timezone is not documented
+    assert "aapl.us" in transport.urls[0]
+
+
+async def test_get_last_price_raises_provider_data_error_on_no_data() -> None:
+    provider = _make_provider(transport=_FakeTransport(quote_csv=QUOTE_CSV_NO_DATA))
+    with pytest.raises(ProviderDataError):
+        await provider.get_last_price("nope")
+
+
+async def test_get_last_price_timestamp_basis_fails_freshness_eligibility() -> None:
+    provider = _make_provider(transport=_FakeTransport(quote_csv=QUOTE_CSV))
+    last_price = await provider.get_last_price("aapl")
+    # Unsafe/unknown timestamp semantics must never pass a freshness check —
+    # there is no bypass for "unverified" data, by design.
+    with pytest.raises(ProviderDataError):
+        ensure_freshness_eligible(last_price)
+
+
+def test_ensure_freshness_eligible_accepts_verified_basis() -> None:
+    verified = LastPrice(
+        symbol="AAPL",
+        price=Decimal("100"),
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        timestamp_basis="verified",
     )
-    quote = await provider.get_quote("aapl")
-    assert quote.symbol == "AAPL"
+    ensure_freshness_eligible(verified)  # must not raise
 
 
 async def test_get_historical_candles_filters_by_range() -> None:

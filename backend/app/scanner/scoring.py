@@ -27,6 +27,7 @@ from backend.app.scanner.types import (
     ScanResult,
     ScanScore,
     ScoreComponent,
+    current_indicator_point,
     latest_single_indicator_value,
 )
 
@@ -59,8 +60,14 @@ class TrendStructureComponent:
         return f"trend_{self._fast_indicator}_{self._slow_indicator}"
 
     def compute(self, candidate: ScanCandidate) -> Decimal | None:
-        fast_value = latest_single_indicator_value(candidate.indicators, self._fast_indicator)
-        slow_value = latest_single_indicator_value(candidate.indicators, self._slow_indicator)
+        if candidate.latest_candle is None:
+            return None
+        fast_value = latest_single_indicator_value(
+            candidate.indicators, self._fast_indicator, candidate.latest_candle
+        )
+        slow_value = latest_single_indicator_value(
+            candidate.indicators, self._slow_indicator, candidate.latest_candle
+        )
         if fast_value is None or slow_value is None or slow_value == 0:
             return None
         return (fast_value - slow_value) / slow_value * Decimal(100)
@@ -78,10 +85,12 @@ class MomentumComponent:
         return f"momentum_{self._rsi_indicator}"
 
     def compute(self, candidate: ScanCandidate) -> Decimal | None:
-        result = candidate.indicators.get(self._rsi_indicator)
-        if result is None or result.latest is None:
+        if candidate.latest_candle is None:
             return None
-        rsi = result.latest.values.get("rsi")
+        point = current_indicator_point(candidate.indicators, self._rsi_indicator, candidate.latest_candle)
+        if point is None:
+            return None
+        rsi = point.values.get("rsi")
         if rsi is None:
             return None
         return rsi - Decimal(50)
@@ -99,10 +108,12 @@ class VolumeParticipationComponent:
         return f"volume_{self._rvol_indicator}"
 
     def compute(self, candidate: ScanCandidate) -> Decimal | None:
-        result = candidate.indicators.get(self._rvol_indicator)
-        if result is None or result.latest is None:
+        if candidate.latest_candle is None:
             return None
-        rvol = result.latest.values.get("rvol")
+        point = current_indicator_point(candidate.indicators, self._rvol_indicator, candidate.latest_candle)
+        if point is None:
+            return None
+        rvol = point.values.get("rvol")
         if rvol is None:
             return None
         return (rvol - Decimal(1)) * Decimal(100)
@@ -127,10 +138,10 @@ class VolatilityContextComponent:
     def compute(self, candidate: ScanCandidate) -> Decimal | None:
         if candidate.latest_candle is None or candidate.latest_candle.close == 0:
             return None
-        result = candidate.indicators.get(self._atr_indicator)
-        if result is None or result.latest is None:
+        point = current_indicator_point(candidate.indicators, self._atr_indicator, candidate.latest_candle)
+        if point is None:
             return None
-        atr = result.latest.values.get("atr")
+        atr = point.values.get("atr")
         if atr is None:
             return None
         atr_percent_of_price = atr / candidate.latest_candle.close * Decimal(100)

@@ -14,7 +14,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Literal, Protocol
 
-from backend.app.scanner.types import FilterOutcome, ScanContext, latest_single_indicator_value
+from backend.app.scanner.types import (
+    FilterOutcome,
+    ScanContext,
+    current_indicator_point,
+    latest_single_indicator_value,
+)
 
 
 class Filter(Protocol):
@@ -108,10 +113,12 @@ class IndicatorRangeFilter:
         return f"{self._indicator_name}_{self._value_key}_range"
 
     def evaluate(self, context: ScanContext) -> FilterOutcome:
-        result = context.indicators.get(self._indicator_name)
-        if result is None or result.latest is None:
-            return FilterOutcome(passed=False, reason=f"missing indicator data for {self._indicator_name}")
-        value = result.latest.values.get(self._value_key)
+        point = current_indicator_point(context.indicators, self._indicator_name, context.latest_candle)
+        if point is None:
+            return FilterOutcome(
+                passed=False, reason=f"missing current indicator data for {self._indicator_name}"
+            )
+        value = point.values.get(self._value_key)
         if value is None:
             return FilterOutcome(
                 passed=False, reason=f"{self._indicator_name} has no value '{self._value_key}'"
@@ -148,8 +155,12 @@ class MovingAverageAlignmentFilter:
         return f"ma_alignment_{self._fast_indicator}_{self._direction}_{self._slow_indicator}"
 
     def evaluate(self, context: ScanContext) -> FilterOutcome:
-        fast_value = latest_single_indicator_value(context.indicators, self._fast_indicator)
-        slow_value = latest_single_indicator_value(context.indicators, self._slow_indicator)
+        fast_value = latest_single_indicator_value(
+            context.indicators, self._fast_indicator, context.latest_candle
+        )
+        slow_value = latest_single_indicator_value(
+            context.indicators, self._slow_indicator, context.latest_candle
+        )
         if fast_value is None or slow_value is None:
             return FilterOutcome(
                 passed=False,

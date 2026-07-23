@@ -56,14 +56,14 @@ class RawQuote:
     volume: RawNumeric | None = None
 
 
-def _normalize_symbol(symbol: str) -> str:
+def normalize_symbol(symbol: str) -> str:
     stripped = symbol.strip()
     if not stripped:
         raise NormalizationError("symbol is empty after trimming whitespace")
     return stripped.upper()
 
 
-def _to_decimal(value: RawNumeric, *, field: str) -> Decimal:
+def to_decimal(value: RawNumeric, *, field: str) -> Decimal:
     """Convert a raw numeric value to Decimal without ever routing a float
     through ``Decimal(float)``, which would bake in binary floating-point
     representation error."""
@@ -99,14 +99,14 @@ def normalize_candle(raw: RawCandle) -> Candle:
     timestamp normalization to UTC) are enforced by ``Candle`` itself.
     """
     return Candle(
-        symbol=_normalize_symbol(raw.symbol),
+        symbol=normalize_symbol(raw.symbol),
         timeframe=raw.timeframe,
         timestamp=raw.timestamp,
-        open=_to_decimal(raw.open, field="open"),
-        high=_to_decimal(raw.high, field="high"),
-        low=_to_decimal(raw.low, field="low"),
-        close=_to_decimal(raw.close, field="close"),
-        volume=_to_decimal(raw.volume, field="volume"),
+        open=to_decimal(raw.open, field="open"),
+        high=to_decimal(raw.high, field="high"),
+        low=to_decimal(raw.low, field="low"),
+        close=to_decimal(raw.close, field="close"),
+        volume=to_decimal(raw.volume, field="volume"),
     )
 
 
@@ -117,10 +117,10 @@ def normalize_quote(raw: RawQuote) -> Quote:
     normalization to UTC) are enforced by ``Quote`` itself.
     """
     return Quote(
-        symbol=_normalize_symbol(raw.symbol),
+        symbol=normalize_symbol(raw.symbol),
         timestamp=raw.timestamp,
-        bid=_to_decimal(raw.bid, field="bid"),
-        ask=_to_decimal(raw.ask, field="ask"),
-        last=_to_decimal(raw.last, field="last"),
-        volume=_to_decimal(raw.volume, field="volume") if raw.volume is not None else None,
+        bid=to_decimal(raw.bid, field="bid"),
+        ask=to_decimal(raw.ask, field="ask"),
+        last=to_decimal(raw.last, field="last"),
+        volume=to_decimal(raw.volume, field="volume") if raw.volume is not None else None,
     )

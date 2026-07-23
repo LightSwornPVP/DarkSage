@@ -1,5 +1,5 @@
-"""Tests for the scanner foundation: fail-safe behavior, filters, and
-deterministic evaluation over a small synthetic universe."""
+"""Tests for the scanner foundation: fail-safe behavior, filters, symbol
+validation, and deterministic evaluation over a small synthetic universe."""
 
 from __future__ import annotations
 
@@ -65,6 +65,11 @@ def _build_scanner(**scanner_kwargs: object) -> Scanner:
         MovingAverageAlignmentFilter("sma_2", "sma_4", direction="above"),
     ]
     kwargs: dict[str, object] = dict(indicator_names=["sma_2", "sma_4", "rsi_4"], filters=filters)
+    # These tests use fixed 2026 dates unrelated to wall-clock time, and are
+    # not testing freshness — the freshness *behavior itself* is covered by
+    # test_scan_fails_safe_on_stale_data below, which explicitly overrides
+    # this back to False so the real check runs.
+    kwargs.setdefault("allow_stale_data_for_testing", True)
     kwargs.update(scanner_kwargs)
     return Scanner(engine, **kwargs)  # type: ignore[arg-type]
 
@@ -96,7 +101,16 @@ def test_scan_fails_safe_on_invalid_data() -> None:
     scanner = _build_scanner()
     candles = _uptrend()
     reversed_candles = list(reversed(candles))  # non-increasing timestamps
-    result = scanner.scan({"BAD": reversed_candles})
+    result = scanner.scan({"AAPL": reversed_candles})
+    candidate = result.candidates[0]
+    assert candidate.eligible is False
+    assert any("invalid_data" in reason for reason in candidate.block_reasons)
+
+
+def test_scan_fails_safe_on_mixed_symbol_series() -> None:
+    scanner = _build_scanner()
+    mixed = [_candle(0, "100", symbol="AAPL"), _candle(1, "101", symbol="MSFT")]
+    result = scanner.scan({"AAPL": mixed})
     candidate = result.candidates[0]
     assert candidate.eligible is False
     assert any("invalid_data" in reason for reason in candidate.block_reasons)
@@ -104,7 +118,7 @@ def test_scan_fails_safe_on_invalid_data() -> None:
 
 def test_scan_fails_safe_on_insufficient_history() -> None:
     scanner = _build_scanner()
-    result = scanner.scan({"SHORT": _uptrend(n=2)})  # sma_4/rsi_4 need more than 2 candles
+    result = scanner.scan({"SHORT": _uptrend(n=2, symbol="SHORT")})  # sma_4/rsi_4 need more candles
     candidate = result.candidates[0]
     assert candidate.eligible is False
     assert any("insufficient_history" in reason for reason in candidate.block_reasons)
@@ -114,6 +128,50 @@ def test_scan_fails_safe_on_stale_data() -> None:
     scanner = _build_scanner(
         max_data_age=timedelta(days=1),
         clock=lambda: BASE + timedelta(days=100),
+        allow_stale_data_for_testing=False,
+    )
+    result = scanner.scan({"AAPL": _uptrend()})
+    candidate = result.candidates[0]
+    assert candidate.eligible is False
+    assert any("stale_data" in reason for reason in candidate.block_reasons)
+
+
+def test_scan_rejects_stale_data_by_default_with_no_override() -> None:
+    # No max_data_age, no allow_stale_data_for_testing override, and a clock
+    # far in the future relative to the candle data: freshness must still be
+    # enforced using the auto-derived per-timeframe default.
+    scanner = Scanner(
+        IndicatorEngine(IndicatorRegistry()),
+        indicator_names=[],
+        filters=[],
+        clock=lambda: BASE + timedelta(days=365),
+    )
+    result = scanner.scan({"AAPL": _uptrend()})
+    candidate = result.candidates[0]
+    assert candidate.eligible is False
+    assert any("stale_data" in reason for reason in candidate.block_reasons)
+
+
+def test_scan_accepts_fresh_data_by_default() -> None:
+    latest_timestamp = _uptrend()[-1].timestamp
+    scanner = Scanner(
+        IndicatorEngine(IndicatorRegistry()),
+        indicator_names=[],
+        filters=[],
+        clock=lambda: latest_timestamp + timedelta(hours=1),
+    )
+    result = scanner.scan({"AAPL": _uptrend()})
+    candidate = result.candidates[0]
+    assert not any("stale_data" in reason for reason in candidate.block_reasons)
+
+
+def test_scan_rejects_future_dated_latest_candle() -> None:
+    latest_timestamp = _uptrend()[-1].timestamp
+    scanner = Scanner(
+        IndicatorEngine(IndicatorRegistry()),
+        indicator_names=[],
+        filters=[],
+        clock=lambda: latest_timestamp - timedelta(days=10),  # candle is "in the future"
     )
     result = scanner.scan({"AAPL": _uptrend()})
     candidate = result.candidates[0]
@@ -130,7 +188,7 @@ def test_price_range_filter_blocks_low_price() -> None:
 
 
 def test_minimum_volume_filter_blocks_low_volume() -> None:
-    candles = [_candle(i, str(100 + i), volume="1") for i in range(5)]
+    candles = [_candle(i, str(100 + i), volume="1", symbol="LOWVOL") for i in range(5)]
     scanner = _build_scanner(filters=[MinimumVolumeFilter(Decimal("1000"))], indicator_names=[])
     result = scanner.scan({"LOWVOL": candles})
     assert result.candidates[0].eligible is False
@@ -138,7 +196,7 @@ def test_minimum_volume_filter_blocks_low_volume() -> None:
 
 def test_moving_average_alignment_blocks_downtrend() -> None:
     scanner = _build_scanner()
-    downtrend = [_candle(i, str(120 - i)) for i in range(10)]
+    downtrend = [_candle(i, str(120 - i), symbol="DOWN") for i in range(10)]
     result = scanner.scan({"DOWN": downtrend})
     candidate = result.candidates[0]
     assert candidate.eligible is False
@@ -151,3 +209,33 @@ def test_scan_is_deterministic() -> None:
     first = scanner.scan(universe)
     second = scanner.scan(universe)
     assert first == second
+
+
+# --- Universe symbol must match candle data symbol (blocker 5) ---
+
+
+def test_scan_accepts_matching_universe_key_and_candle_symbol() -> None:
+    scanner = _build_scanner()
+    result = scanner.scan({"AAPL": _uptrend(symbol="AAPL")})
+    assert result.candidates[0].symbol == "AAPL"
+    assert not any("symbol_mismatch" in reason for reason in result.candidates[0].block_reasons)
+
+
+def test_scan_rejects_universe_key_symbol_mismatch() -> None:
+    scanner = _build_scanner()
+    # Universe says "AAPL" but every candle in the series is actually "MSFT".
+    result = scanner.scan({"AAPL": _uptrend(symbol="MSFT")})
+    candidate = result.candidates[0]
+    assert candidate.eligible is False
+    assert candidate.latest_candle is None
+    assert any("symbol_mismatch" in reason for reason in candidate.block_reasons)
+
+
+def test_scan_normalizes_case_and_whitespace_for_symbol_match() -> None:
+    scanner = _build_scanner()
+    # Candle.symbol is normalized to "AAPL" by the domain model itself; the
+    # universe key here is deliberately lowercase and padded with whitespace.
+    result = scanner.scan({"  aapl  ": _uptrend(symbol="AAPL")})
+    candidate = result.candidates[0]
+    assert candidate.symbol == "AAPL"
+    assert not any("symbol_mismatch" in reason for reason in candidate.block_reasons)

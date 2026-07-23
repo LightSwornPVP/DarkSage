@@ -27,6 +27,7 @@ from backend.app.market_data.errors import (
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
+from backend.app.market_data.rate_limit import RateLimiter
 
 # Errors from a single attempt that are worth retrying: transient network or
 # server-side conditions. A ProviderDataError (bad payload from a request
@@ -74,6 +75,7 @@ async def fetch_with_retry(
     max_attempts: int = 3,
     backoff_base_seconds: float = 0.5,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    rate_limiter: RateLimiter | None = None,
 ) -> str:
     """Fetch ``url`` via ``transport``, retrying retryable failures with
     exponential backoff (``backoff_base_seconds * 2**attempt_index``).
@@ -81,12 +83,18 @@ async def fetch_with_retry(
     ``max_attempts`` is the total number of tries, including the first —
     ``max_attempts=1`` disables retrying. Non-retryable errors
     (``ProviderDataError``) propagate immediately on the first occurrence.
+
+    If ``rate_limiter`` is given, it is acquired before *every* attempt —
+    including retries — so a retried request cannot bypass the limiter just
+    because the first attempt already paid its wait.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
 
     last_error: ProviderError | None = None
     for attempt_index in range(max_attempts):
+        if rate_limiter is not None:
+            await rate_limiter.acquire()
         try:
             return await asyncio.to_thread(transport.fetch, url, timeout=timeout)
         except _RETRYABLE_ERRORS as exc:

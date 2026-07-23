@@ -20,7 +20,16 @@ class RateLimiter(Protocol):
 
 
 class IntervalRateLimiter:
-    """Enforces a minimum interval between successive ``acquire()`` calls.
+    """Enforces a minimum interval between successive ``acquire()`` calls,
+    safely under concurrent async callers.
+
+    An internal lock serializes ``acquire()`` end-to-end (read last-acquired
+    time, sleep if needed, record the new last-acquired time) so concurrent
+    callers cannot both observe the same "it's been long enough" state and
+    pass through together. The lock is only ever held inside ``acquire()``
+    and never awaits anything that could re-enter it, so it cannot deadlock;
+    ``async with`` releases it even if ``sleep`` raises or the caller is
+    cancelled, so one failed caller never permanently blocks the rest.
 
     ``clock``/``sleep`` are injectable so tests can verify throttling
     behavior deterministically, without real wall-clock delays.
@@ -39,11 +48,13 @@ class IntervalRateLimiter:
         self._clock = clock
         self._sleep = sleep
         self._last_acquired_at: float | None = None
+        self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        now = self._clock()
-        if self._last_acquired_at is not None:
-            wait_for = self._min_interval_seconds - (now - self._last_acquired_at)
-            if wait_for > 0:
-                await self._sleep(wait_for)
-        self._last_acquired_at = self._clock()
+        async with self._lock:
+            now = self._clock()
+            if self._last_acquired_at is not None:
+                wait_for = self._min_interval_seconds - (now - self._last_acquired_at)
+                if wait_for > 0:
+                    await self._sleep(wait_for)
+            self._last_acquired_at = self._clock()

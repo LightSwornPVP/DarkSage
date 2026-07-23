@@ -11,13 +11,15 @@ Known limitations of this slice (tracked as backlog, not blockers):
 
 - Only daily (``Timeframe.D1``) candles are supported; Stooq's free tier
   does not reliably offer intraday history.
-- Stooq's free quote endpoint has no real bid/ask — ``bid``/``ask``/``last``
-  are all set to the same last-trade price, so ``Quote.spread`` is always 0.
-- Quote timestamps are treated as UTC. Stooq does not document its
-  timestamp timezone; this should be verified against live traffic before
-  the freshness/staleness check is relied on for time-sensitive decisions.
 - Symbol mapping assumes a plain US-listed equity (``symbol.lower() + ".us"``);
   it does not yet handle other exchanges or class-share suffix conventions.
+
+Quote semantics: Stooq's free endpoint has no real bid/ask and its
+timestamp's timezone is undocumented, so ``get_quote`` does not exist here
+— fabricating ``bid=ask=last`` would misrepresent an unavailable spread as
+real market data. Last-trade-price-only data is available instead via
+``get_last_price``, which returns the structurally distinct ``LastPrice``
+type with ``timestamp_basis="unverified"`` (see ``last_price.py``).
 """
 
 from __future__ import annotations
@@ -26,16 +28,12 @@ import asyncio
 import csv
 import io
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from urllib.parse import quote as url_quote
 
-from backend.app.market_data.errors import (
-    ProviderDataError,
-    ProviderUnsupportedOperationError,
-    StaleDataError,
-)
-from backend.app.market_data.freshness import is_stale
-from backend.app.market_data.normalization import RawCandle, RawQuote, normalize_candle, normalize_quote
+from backend.app.market_data.errors import ProviderDataError, ProviderUnsupportedOperationError
+from backend.app.market_data.last_price import LastPrice
+from backend.app.market_data.normalization import RawCandle, normalize_candle, normalize_symbol, to_decimal
 from backend.app.market_data.provider import MarketDataProvider
 from backend.app.market_data.rate_limit import RateLimiter
 from backend.app.market_data.transport import Transport, UrllibTransport, fetch_with_retry
@@ -57,7 +55,7 @@ def _to_vendor_symbol(symbol: str) -> str:
     return url_quote(f"{symbol.strip().lower()}.us", safe=".")
 
 
-def _parse_stooq_quote_csv(raw_text: str, *, symbol: str) -> RawQuote:
+def _parse_stooq_last_price_csv(raw_text: str, *, symbol: str) -> LastPrice:
     reader = csv.DictReader(io.StringIO(raw_text.strip()))
     try:
         row = next(reader)
@@ -68,7 +66,7 @@ def _parse_stooq_quote_csv(raw_text: str, *, symbol: str) -> RawQuote:
     if missing:
         raise ProviderDataError(f"{symbol}: stooq quote response missing field(s) {missing}")
 
-    if any(row[field].strip() in _NO_DATA_MARKERS for field in ("Open", "High", "Low", "Close")):
+    if row["Close"].strip() in _NO_DATA_MARKERS:
         raise ProviderDataError(f"{symbol}: stooq has no quote data for this symbol")
 
     try:
@@ -77,21 +75,16 @@ def _parse_stooq_quote_csv(raw_text: str, *, symbol: str) -> RawQuote:
         raise ProviderDataError(
             f"{symbol}: unparseable stooq quote timestamp {row['Date']!r} {row['Time']!r}"
         ) from exc
+    # Stooq does not document this timestamp's timezone. Treating it as UTC
+    # here would be a guess presented as fact, so it is explicitly marked
+    # "unverified" instead — see LastPrice / ensure_freshness_eligible.
     timestamp = naive_timestamp.replace(tzinfo=timezone.utc)
 
-    volume_raw = row.get("Volume", "").strip()
-    volume = volume_raw if volume_raw and volume_raw not in _NO_DATA_MARKERS else None
-
-    # Stooq's free snapshot has no real bid/ask — last trade price stands in
-    # for both, so Quote.spread is always 0 for this provider (see module
-    # docstring). This is an honest limitation, not a fabricated spread.
-    return RawQuote(
-        symbol=symbol,
+    return LastPrice(
+        symbol=normalize_symbol(symbol),
+        price=to_decimal(row["Close"], field="price"),
         timestamp=timestamp,
-        bid=row["Close"],
-        ask=row["Close"],
-        last=row["Close"],
-        volume=volume,
+        timestamp_basis="unverified",
     )
 
 
@@ -145,7 +138,6 @@ class StooqProvider(MarketDataProvider):
         timeout_seconds: float = 10.0,
         max_attempts: int = 3,
         backoff_base_seconds: float = 0.5,
-        max_quote_age: timedelta | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -154,7 +146,6 @@ class StooqProvider(MarketDataProvider):
         self._timeout_seconds = timeout_seconds
         self._max_attempts = max_attempts
         self._backoff_base_seconds = backoff_base_seconds
-        self._max_quote_age = max_quote_age
         self._sleep = sleep
         self._clock = clock
 
@@ -163,8 +154,9 @@ class StooqProvider(MarketDataProvider):
         return "stooq"
 
     async def _get(self, url: str) -> str:
-        if self._rate_limiter is not None:
-            await self._rate_limiter.acquire()
+        # rate_limiter is passed through so every attempt — including
+        # retries — acquires it individually; a retry must never bypass the
+        # limiter just because the first attempt already paid its wait.
         return await fetch_with_retry(
             self._transport,
             url,
@@ -172,22 +164,21 @@ class StooqProvider(MarketDataProvider):
             max_attempts=self._max_attempts,
             backoff_base_seconds=self._backoff_base_seconds,
             sleep=self._sleep,
+            rate_limiter=self._rate_limiter,
         )
 
     async def get_quote(self, symbol: str) -> Quote:
+        raise ProviderUnsupportedOperationError(
+            "StooqProvider cannot provide a real bid/ask Quote — its free tier has no "
+            "NBBO data. Use get_last_price() for last-trade-price-only data instead."
+        )
+
+    async def get_last_price(self, symbol: str) -> LastPrice:
+        """Last-trade-price-only data. Not a substitute for a real Quote —
+        see the module docstring and ``LastPrice.timestamp_basis``."""
         url = self._QUOTE_URL_TEMPLATE.format(symbol=_to_vendor_symbol(symbol))
         raw_text = await self._get(url)
-        raw_quote = _parse_stooq_quote_csv(raw_text, symbol=symbol)
-        quote = normalize_quote(raw_quote)
-
-        if self._max_quote_age is not None:
-            now = self._clock()
-            if is_stale(quote.timestamp, max_age=self._max_quote_age, now=now):
-                raise StaleDataError(
-                    f"{symbol}: quote timestamp {quote.timestamp.isoformat()} exceeds "
-                    f"configured max age {self._max_quote_age}"
-                )
-        return quote
+        return _parse_stooq_last_price_csv(raw_text, symbol=symbol)
 
     async def _fetch_daily_candles(self, symbol: str, timeframe: Timeframe) -> list[Candle]:
         if timeframe is not Timeframe.D1:

@@ -109,6 +109,20 @@ def test_rsi_all_gains_is_100() -> None:
     assert result.points[0].values["rsi"] == Decimal("100")
 
 
+def test_rsi_all_losses_is_0() -> None:
+    candles = _simple_series(["104", "103", "102", "101", "100"])
+    result = RSIIndicator(4).compute(candles)
+    assert result.points[0].values["rsi"] == Decimal("0")
+
+
+def test_rsi_fully_flat_series_is_50_not_100() -> None:
+    # blocker 4: avg_gain == 0 and avg_loss == 0 is neutral (50), not
+    # maximum strength (100) — there is no momentum in either direction.
+    candles = _simple_series(["100", "100", "100", "100", "100"])
+    result = RSIIndicator(4).compute(candles)
+    assert result.points[0].values["rsi"] == Decimal("50")
+
+
 def test_rsi_raises_on_insufficient_data() -> None:
     with pytest.raises(InsufficientDataError):
         RSIIndicator(4).compute(_simple_series(["1", "2", "3"]))

@@ -79,6 +79,9 @@ async def test_provider_through_scanner_and_scoring_pipeline() -> None:
             MinimumVolumeFilter(Decimal("500000")),
             IndicatorRangeFilter("rsi_14", "rsi", min_value=Decimal("1"), max_value=Decimal("99")),
         ],
+        # Freshness is on by default (blocker 1) — pin the clock near the
+        # synthetic candles' own dates rather than relying on wall-clock time.
+        clock=lambda: candles[-1].timestamp + timedelta(hours=12),
     )
 
     scan_result = scanner.scan({"AAPL": candles})

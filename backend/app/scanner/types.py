@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.app.indicators.types import IndicatorResult
+from backend.app.indicators.types import IndicatorPoint, IndicatorResult
 from shared.models.candle import Candle
 
 
@@ -24,21 +24,42 @@ class ScanContext:
     indicators: Mapping[str, IndicatorResult]
 
 
-def latest_single_indicator_value(
-    indicators: Mapping[str, IndicatorResult], indicator_name: str
-) -> Decimal | None:
-    """The latest value of a single-valued indicator (e.g. an EMA/SMA's one
-    ``"ema"``/``"sma"`` entry), or None if the indicator is missing, has no
-    points, or the specific key isn't otherwise known.
+def current_indicator_point(
+    indicators: Mapping[str, IndicatorResult], indicator_name: str, latest_candle: Candle
+) -> IndicatorPoint | None:
+    """The indicator's value at exactly ``latest_candle``'s timestamp — the
+    single alignment rule every filter and score component must use.
 
-    Shared by filters (``MovingAverageAlignmentFilter``) and scoring
-    (``TrendStructureComponent``) so both read a moving average's latest
-    value the same way.
+    Returns None (never an older point) if the indicator is missing, has no
+    points, or its most recent computed point belongs to an earlier candle.
+    Indicators like RVOL/CMF/Williams %R can legitimately omit a point for a
+    degenerate current candle (e.g. a flat range); silently reusing their
+    last *available* point would misrepresent a stale reading as current.
     """
     result = indicators.get(indicator_name)
-    if result is None or result.latest is None:
+    if result is None or not result.points:
         return None
-    return next(iter(result.latest.values.values()), None)
+    latest_point = result.points[-1]
+    if latest_point.timestamp != latest_candle.timestamp:
+        return None
+    return latest_point
+
+
+def latest_single_indicator_value(
+    indicators: Mapping[str, IndicatorResult], indicator_name: str, latest_candle: Candle
+) -> Decimal | None:
+    """The current (latest-candle-aligned) value of a single-valued
+    indicator (e.g. an EMA/SMA's one ``"ema"``/``"sma"`` entry), or None if
+    unavailable — see ``current_indicator_point`` for the alignment rule.
+
+    Shared by filters (``MovingAverageAlignmentFilter``) and scoring
+    (``TrendStructureComponent``) so both read a moving average's current
+    value the same way.
+    """
+    point = current_indicator_point(indicators, indicator_name, latest_candle)
+    if point is None:
+        return None
+    return next(iter(point.values.values()), None)
 
 
 @dataclass(frozen=True, slots=True)

@@ -100,3 +100,49 @@ async def test_fetch_with_retry_rejects_non_positive_max_attempts() -> None:
         await fetch_with_retry(
             _FakeTransport(["ok"]), "http://example", timeout=1.0, max_attempts=0, sleep=_no_sleep
         )
+
+
+# --- Rate limiter is acquired per attempt, including retries (blocker 3) ---
+
+
+class _CountingRateLimiter:
+    def __init__(self) -> None:
+        self.acquire_count = 0
+
+    async def acquire(self) -> None:
+        self.acquire_count += 1
+
+
+async def test_fetch_with_retry_acquires_rate_limiter_on_first_attempt() -> None:
+    limiter = _CountingRateLimiter()
+    transport = _FakeTransport(["ok"])
+    await fetch_with_retry(transport, "http://example", timeout=1.0, sleep=_no_sleep, rate_limiter=limiter)
+    assert limiter.acquire_count == 1
+
+
+async def test_fetch_with_retry_acquires_rate_limiter_on_every_retry() -> None:
+    limiter = _CountingRateLimiter()
+    transport = _FakeTransport([ProviderTimeoutError("1"), ProviderTimeoutError("2"), "ok"])
+    await fetch_with_retry(
+        transport, "http://example", timeout=1.0, max_attempts=3, sleep=_no_sleep, rate_limiter=limiter
+    )
+    # Three actual HTTP attempts happened (two failures + one success) -> the
+    # limiter must have been acquired three times, not once for the whole call.
+    assert limiter.acquire_count == 3
+    assert len(transport.calls) == 3
+
+
+async def test_fetch_with_retry_acquires_rate_limiter_even_on_exhausted_retries() -> None:
+    limiter = _CountingRateLimiter()
+    transport = _FakeTransport([ProviderTimeoutError("1"), ProviderTimeoutError("2"), ProviderTimeoutError("3")])
+    with pytest.raises(ProviderTimeoutError):
+        await fetch_with_retry(
+            transport, "http://example", timeout=1.0, max_attempts=3, sleep=_no_sleep, rate_limiter=limiter
+        )
+    assert limiter.acquire_count == 3
+
+
+async def test_fetch_with_retry_without_rate_limiter_does_not_require_one() -> None:
+    transport = _FakeTransport(["ok"])
+    result = await fetch_with_retry(transport, "http://example", timeout=1.0, sleep=_no_sleep, rate_limiter=None)
+    assert result == "ok"
