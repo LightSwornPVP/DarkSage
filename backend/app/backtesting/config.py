@@ -24,6 +24,31 @@ from shared.models.candle import Timeframe
 StrategyParameterValue = Decimal | int | float | str | bool
 
 
+def canonical_parameter_repr(value: StrategyParameterValue) -> str:
+    """A type- and value-preserving canonical string for one strategy
+    parameter value.
+
+    Plain ``==`` is not safe for lineage/config matching: Python considers
+    ``True == 1`` and ``Decimal("1") == 1``, so a bool flag and an int
+    count, or an exact ``Decimal`` and a ``float``/``int``, could silently
+    compare equal even though they can mean different things to a
+    strategy. Prefixing with the concrete runtime type name closes that
+    gap, and ``repr()`` (rather than ``str()``) keeps values that are
+    ``==``-equal but formatted differently — e.g. ``Decimal("1")`` vs
+    ``Decimal("1.0")`` — distinguishable too.
+    """
+    return f"{type(value).__name__}:{value!r}"
+
+
+def canonical_parameters(parameters: Mapping[str, StrategyParameterValue]) -> tuple[tuple[str, str], ...]:
+    """A deterministic, order-independent, type-preserving representation
+    of a parameters mapping — safe to use both for equality comparison
+    (strategy/config lineage matching) and for hashing (deterministic run
+    ids), unlike a plain ``dict`` (``==``-ambiguous across types) or an
+    insertion-ordered ``.items()`` (unstable ordering)."""
+    return tuple(sorted((key, canonical_parameter_repr(value)) for key, value in parameters.items()))
+
+
 @dataclass(frozen=True, slots=True)
 class CostConfig:
     """Trading-cost assumptions. Purely data at this layer — Slice 2.3's

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from backend.app.backtesting.config import BacktestConfig, FillTiming
+from backend.app.backtesting.config import BacktestConfig, FillTiming, canonical_parameters
 from backend.app.backtesting.errors import InvalidBacktestConfigError, InvalidExecutionConfigError
 from backend.app.backtesting.execution.simulator import ExecutionSimulator
 from backend.app.backtesting.history import (
@@ -83,7 +83,7 @@ def _validate_strategy_matches_config(strategy: Strategy, config: BacktestConfig
             f"strategy_version mismatch: strategy is '{strategy.strategy_version}' but config declares "
             f"'{config.strategy_version}'"
         )
-    if dict(strategy.parameters) != dict(config.parameters):
+    if canonical_parameters(strategy.parameters) != canonical_parameters(config.parameters):
         raise InvalidBacktestConfigError(
             f"strategy parameters mismatch: strategy has {dict(strategy.parameters)} but config declares "
             f"{dict(config.parameters)}"

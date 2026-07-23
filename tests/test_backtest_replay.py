@@ -44,6 +44,25 @@ def test_construction_rejects_non_increasing_timestamps() -> None:
         HistoricalReplay([candles[1], candles[0], candles[2]])
 
 
+def test_construction_accepts_homogeneous_single_symbol_single_timeframe() -> None:
+    replay = HistoricalReplay(_candles(3))  # must not raise
+    assert replay.state is ReplayState.STOPPED
+
+
+def test_construction_rejects_mixed_symbols() -> None:
+    candles = _candles(3)
+    mixed = list(candles[:2]) + [candles[2].model_copy(update={"symbol": "MSFT"})]
+    with pytest.raises(ValueError):
+        HistoricalReplay(mixed)
+
+
+def test_construction_rejects_mixed_timeframes() -> None:
+    candles = _candles(3)
+    mixed = list(candles[:2]) + [candles[2].model_copy(update={"timeframe": Timeframe.H1})]
+    with pytest.raises(ValueError):
+        HistoricalReplay(mixed)
+
+
 def test_initial_state_is_stopped_with_no_visible_candles() -> None:
     replay = HistoricalReplay(_candles(3))
     assert replay.state is ReplayState.STOPPED

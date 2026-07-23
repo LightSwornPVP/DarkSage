@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
+from backend.app.backtesting.config import FillTiming
 from backend.app.backtesting.types import BacktestResult, EquityObservation, SimulatedTrade
 from shared.models.candle import Candle, Timeframe
 
@@ -91,6 +92,44 @@ def _sample_std(values: Sequence[Decimal]) -> Decimal | None:
     assert mean is not None
     variance = sum(((value - mean) ** 2 for value in values), start=Decimal(0)) / Decimal(len(values) - 1)
     return variance.sqrt()
+
+
+_MINIMUM_ACCEPTABLE_RETURN = Decimal(0)
+"""The MAR (Minimum Acceptable Return) Sortino's downside deviation is
+measured against. Not currently caller-configurable — every return below
+this threshold counts as "downside", every return at/above it counts as
+zero downside. 0 (breakeven) is the standard default when a strategy has
+no explicit target return to beat."""
+
+
+def _downside_deviation(returns: Sequence[Decimal], mar: Decimal) -> Decimal | None:
+    """Downside deviation relative to ``mar``, per the standard
+    Sortino-ratio definition: the root-mean-square of each return's
+    shortfall below ``mar`` — returns at or above ``mar`` contribute
+    exactly 0, never a negative amount.
+
+    This is deliberately *not* a standard deviation of the negative
+    returns around their own mean (that was the earlier, incorrect
+    formulation here): dispersion around the mean of an already-filtered
+    subset answers "how much do the losses vary from each other?", not
+    "how far below the target return did we actually fall?" — the latter
+    is what Sortino requires, and it is why identical repeated negative
+    returns (zero variance among themselves, but a real, nonzero shortfall
+    below ``mar``) must still produce a nonzero downside deviation.
+
+    Averages over *every* return (not just the negative ones), since a
+    return at/above ``mar`` is a real, meaningful zero contribution to
+    risk, not a data point to discard. ``None`` only when there are no
+    returns at all to measure — mirrors every other "undefined, not
+    fabricated" metric here.
+    """
+    if not returns:
+        return None
+    downside_components = [min(Decimal(0), r - mar) for r in returns]
+    mean_squared_shortfall = sum((component**2 for component in downside_components), start=Decimal(0)) / Decimal(
+        len(downside_components)
+    )
+    return mean_squared_shortfall.sqrt()
 
 
 def _equity_returns(equity_curve: Sequence[EquityObservation]) -> list[Decimal]:
@@ -211,11 +250,10 @@ def compute_performance_metrics(result: BacktestResult) -> PerformanceMetrics:
         if mean_return is not None and std_return is not None and std_return != 0
         else None
     )
-    downside_returns = [r for r in returns if r < 0]
-    downside_std = _sample_std(downside_returns)
+    downside_deviation = _downside_deviation(returns, _MINIMUM_ACCEPTABLE_RETURN)
     sortino_ratio = (
-        (mean_return / downside_std) * periods_per_year.sqrt()
-        if mean_return is not None and downside_std is not None and downside_std != 0
+        ((mean_return - _MINIMUM_ACCEPTABLE_RETURN) / downside_deviation) * periods_per_year.sqrt()
+        if mean_return is not None and downside_deviation is not None and downside_deviation != 0
         else None
     )
     volatility = std_return * periods_per_year.sqrt() if std_return is not None else None
@@ -271,19 +309,56 @@ def compute_performance_metrics(result: BacktestResult) -> PerformanceMetrics:
     )
 
 
-def compute_trade_excursion(trade: SimulatedTrade, candles: Sequence[Candle]) -> TradeExcursion | None:
+def compute_trade_excursion(
+    trade: SimulatedTrade,
+    candles: Sequence[Candle],
+    *,
+    fill_timing: FillTiming = FillTiming.NEXT_BAR_OPEN,
+) -> TradeExcursion | None:
     """Maximum adverse/favorable excursion for ``trade``, scanning
-    ``candles`` between its entry and exit (inclusive). Returns ``None`` if
-    no candles fall in that window — MAE/MFE is only computed "where the
+    ``candles`` between its entry and exit. Returns ``None`` if no candles
+    fall in the eligible window — MAE/MFE is only computed "where the
     historical path allows it", never fabricated.
+
+    OHLC data exposes no intrabar path, so the entry/exit boundary
+    candles can only be included or excluded as a whole, never trimmed to
+    a sub-bar fraction — this is a documented, conservative approximation,
+    not exact intrabar precision:
+
+    - ``NEXT_BAR_OPEN`` entry: the fill price is that candle's *open*, so
+      the position was held for that entire bar (open onward) — the
+      candle is included.
+    - ``SAME_BAR_CLOSE`` entry: the fill price is that candle's *close*,
+      so the position was live for none of that bar's range (all of it
+      happened before the fill) — the candle is excluded.
+    - ``NEXT_BAR_OPEN`` exit: the fill price is that candle's *open*, so
+      the position was already flat for the rest of that bar — the candle
+      is excluded.
+    - ``SAME_BAR_CLOSE`` exit: the fill price is that candle's *close*, so
+      the position was held through that entire bar up to the fill — the
+      candle is included.
+
+    A single-candle window (entry and exit fall on the same bar) is only
+    included if both rules above agree the position was live during it;
+    otherwise there is no eligible held-period movement to measure.
     """
     window = [candle for candle in candles if trade.entry_time <= candle.timestamp <= trade.exit_time]
     if not window:
         return None
 
+    entry_candle_held = fill_timing is FillTiming.NEXT_BAR_OPEN
+    exit_candle_held = fill_timing is FillTiming.SAME_BAR_CLOSE
+
+    if len(window) == 1:
+        held = window if (entry_candle_held and exit_candle_held) else []
+    else:
+        held = window[0 if entry_candle_held else 1 : len(window) if exit_candle_held else -1]
+    if not held:
+        return None
+
     is_long = trade.direction.value == "long"
-    worst_price = min(candle.low for candle in window) if is_long else max(candle.high for candle in window)
-    best_price = max(candle.high for candle in window) if is_long else min(candle.low for candle in window)
+    worst_price = min(candle.low for candle in held) if is_long else max(candle.high for candle in held)
+    best_price = max(candle.high for candle in held) if is_long else min(candle.low for candle in held)
 
     if is_long:
         mae = max(Decimal(0), trade.entry_price - worst_price)

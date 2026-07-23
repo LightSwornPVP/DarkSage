@@ -45,6 +45,14 @@ class HistoricalReplay:
     def __init__(self, candles: Sequence[Candle]) -> None:
         if not candles:
             raise ValueError("HistoricalReplay requires at least one candle")
+        symbols = {candle.symbol for candle in candles}
+        if len(symbols) > 1:
+            raise ValueError(f"HistoricalReplay requires a single symbol; found {sorted(symbols)}")
+        timeframes = {candle.timeframe for candle in candles}
+        if len(timeframes) > 1:
+            raise ValueError(
+                f"HistoricalReplay requires a single timeframe; found {sorted(t.value for t in timeframes)}"
+            )
         for previous, current in zip(candles, candles[1:], strict=False):
             if current.timestamp <= previous.timestamp:
                 raise ValueError("candles must be strictly ordered by ascending timestamp with no duplicates")

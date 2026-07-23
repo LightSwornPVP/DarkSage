@@ -282,6 +282,35 @@ def test_walk_forward_anchored_windows_see_full_history_back_to_true_start() -> 
         assert first_seen == START
 
 
+def test_walk_forward_anchored_excludes_candles_before_declared_initial_start() -> None:
+    """Blocker: anchored mode previously used an unbounded floor (None),
+    so caller-supplied candles dated before the walk-forward's declared
+    start (e.g. indicator warm-up context from elsewhere in the pipeline)
+    could leak into every anchored window's parameter selection. Anchored
+    windows may expand, but never earlier than the declared start."""
+    warmup = [_candle(-10 + i, "999") for i in range(10)]  # dated before START; must never be seen
+    candles = warmup + _crossover_candles(80)
+    windows = generate_walk_forward_windows(
+        START,
+        START + timedelta(days=80),
+        in_sample_duration=timedelta(days=40),
+        out_of_sample_duration=timedelta(days=20),
+        anchored=True,
+    )
+    selector = _RecordingSelector()
+
+    run_walk_forward(
+        windows,
+        base_config=_base_config(80),
+        candles=candles,
+        strategy_factory=_make_strategy_factory(),  # type: ignore[arg-type]
+        select_parameters=selector,
+    )
+
+    for first_seen, _last_seen in selector.calls:
+        assert first_seen >= START  # never one of the "999"-priced warm-up candles
+
+
 def test_walk_forward_uses_same_frozen_parameters_for_in_and_out_of_sample() -> None:
     candles = _crossover_candles(80)
     windows = generate_walk_forward_windows(

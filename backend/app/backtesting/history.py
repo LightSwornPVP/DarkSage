@@ -24,7 +24,7 @@ import hashlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
-from backend.app.backtesting.config import BacktestConfig
+from backend.app.backtesting.config import BacktestConfig, canonical_parameters
 from backend.app.backtesting.errors import InsufficientHistoryError, InvalidHistoryError
 from shared.models.candle import Candle
 
@@ -91,6 +91,18 @@ def iter_backtest_steps(candles: Sequence[Candle], config: BacktestConfig) -> It
         )
 
 
+def _hash_framed(hasher: "hashlib._Hash", value: str) -> None:
+    """Feed ``value`` into ``hasher`` with an explicit big-endian
+    length prefix, so consecutive fields can never collide the way bare
+    concatenation can — e.g. ``close="1"`` + ``volume="123"`` and
+    ``close="11"`` + ``volume="23"`` both naively concatenate to
+    ``"1123"``, but their framed byte sequences differ because each
+    field's exact length is encoded immediately before it."""
+    encoded = value.encode("utf-8")
+    hasher.update(len(encoded).to_bytes(8, "big"))
+    hasher.update(encoded)
+
+
 def compute_data_identity(candles: Sequence[Candle]) -> str:
     """A deterministic content hash of the actual candle data: count plus
     every OHLCV value and timestamp. This is the "actual historical-data
@@ -98,18 +110,27 @@ def compute_data_identity(candles: Sequence[Candle]) -> str:
     metadata that can *supplement* this (e.g. distinguishing two vendors
     that happened to report identical prices) but must never substitute
     for it, since a caller could leave it unset or wrong.
+
+    Each field is fed through ``_hash_framed`` (length-prefixed, never bare
+    concatenation) so two materially different candle sets can never hash
+    identically just because their field boundaries happen to line up
+    (see ``_hash_framed``'s docstring for the exact collision this
+    prevents). Candles are hashed in the order given — a caller supplying
+    the same candles in a different order gets a different identity,
+    which is correct: order is semantically meaningful for a chronological
+    price series.
     """
     hasher = hashlib.sha256()
-    hasher.update(str(len(candles)).encode("utf-8"))
+    _hash_framed(hasher, str(len(candles)))
     for candle in candles:
-        hasher.update(candle.symbol.encode("utf-8"))
-        hasher.update(candle.timeframe.value.encode("utf-8"))
-        hasher.update(candle.timestamp.isoformat().encode("utf-8"))
-        hasher.update(str(candle.open).encode("utf-8"))
-        hasher.update(str(candle.high).encode("utf-8"))
-        hasher.update(str(candle.low).encode("utf-8"))
-        hasher.update(str(candle.close).encode("utf-8"))
-        hasher.update(str(candle.volume).encode("utf-8"))
+        _hash_framed(hasher, candle.symbol)
+        _hash_framed(hasher, candle.timeframe.value)
+        _hash_framed(hasher, candle.timestamp.isoformat())
+        _hash_framed(hasher, str(candle.open))
+        _hash_framed(hasher, str(candle.high))
+        _hash_framed(hasher, str(candle.low))
+        _hash_framed(hasher, str(candle.close))
+        _hash_framed(hasher, str(candle.volume))
     return hasher.hexdigest()
 
 
@@ -129,7 +150,7 @@ def compute_run_id(config: BacktestConfig, candles: Sequence[Candle]) -> str:
             config.start.isoformat(),
             config.end.isoformat(),
             str(config.initial_capital),
-            repr(sorted(config.parameters.items(), key=lambda item: item[0])),
+            repr(canonical_parameters(config.parameters)),
             str(config.execution_config.cost.commission_rate),
             str(config.execution_config.cost.spread),
             str(config.execution_config.cost.slippage_rate),

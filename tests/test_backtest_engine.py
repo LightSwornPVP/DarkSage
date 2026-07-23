@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.app.backtesting.config import BacktestConfig, CostConfig
+from backend.app.backtesting.config import BacktestConfig, CostConfig, canonical_parameters
 from backend.app.backtesting.engine import (
     BacktestEngine,
     compute_run_id,
@@ -22,6 +22,7 @@ from backend.app.backtesting.errors import (
     InvalidExecutionConfigError,
     InvalidHistoryError,
 )
+from backend.app.backtesting.history import compute_data_identity
 from shared.models.candle import Candle, Timeframe
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -188,6 +189,67 @@ def test_compute_run_id_differs_for_different_candle_data() -> None:
     candles_a = _candles(5)
     candles_b = _candles(5, start_offset=1)
     assert compute_run_id(config, candles_a) != compute_run_id(config, candles_b)
+
+
+# --- Parameter lineage identity: type-preserving, not plain == ---
+
+
+def test_canonical_parameters_distinguishes_bool_from_int() -> None:
+    assert canonical_parameters({"p": True}) != canonical_parameters({"p": 1})
+
+
+def test_canonical_parameters_distinguishes_decimal_from_int() -> None:
+    assert canonical_parameters({"p": Decimal("1")}) != canonical_parameters({"p": 1})
+
+
+def test_canonical_parameters_same_value_and_type_matches_regardless_of_key_order() -> None:
+    assert canonical_parameters({"a": 1, "b": "x"}) == canonical_parameters({"b": "x", "a": 1})
+
+
+def test_canonical_parameters_is_a_stable_deterministic_representation() -> None:
+    parameters = {"fast": Decimal("1.50"), "flag": True, "name": "x", "count": 3}
+    assert canonical_parameters(parameters) == canonical_parameters(dict(parameters))
+    assert canonical_parameters(parameters) == canonical_parameters(parameters)
+
+
+def test_compute_run_id_distinguishes_bool_from_int_parameter() -> None:
+    candles = _candles(5)
+    config_a = _config(parameters={"p": True})
+    config_b = _config(parameters={"p": 1})
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_distinguishes_decimal_from_int_parameter() -> None:
+    candles = _candles(5)
+    config_a = _config(parameters={"p": Decimal("1")})
+    config_b = _config(parameters={"p": 1})
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+# --- Historical data identity: framed hashing, not ambiguous concatenation ---
+
+
+def test_compute_data_identity_collision_class_is_impossible() -> None:
+    # Same symbol/timeframe/timestamp/open/high/low for both; only
+    # close/volume differ, chosen so naive string concatenation collides:
+    # "1"+"123" == "11"+"23" == "1123". Framed (length-prefixed) hashing
+    # must not collide on this.
+    common = dict(symbol="AAPL", timeframe=Timeframe.D1, timestamp=START, open=Decimal(1), high=Decimal(20))
+    candle_a = Candle(**common, low=Decimal(1), close=Decimal(1), volume=Decimal(123))
+    candle_b = Candle(**common, low=Decimal(1), close=Decimal(11), volume=Decimal(23))
+    assert compute_data_identity([candle_a]) != compute_data_identity([candle_b])
+
+
+def test_compute_data_identity_is_identical_for_identical_data() -> None:
+    candles_a = _candles(5)
+    candles_b = _candles(5)
+    assert compute_data_identity(candles_a) == compute_data_identity(candles_b)
+
+
+def test_compute_data_identity_differs_when_candle_order_differs() -> None:
+    candles = _candles(3)
+    reordered = [candles[1], candles[0], candles[2]]
+    assert compute_data_identity(candles) != compute_data_identity(reordered)
 
 
 def test_engine_run_is_deterministic_for_same_inputs() -> None:

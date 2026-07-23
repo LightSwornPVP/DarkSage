@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from backend.app.backtesting.config import BacktestConfig
+from backend.app.backtesting.config import BacktestConfig, FillTiming
 from backend.app.backtesting.metrics import compute_performance_metrics, compute_trade_excursion
 from backend.app.backtesting.types import (
     FLAT_POSITION,
@@ -186,9 +186,38 @@ def test_sharpe_is_zero_for_symmetric_zero_mean_returns() -> None:
     assert metrics.sharpe_ratio == Decimal(0)
 
 
-def test_sortino_undefined_when_downside_deviation_is_zero() -> None:
-    # Two identical negative returns -> zero variance among downside returns.
+def test_sortino_mixed_positive_and_negative_returns_known_value() -> None:
+    # returns: +0.1, -0.1, +0.1, -0.1 -> mean 0, so excess-over-MAR is 0
+    # regardless of a nonzero downside deviation: Sortino is exactly 0.
     result = _result(equity_values=["10000", "11000", "9900", "10890", "9801"])
+    metrics = compute_performance_metrics(result)
+    assert metrics.sortino_ratio == Decimal(0)
+
+
+def test_sortino_repeated_equal_negative_returns_known_value() -> None:
+    # Three identical -10% returns: zero variance *among the negative
+    # returns themselves*, but a very real, nonzero shortfall below MAR=0
+    # every period. The old (incorrect) implementation measured dispersion
+    # around the mean of the negative returns and called this undefined;
+    # MAR-relative downside deviation must not.
+    result = _result(equity_values=["10000", "9000", "8100", "7290"])
+    metrics = compute_performance_metrics(result)
+    assert metrics.sortino_ratio is not None
+    assert metrics.sortino_ratio == Decimal(-1) * Decimal(252).sqrt()
+
+
+def test_sortino_none_with_no_downside_returns() -> None:
+    # Every return is >= MAR (0) -> downside deviation is 0 -> the ratio's
+    # denominator is 0 -> undefined (None), never a fabricated Infinity.
+    result = _result(equity_values=["10000", "11000", "12100"])
+    metrics = compute_performance_metrics(result)
+    assert metrics.sortino_ratio is None
+
+
+def test_sortino_none_with_all_zero_returns() -> None:
+    # A flat equity curve: every return is exactly 0 (== MAR), so downside
+    # deviation is 0 and Sortino is undefined, not a silent 0/0 -> NaN.
+    result = _result(equity_values=["10000", "10000", "10000"])
     metrics = compute_performance_metrics(result)
     assert metrics.sortino_ratio is None
 
@@ -259,6 +288,140 @@ def test_trade_excursion_known_values_long() -> None:
     assert excursion is not None
     assert excursion.mae == Decimal(5)  # entry 100 - lowest low 95
     assert excursion.mfe == Decimal(10)  # highest high 110 - entry 100
+
+
+def test_trade_excursion_next_bar_open_exit_excludes_post_exit_movement() -> None:
+    # NEXT_BAR_OPEN exit fills at the exit candle's open -> the position was
+    # already flat for the rest of that bar, so its extreme high/low must
+    # not leak into MAE/MFE.
+    trade = SimulatedTrade(
+        symbol="AAPL",
+        direction=SignalDirection.LONG,
+        entry_time=START,
+        entry_price=Decimal(100),
+        exit_time=START + timedelta(days=1),
+        exit_price=Decimal(102),
+        quantity=Decimal(1),
+        fees_paid=Decimal(0),
+        pnl=Decimal(2),
+    )
+    entry_candle = Candle(
+        symbol="AAPL",
+        timeframe=Timeframe.D1,
+        timestamp=START,
+        open=Decimal(100),
+        high=Decimal(105),
+        low=Decimal(98),
+        close=Decimal(102),
+        volume=Decimal(1000),
+    )
+    exit_candle_with_extreme_range = Candle(
+        symbol="AAPL",
+        timeframe=Timeframe.D1,
+        timestamp=START + timedelta(days=1),
+        open=Decimal(102),
+        high=Decimal(500),  # post-exit spike: must be excluded
+        low=Decimal(1),  # post-exit crash: must be excluded
+        close=Decimal(103),
+        volume=Decimal(1000),
+    )
+    excursion = compute_trade_excursion(
+        trade, [entry_candle, exit_candle_with_extreme_range], fill_timing=FillTiming.NEXT_BAR_OPEN
+    )
+
+    assert excursion is not None
+    assert excursion.mae == Decimal(2)  # entry 100 - entry candle's own low 98
+    assert excursion.mfe == Decimal(5)  # entry candle's own high 105 - entry 100
+
+
+def test_trade_excursion_same_bar_close_entry_excludes_pre_entry_movement() -> None:
+    # SAME_BAR_CLOSE entry fills at the entry candle's close -> the position
+    # was live for none of that bar's range, so its extreme high/low must
+    # not leak into MAE/MFE.
+    trade = SimulatedTrade(
+        symbol="AAPL",
+        direction=SignalDirection.LONG,
+        entry_time=START,
+        entry_price=Decimal(100),
+        exit_time=START + timedelta(days=1),
+        exit_price=Decimal(105),
+        quantity=Decimal(1),
+        fees_paid=Decimal(0),
+        pnl=Decimal(5),
+    )
+    entry_candle_with_extreme_range = Candle(
+        symbol="AAPL",
+        timeframe=Timeframe.D1,
+        timestamp=START,
+        open=Decimal(90),
+        high=Decimal(500),  # pre-entry spike: must be excluded
+        low=Decimal(1),  # pre-entry crash: must be excluded
+        close=Decimal(100),
+        volume=Decimal(1000),
+    )
+    exit_candle = Candle(
+        symbol="AAPL",
+        timeframe=Timeframe.D1,
+        timestamp=START + timedelta(days=1),
+        open=Decimal(100),
+        high=Decimal(108),
+        low=Decimal(96),
+        close=Decimal(105),
+        volume=Decimal(1000),
+    )
+    excursion = compute_trade_excursion(
+        trade, [entry_candle_with_extreme_range, exit_candle], fill_timing=FillTiming.SAME_BAR_CLOSE
+    )
+
+    assert excursion is not None
+    assert excursion.mae == Decimal(4)  # entry 100 - exit candle's own low 96
+    assert excursion.mfe == Decimal(8)  # exit candle's own high 108 - entry 100
+
+
+def test_trade_excursion_is_deterministic_and_timing_aware() -> None:
+    trade = SimulatedTrade(
+        symbol="AAPL",
+        direction=SignalDirection.LONG,
+        entry_time=START,
+        entry_price=Decimal(100),
+        exit_time=START + timedelta(days=1),
+        exit_price=Decimal(103),
+        quantity=Decimal(1),
+        fees_paid=Decimal(0),
+        pnl=Decimal(3),
+    )
+    candles = [
+        Candle(
+            symbol="AAPL",
+            timeframe=Timeframe.D1,
+            timestamp=START,
+            open=Decimal(100),
+            high=Decimal(120),
+            low=Decimal(80),
+            close=Decimal(100),
+            volume=Decimal(1000),
+        ),
+        Candle(
+            symbol="AAPL",
+            timeframe=Timeframe.D1,
+            timestamp=START + timedelta(days=1),
+            open=Decimal(100),
+            high=Decimal(103),
+            low=Decimal(99),
+            close=Decimal(103),
+            volume=Decimal(1000),
+        ),
+    ]
+
+    next_bar_open_a = compute_trade_excursion(trade, candles, fill_timing=FillTiming.NEXT_BAR_OPEN)
+    next_bar_open_b = compute_trade_excursion(trade, candles, fill_timing=FillTiming.NEXT_BAR_OPEN)
+    same_bar_close = compute_trade_excursion(trade, candles, fill_timing=FillTiming.SAME_BAR_CLOSE)
+
+    assert next_bar_open_a == next_bar_open_b  # deterministic for identical inputs
+    assert next_bar_open_a != same_bar_close  # timing-aware: differs by fill-timing rule
+    assert next_bar_open_a is not None and same_bar_close is not None
+    assert next_bar_open_a.mae == Decimal(20)  # entry candle (wide range) included, exit candle excluded
+    assert same_bar_close.mae == Decimal(1)  # entry candle excluded, exit candle (narrow range) included
 
 
 def test_trade_excursion_none_when_no_candles_in_window() -> None:

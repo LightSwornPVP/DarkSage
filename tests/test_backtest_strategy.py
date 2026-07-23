@@ -12,6 +12,7 @@ import pytest
 
 from backend.app.backtesting.config import BacktestConfig, StrategyParameterValue
 from backend.app.backtesting.engine import BacktestEngine
+from backend.app.backtesting.errors import InvalidBacktestConfigError
 from backend.app.backtesting.strategy.base import Strategy
 from backend.app.backtesting.strategy.context import StrategyContext
 from backend.app.backtesting.strategy.intent import (
@@ -183,6 +184,124 @@ def test_reference_strategy_holds_during_warmup() -> None:
     engine = BacktestEngine(_config_for(strategy, 4), candles)
     result = engine.run_strategy(strategy)
     assert result.trades == ()  # never reaches slow_period + 1 = 21 visible candles
+
+
+# --- Event-loop ordering: no future fills, no phantom state from unfilled intents ---
+
+
+class _ScriptedStrategy(Strategy):
+    """Strategy that deterministically follows a bar-index -> decision
+    script, for pinning exact event-loop ordering behavior."""
+
+    def __init__(self, script: Mapping[int, StrategyDecision]) -> None:
+        self._script = script
+
+    @property
+    def strategy_id(self) -> str:
+        return "scripted"
+
+    @property
+    def strategy_version(self) -> str:
+        return "1.0.0"
+
+    @property
+    def parameters(self) -> Mapping[str, StrategyParameterValue]:
+        return {}
+
+    @property
+    def warmup_period(self) -> int:
+        return 1
+
+    def decide(self, context: StrategyContext) -> StrategyDecision:
+        bar_index = len(context.visible_candles) - 1
+        return self._script.get(bar_index, HOLD_DECISION)
+
+
+def test_engine_fill_never_appears_before_the_bar_it_actually_resolved_on() -> None:
+    candles = [_candle(i, str(100 + i)) for i in range(6)]  # indices 0..5
+    strategy = _ScriptedStrategy({2: StrategyDecision(action=StrategyAction.ENTER_LONG)})
+    engine = BacktestEngine(_config_for(strategy, 5), candles)
+
+    result = engine.run_strategy(strategy)
+
+    # Signal fires at bar index 2 (visible_candles length 3). NEXT_BAR_OPEN
+    # means the earliest legal fill is bar index 3 -- so bars 0-2 must show
+    # a flat position, never the fill that hasn't happened yet.
+    for observation in result.equity_curve[:3]:
+        assert observation.position.is_flat
+    assert not result.equity_curve[3].position.is_flat
+    assert len(result.trades) == 0  # never exited: still open at end of data
+
+
+def test_engine_signal_on_final_bar_never_fills_and_leaves_state_untouched() -> None:
+    candles = [_candle(i, str(100 + i)) for i in range(4)]  # indices 0..3, last index=3
+    strategy = _ScriptedStrategy({3: StrategyDecision(action=StrategyAction.ENTER_LONG)})
+    engine = BacktestEngine(_config_for(strategy, 3), candles)
+
+    result = engine.run_strategy(strategy)
+
+    # A signal on the very last bar has no bar N+1 to fill against under
+    # NEXT_BAR_OPEN -- it must be discarded, not retried and not applied.
+    assert result.trades == ()
+    assert result.final_position.is_flat
+    assert all(observation.position.is_flat for observation in result.equity_curve)
+
+
+# --- Parameter lineage identity: type-preserving strategy/config matching ---
+
+
+class _ParamStrategy(_RecordingStrategy):
+    """A recording strategy with a configurable single parameter, for
+    exercising strategy/config parameter-lineage matching."""
+
+    def __init__(self, value: StrategyParameterValue) -> None:
+        super().__init__()
+        self._value = value
+
+    @property
+    def strategy_id(self) -> str:
+        return "param-strategy"
+
+    @property
+    def parameters(self) -> Mapping[str, StrategyParameterValue]:
+        return {"p": self._value}
+
+
+def _config_with_parameter(strategy: Strategy, value: StrategyParameterValue) -> BacktestConfig:
+    return BacktestConfig(
+        strategy_id=strategy.strategy_id,
+        strategy_version=strategy.strategy_version,
+        symbol="AAPL",
+        timeframe=Timeframe.D1,
+        start=START,
+        end=START + timedelta(days=2),
+        initial_capital=Decimal(10000),
+        parameters={"p": value},
+    )
+
+
+def test_run_strategy_rejects_bool_vs_int_parameter_mismatch() -> None:
+    candles = [_candle(i, str(100 + i)) for i in range(3)]
+    strategy = _ParamStrategy(True)
+    config = _config_with_parameter(strategy, 1)  # int 1, not bool True
+    with pytest.raises(InvalidBacktestConfigError):
+        BacktestEngine(config, candles).run_strategy(strategy)
+
+
+def test_run_strategy_rejects_decimal_vs_int_parameter_mismatch() -> None:
+    candles = [_candle(i, str(100 + i)) for i in range(3)]
+    strategy = _ParamStrategy(Decimal("1"))
+    config = _config_with_parameter(strategy, 1)  # int 1, not Decimal("1")
+    with pytest.raises(InvalidBacktestConfigError):
+        BacktestEngine(config, candles).run_strategy(strategy)
+
+
+def test_run_strategy_accepts_matching_typed_parameter() -> None:
+    candles = [_candle(i, str(100 + i)) for i in range(3)]
+    strategy = _ParamStrategy(Decimal("1"))
+    config = _config_with_parameter(strategy, Decimal("1"))
+    result = BacktestEngine(config, candles).run_strategy(strategy)  # must not raise
+    assert result.final_position.is_flat
 
 
 # --- Determinism ---

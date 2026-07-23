@@ -8,14 +8,19 @@ candles from that window's out-of-sample period or any later window. The
 out-of-sample backtest reuses the exact parameters chosen in-sample; it
 never re-selects them from out-of-sample data.
 
-Anti-contamination guarantee for rolling windows: a rolling (non-anchored)
-window additionally never sees candles before its own ``in_sample.start``
-— in parameter selection, the in-sample backtest, or the out-of-sample
-backtest's warm-up context. Without this bound, a "rolling" window would
-silently behave like an anchored one, defeating the point of testing
-whether a strategy holds up when calibrated on only a recent, fixed-length
-slice of history. Anchored windows have no such floor: their in-sample
-start is fixed at the true start of the data by construction.
+Anti-contamination guarantee for every window: a window — rolling or
+anchored — never sees candles before its own ``in_sample.start``, in
+parameter selection, the in-sample backtest, or the out-of-sample
+backtest's warm-up context. For a rolling window that start slides
+forward each step; without this bound a "rolling" window would silently
+behave like an anchored one, defeating the point of testing whether a
+strategy holds up when calibrated on only a recent, fixed-length slice of
+history. For an anchored window that start is fixed at the true start of
+the walk-forward run for every window (anchored windows only ever move
+their *end* forward, never their start) — so its "expanding" in-sample
+period still must never reach earlier than that declared start, even if
+the caller supplied extra candles before it (e.g. as indicator warm-up
+context elsewhere in the pipeline).
 """
 
 from __future__ import annotations
@@ -42,12 +47,14 @@ ParameterSelector = Callable[[Sequence[Candle]], Mapping[str, StrategyParameterV
 class WalkForwardWindow:
     """One in-sample/out-of-sample pair.
 
-    ``anchored`` records which style produced this window, since in-sample
-    candle selection differs by style: anchored windows legitimately use
-    all history up to ``in_sample.end`` (an "expanding window" is defined
-    that way), while rolling windows must be strictly bounded to
-    ``[in_sample.start, in_sample.end)`` — using any earlier history would
-    silently grow a supposedly fixed-length rolling window.
+    ``anchored`` records which style produced this window. Both styles are
+    bounded below by this window's own ``in_sample.start`` — for rolling
+    windows that start slides forward each step (a fixed-length window);
+    for anchored windows it is always the true start of the walk-forward
+    run (an "expanding window" that only ever grows its *end*, never its
+    start). Neither style may see candles from before its own
+    ``in_sample.start``, nor from ``in_sample.end`` onward (the
+    out-of-sample period or any later window).
     """
 
     window_index: int
@@ -134,12 +141,20 @@ def _candles_before(candles: Sequence[Candle], end: datetime, *, floor: datetime
     return [candle for candle in candles if floor <= candle.timestamp < end]
 
 
-def _window_floor(window: WalkForwardWindow) -> datetime | None:
-    """``None`` for anchored windows (full history back to the true start
-    is the intended behavior). For rolling windows, the window's own
-    in-sample start — never look further back than that, or the window
-    silently stops being "rolling"."""
-    return None if window.anchored else window.in_sample.start
+def _window_floor(window: WalkForwardWindow) -> datetime:
+    """The earliest timestamp visible to this window's parameter selection
+    and both its backtests: always this window's own ``in_sample.start``.
+
+    For a rolling window that slides forward each step. For an anchored
+    window it is fixed at the true start of the walk-forward run (anchored
+    windows only ever move their in-sample *end* forward, never their
+    start) — so an anchored window's "expanding" in-sample period still
+    must never reach earlier than that declared start, even if the caller
+    supplied extra candles before it for indicator warm-up elsewhere in
+    the pipeline. There is no case where an unbounded (``None``) floor is
+    correct.
+    """
+    return window.in_sample.start
 
 
 def _run_partition(
