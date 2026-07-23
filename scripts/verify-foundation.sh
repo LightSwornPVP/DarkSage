@@ -145,6 +145,34 @@ else
   log_ok "no prohibited development-assistant terms or attribution phrases found in the committed tree"
 fi
 
+# --- 5. Trading Knowledge Engine canonical path validation ------------------
+# backend/app/knowledge/ is the single authoritative location. This check does
+# not rely on Markdown backticks: it scans raw text for any path-like token
+# ending in "knowledge/" and rejects every form that isn't exactly canonical
+# (knowledge/, backend/knowledge/, backend/app/trading/knowledge/, or any
+# other alternate location), independently across every governing document.
+KE_CANONICAL="backend/app/knowledge/"
+KE_DOCS=(PROJECT_SPEC.md ARCHITECTURE.md ROADMAP.md AGENTS.md TRADING_RULES.md SECURITY_RULES.md)
+ke_bad=0
+ke_good=0
+for doc in "${KE_DOCS[@]}"; do
+  [ -f "$doc" ] || continue
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    if [ "$token" = "$KE_CANONICAL" ]; then
+      ke_good=1
+    else
+      log_fail "$doc: noncanonical Trading Knowledge Engine path reference '$token' (canonical: $KE_CANONICAL)"
+      ke_bad=1
+    fi
+  done < <(grep -ohE '[A-Za-z0-9_./]*knowledge/' "$doc" 2>/dev/null)
+done
+if [ "$ke_bad" -eq 0 ] && [ "$ke_good" -eq 1 ]; then
+  log_ok "Trading Knowledge Engine path referenced consistently as $KE_CANONICAL across governing documents"
+elif [ "$ke_bad" -eq 0 ] && [ "$ke_good" -eq 0 ]; then
+  log_fail "canonical Trading Knowledge Engine path '$KE_CANONICAL' not found in any governing document"
+fi
+
 echo
 if [ "$fail" = 0 ]; then
   echo "All foundation checks passed."

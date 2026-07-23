@@ -95,6 +95,18 @@ Auto-Trader permissions may restrict which grades can trade.
 
 Grades must be based on measurable inputs.
 
+## Pattern Detection Is Not a Trade Signal
+
+DarkSage distinguishes pattern detection, setup quality, and trade eligibility (see PROJECT_SPEC.md §33, Trading Knowledge Engine).
+
+A detected candlestick or chart pattern, regardless of contextual score, is never automatically a trade. Trade eligibility is decided exclusively by the canonical TradeValidationPipeline (ARCHITECTURE.md §14).
+
+## Educational Knowledge Provenance
+
+Knowledge derived from user-provided educational material must retain source, source date where known, category, confidence, staleness risk, and whether current authoritative verification is required.
+
+Historical or potentially outdated regulatory, tax, broker, exchange, or market-structure information must never be presented as current fact without current authoritative verification. Educational material is evidence/input, not unquestionable truth, and is subject to the same statistical validation and anti-overfitting safeguards as any other strategy source.
+
 ## Why-Trade / Why-Not-Trade
 
 Every accepted or rejected signal must include reasons.

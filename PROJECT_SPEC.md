@@ -475,12 +475,15 @@ Patterns may include:
 - Head and shoulders
 - Fibonacci levels
 
+See Section 33 (Trading Knowledge Engine) for the complete chart-pattern list, candlestick-pattern support, and the contextual scoring model.
+
 All detected patterns must include:
 
 - Confidence
 - Geometry
 - Reasoning
 - Historical performance where available
+- Contextual setup-quality score (Section 33)
 
 ---
 
@@ -933,3 +936,177 @@ Phase 1:
 - Risk-engine foundation
 
 No live trading in Phase 1.
+
+---
+
+## 33. Trading Knowledge Engine
+
+DarkSage must be able to learn, structure, retrieve, explain, detect, test, and validate trading concepts from user-provided educational material (books, courses, notes, articles, or other user-supplied sources).
+
+### Knowledge Domains
+
+At minimum:
+
+- Stock market fundamentals
+- Short-term trading
+- Swing trading
+- Long-term investing
+- Technical analysis
+- Candlestick anatomy
+- Candlestick patterns
+- Chart patterns
+- Market structure
+- Support and resistance
+- Trendlines
+- Multiple timeframe / top-down analysis
+- Momentum
+- Breakout and false-breakout analysis
+- Reversal analysis
+- Scaling strategies
+- Moving averages
+- Bollinger Bands
+- Williams %R
+- Fibonacci
+- Volume and volume-profile concepts
+- Money management
+- Risk management
+- Trading psychology
+- Options terminology
+- Calls and puts
+- Option moneyness
+- Expiration
+- Exercise and assignment
+- Time decay
+- Volatility
+- Covered calls
+- Cash-secured puts
+- Protective/married puts
+- Vertical spreads
+- Collars
+- Options risk/payoff analysis
+- Educational tax concepts
+- Trade journaling and post-trade learning
+
+### Chart Pattern Recognition
+
+At minimum:
+
+- Ascending Triangle
+- Descending Triangle
+- Bullish Wedge
+- Bearish Wedge
+- Rising Wedge
+- Falling Wedge
+- Bullish Flag
+- Bearish Flag
+- Bullish Symmetrical Triangle
+- Bearish Symmetrical Triangle
+- Double Bottom
+- Double Top
+- Triple Bottom
+- Triple Top
+- Head and Shoulders
+- Inverse Head and Shoulders
+
+### Candlestick Recognition
+
+Must support:
+
+- Individual candlestick patterns
+- Multi-candle patterns
+- Extension with additional pattern definitions without core rewrites
+
+### Pattern Detection Is Not Binary
+
+Every detected setup must support contextual scoring using, at minimum:
+
+- Trend
+- Market regime
+- Support/resistance
+- Volume
+- Relative volume
+- Volatility
+- Momentum
+- Multiple timeframe confirmation
+- Sector context
+- Liquidity
+- Nearby invalidation
+- Risk/reward
+- Historical performance
+- Stock-specific Strategy DNA
+- Confluence
+
+### Detection, Quality, and Eligibility Are Distinct
+
+DarkSage must distinguish:
+
+1. Pattern detection — a pattern exists in the data
+2. Setup quality — the contextual score of that pattern given current conditions
+3. Trade eligibility — whether the canonical TradeValidationPipeline (ARCHITECTURE.md §14) would allow a trade based on it
+
+A detected pattern must never automatically equal a trade. Eligibility is decided only by the canonical TradeValidationPipeline, never by pattern detection or setup-quality scoring alone.
+
+### Knowledge Provenance
+
+All knowledge derived from educational sources must retain:
+
+- Source
+- Source date where known
+- Category
+- Confidence
+- Whether the information may become stale
+- Whether current authoritative verification is required before being presented as current fact
+
+Historical or potentially outdated regulatory, tax, broker, exchange, or market-structure information must never be presented as current fact without current authoritative verification. Educational material is evidence/input, not unquestionable truth.
+
+### Trading Education Mode
+
+DarkSage should support a Trading Education mode with:
+
+- Concept explanations
+- Chart examples
+- Interactive pattern explanations
+- Quizzes
+- Historical replay
+- "Why this setup"
+- "Why not this trade"
+- Comparison against similar historical setups
+
+### Local-First and Deterministic-First
+
+The Knowledge Engine must be local-first and inexpensive, consistent with Section 2.1 Cheap-First Architecture.
+
+Deterministic code performs:
+
+- Technical indicators
+- Candlestick detection
+- Chart-pattern detection where practical
+- Statistics
+- Backtesting
+- Scoring inputs
+
+AI may assist with:
+
+- Natural-language explanations
+- Semantic retrieval
+- Summarization
+- Comparing concepts
+- Tutoring
+- Reasoning across multiple signals
+
+AI must never replace a deterministic calculation when a deterministic implementation is available, consistent with Section 23's AI architecture rules.
+
+### Statistical Validation of Concepts
+
+Every strategy and every pattern must be backtestable and statistically evaluated, regardless of origin — educational material, DarkSage's own strategy discovery, or manual authorship. Educational provenance (source, date, category, confidence, staleness) is additional metadata recorded alongside a concept; it is never the condition that activates testing, and never exempts a concept from it.
+
+DarkSage must statistically evaluate whether a concept actually works:
+
+- Globally
+- Per stock
+- Per sector
+- Per timeframe
+- Per market regime
+- With and without confluence
+
+A textbook pattern may be learned to be weak in one context and strong in another. Educational material is evidence/input, subject to the same anti-overfitting safeguards as any other strategy (Section 10), not unquestionable truth.

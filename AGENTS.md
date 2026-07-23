@@ -153,8 +153,11 @@ Owns:
 - Strategy statistics
 - Strategy DNA
 - Regime analysis
+- Trading Knowledge Engine (`backend/app/knowledge/`): candlestick/chart-pattern detection, contextual scoring, statistical concept validation
 
 Must protect against look-ahead bias, survivorship bias, data leakage, overfitting, and invalid statistics.
+
+A detected pattern or scored setup is never itself a trade signal — trade eligibility is decided only by the canonical TradeValidationPipeline (ARCHITECTURE.md §14).
 
 ### Trading Agent
 
@@ -181,6 +184,8 @@ Owns:
 AI functionality remains advisory.
 
 Provider adapters (OpenAI, Anthropic, Google Gemini, custom OpenAI-compatible endpoints, local) must implement the common provider interface and must never handle broker credentials, submit broker orders, or bypass the risk/permissions pipeline. The AI Agent is responsible for ensuring provider API keys are never logged, committed, or exposed in frontend source.
+
+The AI Agent also provides the natural-language layer for Trading Education mode (explanations, tutoring, semantic retrieval, concept comparison) but does not own pattern/candlestick detection, contextual scoring, or statistical concept validation — those are deterministic and owned by the Quant Agent (`backend/app/knowledge/`, `patterns/`, `indicators/`). AI must never replace a deterministic calculation when one already exists.
 
 ### QA Agent
 

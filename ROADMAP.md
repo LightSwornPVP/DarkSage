@@ -181,6 +181,7 @@ Goal: learn which strategies work best under which conditions.
 - Strategy correlation
 - Strategy ensemble voting
 - Meta-strategy selection
+- Statistical validation of all strategies and patterns regardless of origin — including educational-source concepts (Trading Knowledge Engine, PROJECT_SPEC.md §33) — globally and per stock/sector/timeframe/regime/confluence
 
 Exit criteria:
 
@@ -226,18 +227,22 @@ Exit criteria:
 
 ---
 
-# Phase 5 — Pattern Recognition and Advanced Charts
+# Phase 5 — Pattern Recognition, Advanced Charts, and Trading Knowledge Engine
 
-Goal: add visual technical intelligence.
+Goal: add visual technical intelligence, and the ability to learn, structure, retrieve, explain, detect, test, and validate trading concepts from user-provided educational material (see PROJECT_SPEC.md §33, ARCHITECTURE.md §31).
 
 - Support/resistance
 - Trendlines
 - Breakouts
-- Triangles
-- Wedges
-- Flags
-- Head and shoulders
+- Triangles, Wedges (Rising/Falling), Flags (Bullish/Bearish), Symmetrical Triangles (Bullish/Bearish)
+- Double/Triple Top and Bottom
+- Head and Shoulders / Inverse Head and Shoulders
 - Fibonacci
+- Candlestick anatomy, individual and multi-candle candlestick patterns, extensible pattern definitions
+- Knowledge Engine ingestion of user-provided educational material with provenance metadata (source, date, category, confidence, staleness, verification-required)
+- Contextual setup-quality scoring (trend, regime, support/resistance, volume, relative volume, volatility, momentum, multi-timeframe confirmation, sector context, liquidity, nearby invalidation, risk/reward, historical performance, Strategy DNA, confluence)
+- Explicit separation of pattern detection, setup quality, and trade eligibility — a detected pattern is never automatically a trade
+- Trading Education mode: concept explanations, chart examples, interactive pattern walkthroughs, quizzes, historical replay, why-trade/why-not-trade, comparative historical setups
 - AI annotations
 - Entry/stop/target overlays
 - Backtest trade overlays
@@ -252,6 +257,9 @@ Exit criteria:
 
 - Patterns are structured data, not just visual guesses
 - Both chart engines can render DarkSage annotations
+- Pattern detection, setup-quality scoring, and trade eligibility are implemented as distinct, non-conflatable steps
+- Educational-source concepts carry provenance metadata and are never presented as current authoritative fact without verification
+- Knowledge Engine ingestion, scoring, and statistical validation run as deterministic local code with no cloud AI dependency; AI involvement is limited to explanation, retrieval, tutoring, and summarization
 
 ---
 
@@ -279,6 +287,7 @@ During Phase 6, all AI output — local or any configured cloud provider — is 
 - Counterargument engine
 - Portfolio commentary
 - Strategy summaries
+- Trading Education mode tutoring (concept explanations, quizzes, why-trade/why-not-trade) — advisory only, never replaces deterministic detection or scoring in the Knowledge Engine
 - AI abstention
 - Confidence-source separation
 - Cloud AI cost controls

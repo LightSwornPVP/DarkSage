@@ -123,6 +123,7 @@ Core modules:
 - `database/`
 - `audit/`
 - `security/`
+- `backend/app/knowledge/` (Trading Knowledge Engine — Section 31; this is the single authoritative location, always referenced with the full path)
 
 The backend is the source of truth for Auto-Trader state, orders, positions, portfolios, signals, strategies, risk state, and broker state.
 
@@ -597,3 +598,32 @@ Never tightly couple:
 Every major external dependency should be replaceable through an interface or adapter.
 
 The backend is the authoritative source of truth for trading and account state.
+
+---
+
+## 31. Trading Knowledge Engine Architecture
+
+Location: `backend/app/knowledge/` — the single authoritative location. Every reference to the Trading Knowledge Engine's directory, in any document, uses this exact path.
+
+Modules:
+
+- `backend/app/knowledge/ingestion/` — parses user-provided educational material into structured concepts
+- `backend/app/knowledge/concepts/` — structured knowledge-domain models with provenance metadata
+- `backend/app/knowledge/patterns/` — candlestick and chart-pattern definitions and extension points (detection logic itself remains in the existing backend `patterns/` and `indicators/` modules, Sections 5 and 8 — no duplicate detection logic)
+- `backend/app/knowledge/scoring/` — contextual scoring engine (trend, regime, support/resistance, volume, relative volume, volatility, momentum, multi-timeframe confirmation, sector context, liquidity, nearby invalidation, risk/reward, historical performance, Strategy DNA, confluence)
+- `backend/app/knowledge/provenance/` — source, source date, category, confidence, staleness, and verification-required metadata for every stored concept
+- `backend/app/knowledge/education/` — Trading Education mode: concept explanations, chart examples, interactive pattern walkthroughs, quizzes, historical replay, why-trade/why-not-trade, comparative historical setups
+
+The Knowledge Engine structures, scores, retrieves, explains, and statistically validates what the deterministic indicator and pattern-detection systems produce. It does not reimplement their math.
+
+### Detection vs. Quality vs. Eligibility
+
+The Knowledge Engine produces pattern detections and contextual setup-quality scores. It has no authority over trade eligibility. Trade eligibility is decided exclusively by the canonical TradeValidationPipeline (Section 14). A high setup-quality score does not grant, skip, or shortcut any pipeline stage.
+
+### Local-First
+
+Concept storage, retrieval, scoring, and statistical validation are deterministic local code by default, consistent with Section 22's AI architecture. AI involvement (natural-language explanation, semantic retrieval, tutoring, cross-signal reasoning) is advisory only and must never substitute for a deterministic calculation that already exists.
+
+### Statistical Validation
+
+Every strategy and every pattern — regardless of origin: educational material, DarkSage's own strategy discovery, or manual authorship — is backtested and statistically evaluated through the same performance-tracking and anti-overfitting infrastructure (Section 11 Strategy Performance Architecture, Section 13 Backtesting Architecture): globally, per stock, per sector, per timeframe, per market regime, and with/without confluence. Educational provenance (source, date, category, confidence, staleness) is metadata recorded alongside a concept; it is never the condition that activates or exempts a concept from statistical testing. A concept's measured performance determines its weight, not its origin.
