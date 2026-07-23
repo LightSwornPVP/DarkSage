@@ -41,8 +41,8 @@ release/
 data/local/
 data/cache/
 
-# AI models
-models/
+# AI models (weight files only — do not add a bare "models/" rule here,
+# it collides with source directories like shared/models/)
 *.gguf
 *.onnx
 *.bin
