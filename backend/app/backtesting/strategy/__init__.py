@@ -15,7 +15,6 @@ from backend.app.backtesting.strategy.intent import (
     translate_decision,
 )
 from backend.app.backtesting.strategy.reference import MovingAverageCrossoverStrategy
-from backend.app.backtesting.strategy.simulate import simulate_signals
 
 __all__ = [
     "HOLD_DECISION",
@@ -26,6 +25,5 @@ __all__ = [
     "StrategyAction",
     "StrategyContext",
     "StrategyDecision",
-    "simulate_signals",
     "translate_decision",
 ]

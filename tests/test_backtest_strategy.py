@@ -1,5 +1,6 @@
-"""Tests for the backtest strategy interface and signal simulation:
-no-lookahead, determinism, warm-up, and entry/exit sequencing."""
+"""Tests for the backtest strategy interface and the engine's signal ->
+intent -> fill event loop: no-lookahead, determinism, warm-up, and
+entry/exit sequencing."""
 
 from __future__ import annotations
 
@@ -21,9 +22,9 @@ from backend.app.backtesting.strategy.intent import (
     translate_decision,
 )
 from backend.app.backtesting.strategy.reference import MovingAverageCrossoverStrategy
-from backend.app.backtesting.strategy.simulate import simulate_signals
 from backend.app.backtesting.types import FLAT_POSITION, PositionState
 from shared.models.candle import Candle, Timeframe
+from shared.models.signal import SignalDirection
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -42,15 +43,19 @@ def _candle(day_offset: int, close: str) -> Candle:
     )
 
 
-def _config(end_offset: int) -> BacktestConfig:
+def _config_for(strategy: Strategy, end_offset: int) -> BacktestConfig:
+    """A config whose strategy_id/version/parameters match ``strategy``
+    exactly, since ``BacktestEngine.run_strategy`` fails closed on any
+    mismatch between the strategy actually run and what the config claims."""
     return BacktestConfig(
-        strategy_id="test",
-        strategy_version="1.0.0",
+        strategy_id=strategy.strategy_id,
+        strategy_version=strategy.strategy_version,
         symbol="AAPL",
         timeframe=Timeframe.D1,
         start=START,
         end=START + timedelta(days=end_offset),
         initial_capital=Decimal(10000),
+        parameters=strategy.parameters,
     )
 
 
@@ -140,10 +145,10 @@ class _RecordingStrategy(Strategy):
 
 def test_strategy_never_sees_future_candles() -> None:
     candles = [_candle(i, str(100 + i)) for i in range(10)]
-    engine = BacktestEngine(_config(9), candles)
     spy = _RecordingStrategy()
+    engine = BacktestEngine(_config_for(spy, 9), candles)
 
-    simulate_signals(engine.iter_steps(), spy)
+    engine.run_strategy(spy)
 
     assert len(spy.seen_visible_candles) == 10
     for call_index, visible in enumerate(spy.seen_visible_candles):
@@ -158,7 +163,6 @@ def test_strategy_never_sees_future_candles() -> None:
 
 def test_strategy_produces_no_decisions_before_warmup() -> None:
     candles = [_candle(i, str(100 + i)) for i in range(5)]
-    engine = BacktestEngine(_config(4), candles)
 
     class _WarmupSpy(_RecordingStrategy):
         @property
@@ -166,7 +170,8 @@ def test_strategy_produces_no_decisions_before_warmup() -> None:
             return 4
 
     warmup_spy = _WarmupSpy()
-    simulate_signals(engine.iter_steps(), warmup_spy)
+    engine = BacktestEngine(_config_for(warmup_spy, 4), candles)
+    engine.run_strategy(warmup_spy)
     # Only bars with >= 4 visible candles reach decide(): indices 3, 4 (2 calls).
     assert len(warmup_spy.seen_visible_candles) == 2
     assert len(warmup_spy.seen_visible_candles[0]) == 4
@@ -175,9 +180,9 @@ def test_strategy_produces_no_decisions_before_warmup() -> None:
 def test_reference_strategy_holds_during_warmup() -> None:
     candles = [_candle(i, str(100 + i)) for i in range(5)]
     strategy = MovingAverageCrossoverStrategy(fast_period=3, slow_period=20)
-    engine = BacktestEngine(_config(4), candles)
-    intents = simulate_signals(engine.iter_steps(), strategy)
-    assert intents == ()  # never reaches slow_period + 1 = 21 visible candles
+    engine = BacktestEngine(_config_for(strategy, 4), candles)
+    result = engine.run_strategy(strategy)
+    assert result.trades == ()  # never reaches slow_period + 1 = 21 visible candles
 
 
 # --- Determinism ---
@@ -185,34 +190,37 @@ def test_reference_strategy_holds_during_warmup() -> None:
 
 def test_reference_strategy_signals_are_deterministic() -> None:
     candles = [_candle(i, price) for i, price in enumerate(_crossover_prices())]
-    config = _config(len(candles) - 1)
-
     strategy_a = MovingAverageCrossoverStrategy(fast_period=3, slow_period=5)
     strategy_b = MovingAverageCrossoverStrategy(fast_period=3, slow_period=5)
+    config = _config_for(strategy_a, len(candles) - 1)
 
-    intents_a = simulate_signals(BacktestEngine(config, candles).iter_steps(), strategy_a)
-    intents_b = simulate_signals(BacktestEngine(config, candles).iter_steps(), strategy_b)
+    result_a = BacktestEngine(config, candles).run_strategy(strategy_a)
+    result_b = BacktestEngine(config, candles).run_strategy(strategy_b)
 
-    assert intents_a == intents_b
-    assert len(intents_a) > 0  # the crossover pattern must actually produce signals
+    assert result_a.trades == result_b.trades
+    assert len(result_a.trades) > 0  # the crossover pattern must actually produce trades
 
 
 # --- Entry/exit sequencing ---
 
 
-def test_reference_strategy_alternates_open_and_close_without_duplicates() -> None:
+def test_reference_strategy_produces_non_overlapping_long_trades() -> None:
     candles = [_candle(i, price) for i, price in enumerate(_crossover_prices())]
-    config = _config(len(candles) - 1)
     strategy = MovingAverageCrossoverStrategy(fast_period=3, slow_period=5)
+    config = _config_for(strategy, len(candles) - 1)
 
-    intents = simulate_signals(BacktestEngine(config, candles).iter_steps(), strategy)
+    result = BacktestEngine(config, candles).run_strategy(strategy)
 
-    assert len(intents) >= 2  # at least one open + one close given the up-then-down pattern
-    # Must strictly alternate OPEN_LONG, CLOSE, OPEN_LONG, CLOSE, ... — never
-    # two opens or two closes in a row (that would be an impossible transition).
-    for previous, current in zip(intents, intents[1:], strict=False):
-        assert previous.action != current.action
-    assert intents[0].action is IntentAction.OPEN_LONG
+    assert len(result.trades) >= 1
+    # Every completed trade is a full long round-trip that closed before the
+    # next one opened. ``Portfolio`` enforces this at runtime (it raises if
+    # asked to open while already open, or close while flat) — this is a
+    # regression check on that guarantee, not a new one.
+    for trade in result.trades:
+        assert trade.direction is SignalDirection.LONG
+        assert trade.entry_time < trade.exit_time
+    for previous, current in zip(result.trades, result.trades[1:], strict=False):
+        assert previous.exit_time <= current.entry_time
 
 
 def test_reference_strategy_rejects_fast_not_less_than_slow() -> None:

@@ -91,9 +91,35 @@ def iter_backtest_steps(candles: Sequence[Candle], config: BacktestConfig) -> It
         )
 
 
-def compute_run_id(config: BacktestConfig) -> str:
-    """A deterministic identifier derived purely from ``config`` — the same
-    config always yields the same run id, independent of wall-clock time."""
+def compute_data_identity(candles: Sequence[Candle]) -> str:
+    """A deterministic content hash of the actual candle data: count plus
+    every OHLCV value and timestamp. This is the "actual historical-data
+    identity" — ``config.data_source_id`` is optional caller-supplied
+    metadata that can *supplement* this (e.g. distinguishing two vendors
+    that happened to report identical prices) but must never substitute
+    for it, since a caller could leave it unset or wrong.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(str(len(candles)).encode("utf-8"))
+    for candle in candles:
+        hasher.update(candle.symbol.encode("utf-8"))
+        hasher.update(candle.timeframe.value.encode("utf-8"))
+        hasher.update(candle.timestamp.isoformat().encode("utf-8"))
+        hasher.update(str(candle.open).encode("utf-8"))
+        hasher.update(str(candle.high).encode("utf-8"))
+        hasher.update(str(candle.low).encode("utf-8"))
+        hasher.update(str(candle.close).encode("utf-8"))
+        hasher.update(str(candle.volume).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def compute_run_id(config: BacktestConfig, candles: Sequence[Candle]) -> str:
+    """A deterministic identifier derived from ``config`` AND the actual
+    ``candles`` supplied — the same config run against materially different
+    historical data must not collide on the same run id, and the same
+    config + same data always yields the same run id, independent of
+    wall-clock time.
+    """
     payload = "|".join(
         [
             config.strategy_id,
@@ -113,6 +139,7 @@ def compute_run_id(config: BacktestConfig) -> str:
             str(config.random_seed),
             str(config.data_source_id),
             str(config.reproducibility_id),
+            compute_data_identity(candles),
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

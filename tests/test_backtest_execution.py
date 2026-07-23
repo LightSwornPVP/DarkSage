@@ -343,7 +343,7 @@ def test_run_strategy_produces_trades_and_is_deterministic() -> None:
         start=START,
         end=START + timedelta(days=len(candles)),
         initial_capital=Decimal(10000),
-        execution_config=ExecutionConfig(fill_timing=FillTiming.SAME_BAR_CLOSE),
+        parameters={"fast_period": 3, "slow_period": 5},
     )
 
     def fixed_clock() -> datetime:

@@ -82,6 +82,7 @@ def _base_config() -> BacktestConfig:
         initial_capital=Decimal(10000),
         data_source_id="stooq",
         random_seed=42,
+        parameters={"fast_period": 3, "slow_period": 8},
     )
 
 

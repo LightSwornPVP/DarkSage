@@ -227,6 +227,61 @@ def test_walk_forward_parameter_selection_never_sees_out_of_sample_candles() -> 
         assert last_seen < window.out_of_sample.start  # therefore never saw any out-of-sample candle
 
 
+def test_walk_forward_rolling_windows_never_see_candles_before_their_own_in_sample_start() -> None:
+    """Blocker 5: a rolling (non-anchored) window's parameter selection must
+    never reach back into history before its own in-sample start — otherwise
+    a "rolling" window silently behaves like an anchored one, since it would
+    keep seeing all history back to the true start regardless of window."""
+    candles = _crossover_candles(80)
+    windows = generate_walk_forward_windows(
+        START,
+        START + timedelta(days=80),
+        in_sample_duration=timedelta(days=40),
+        out_of_sample_duration=timedelta(days=20),
+    )
+    assert not windows[0].anchored
+    assert windows[1].in_sample.start > START  # second window actually slid forward
+    selector = _RecordingSelector()
+
+    run_walk_forward(
+        windows,
+        base_config=_base_config(80),
+        candles=candles,
+        strategy_factory=_make_strategy_factory(),  # type: ignore[arg-type]
+        select_parameters=selector,
+    )
+
+    for window, (first_seen, _last_seen) in zip(windows, selector.calls, strict=True):
+        assert first_seen >= window.in_sample.start
+
+
+def test_walk_forward_anchored_windows_see_full_history_back_to_true_start() -> None:
+    """Anchored windows are the other legitimate walk-forward style: their
+    in-sample start is fixed at the true start by construction, so they
+    should keep seeing all history back to it as the window grows."""
+    candles = _crossover_candles(80)
+    windows = generate_walk_forward_windows(
+        START,
+        START + timedelta(days=80),
+        in_sample_duration=timedelta(days=40),
+        out_of_sample_duration=timedelta(days=20),
+        anchored=True,
+    )
+    assert all(window.anchored for window in windows)
+    selector = _RecordingSelector()
+
+    run_walk_forward(
+        windows,
+        base_config=_base_config(80),
+        candles=candles,
+        strategy_factory=_make_strategy_factory(),  # type: ignore[arg-type]
+        select_parameters=selector,
+    )
+
+    for first_seen, _last_seen in selector.calls:
+        assert first_seen == START
+
+
 def test_walk_forward_uses_same_frozen_parameters_for_in_and_out_of_sample() -> None:
     candles = _crossover_candles(80)
     windows = generate_walk_forward_windows(

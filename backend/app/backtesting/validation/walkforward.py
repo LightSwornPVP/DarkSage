@@ -7,6 +7,15 @@ only ever receive candles with ``timestamp < in_sample.end`` — never
 candles from that window's out-of-sample period or any later window. The
 out-of-sample backtest reuses the exact parameters chosen in-sample; it
 never re-selects them from out-of-sample data.
+
+Anti-contamination guarantee for rolling windows: a rolling (non-anchored)
+window additionally never sees candles before its own ``in_sample.start``
+— in parameter selection, the in-sample backtest, or the out-of-sample
+backtest's warm-up context. Without this bound, a "rolling" window would
+silently behave like an anchored one, defeating the point of testing
+whether a strategy holds up when calibrated on only a recent, fixed-length
+slice of history. Anchored windows have no such floor: their in-sample
+start is fixed at the true start of the data by construction.
 """
 
 from __future__ import annotations
@@ -31,11 +40,20 @@ ParameterSelector = Callable[[Sequence[Candle]], Mapping[str, StrategyParameterV
 
 @dataclass(frozen=True, slots=True)
 class WalkForwardWindow:
-    """One in-sample/out-of-sample pair."""
+    """One in-sample/out-of-sample pair.
+
+    ``anchored`` records which style produced this window, since in-sample
+    candle selection differs by style: anchored windows legitimately use
+    all history up to ``in_sample.end`` (an "expanding window" is defined
+    that way), while rolling windows must be strictly bounded to
+    ``[in_sample.start, in_sample.end)`` — using any earlier history would
+    silently grow a supposedly fixed-length rolling window.
+    """
 
     window_index: int
     in_sample: DatePartition
     out_of_sample: DatePartition
+    anchored: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +107,11 @@ def generate_walk_forward_windows(
         out_of_sample_end = out_of_sample_start + out_of_sample_duration
         in_sample = DatePartition("in_sample", in_sample_start, out_of_sample_start)
         out_of_sample = DatePartition("out_of_sample", out_of_sample_start, out_of_sample_end)
-        windows.append(WalkForwardWindow(window_index=len(windows), in_sample=in_sample, out_of_sample=out_of_sample))
+        windows.append(
+            WalkForwardWindow(
+                window_index=len(windows), in_sample=in_sample, out_of_sample=out_of_sample, anchored=anchored
+            )
+        )
 
         if not anchored:
             in_sample_start = in_sample_start + out_of_sample_duration
@@ -102,8 +124,22 @@ def generate_walk_forward_windows(
     return tuple(windows)
 
 
-def _candles_before(candles: Sequence[Candle], end: datetime) -> list[Candle]:
-    return [candle for candle in candles if candle.timestamp < end]
+def _candles_before(candles: Sequence[Candle], end: datetime, *, floor: datetime | None = None) -> list[Candle]:
+    """Candles strictly before ``end``. When ``floor`` is given, also
+    excludes anything before it — used to keep a rolling window's
+    parameter selection and both its backtests from reaching back into
+    history the window is not supposed to see (see ``WalkForwardWindow``)."""
+    if floor is None:
+        return [candle for candle in candles if candle.timestamp < end]
+    return [candle for candle in candles if floor <= candle.timestamp < end]
+
+
+def _window_floor(window: WalkForwardWindow) -> datetime | None:
+    """``None`` for anchored windows (full history back to the true start
+    is the intended behavior). For rolling windows, the window's own
+    in-sample start — never look further back than that, or the window
+    silently stops being "rolling"."""
+    return None if window.anchored else window.in_sample.start
 
 
 def _run_partition(
@@ -113,8 +149,10 @@ def _run_partition(
     parameters: Mapping[str, StrategyParameterValue],
     strategy_factory: StrategyFactory,
     clock: Callable[[], datetime],
+    *,
+    floor: datetime | None = None,
 ) -> BacktestResult:
-    partition_candles = _candles_before(candles, partition.end)
+    partition_candles = _candles_before(candles, partition.end, floor=floor)
     config = replace(base_config, start=partition.start, end=partition.end, parameters=parameters)
     engine = BacktestEngine(config, partition_candles, clock=clock)
     return engine.run_strategy(strategy_factory(parameters))
@@ -170,14 +208,15 @@ def run_walk_forward(
     window_results: list[WalkForwardWindowResult] = []
 
     for window in windows:
-        in_sample_candles = _candles_before(candles, window.in_sample.end)
+        floor = _window_floor(window)
+        in_sample_candles = _candles_before(candles, window.in_sample.end, floor=floor)
         parameters = select_parameters(in_sample_candles)
 
         in_sample_result = _run_partition(
-            base_config, candles, window.in_sample, parameters, strategy_factory, clock
+            base_config, candles, window.in_sample, parameters, strategy_factory, clock, floor=floor
         )
         out_of_sample_result = _run_partition(
-            base_config, candles, window.out_of_sample, parameters, strategy_factory, clock
+            base_config, candles, window.out_of_sample, parameters, strategy_factory, clock, floor=floor
         )
 
         window_results.append(

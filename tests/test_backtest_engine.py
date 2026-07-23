@@ -170,15 +170,24 @@ def test_iter_backtest_steps_marks_warmup_candles_inactive() -> None:
 
 
 def test_compute_run_id_is_deterministic_for_identical_config() -> None:
+    candles = _candles(5)
     config_a = _config()
     config_b = _config()
-    assert compute_run_id(config_a) == compute_run_id(config_b)
+    assert compute_run_id(config_a, candles) == compute_run_id(config_b, candles)
 
 
 def test_compute_run_id_differs_for_different_parameters() -> None:
+    candles = _candles(5)
     config_a = _config(parameters={"fast": 10})
     config_b = _config(parameters={"fast": 20})
-    assert compute_run_id(config_a) != compute_run_id(config_b)
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_differs_for_different_candle_data() -> None:
+    config = _config()
+    candles_a = _candles(5)
+    candles_b = _candles(5, start_offset=1)
+    assert compute_run_id(config, candles_a) != compute_run_id(config, candles_b)
 
 
 def test_engine_run_is_deterministic_for_same_inputs() -> None:
