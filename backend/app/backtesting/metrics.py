@@ -131,6 +131,29 @@ def _cagr(
         return None
 
 
+def max_drawdown_from_values(values: Sequence[Decimal]) -> Decimal:
+    """The core peak-to-trough drawdown calculation on a plain sequence of
+    values, with no notion of time. Shared by equity-curve metrics (below,
+    which additionally track *when* the max drawdown occurred — meaningful
+    only because equity observations carry real timestamps) and Monte Carlo
+    path analysis (``robustness.py``, whose simulated paths are just
+    reordered/resampled Decimal amounts with no coherent timeline to
+    attach a duration to).
+    """
+    if not values:
+        return Decimal(0)
+    peak = values[0]
+    max_drawdown = Decimal(0)
+    for value in values:
+        if value > peak:
+            peak = value
+        elif peak > 0:
+            drawdown = (peak - value) / peak
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+    return max_drawdown
+
+
 def _max_drawdown(equity_curve: Sequence[EquityObservation]) -> tuple[Decimal | None, timedelta | None]:
     if not equity_curve:
         return None, None

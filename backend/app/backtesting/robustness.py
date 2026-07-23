@@ -20,7 +20,7 @@ from typing import Literal
 
 from backend.app.backtesting.config import StrategyParameterValue
 from backend.app.backtesting.errors import InsufficientSampleSizeError
-from backend.app.backtesting.metrics import PerformanceMetrics, compute_performance_metrics
+from backend.app.backtesting.metrics import PerformanceMetrics, compute_performance_metrics, max_drawdown_from_values
 from backend.app.backtesting.types import BacktestResult, SimulatedTrade
 
 _DEFAULT_PERCENTILES: tuple[Decimal, ...] = (Decimal(5), Decimal(25), Decimal(50), Decimal(75), Decimal(95))
@@ -77,19 +77,6 @@ def _equity_path(trades: Sequence[SimulatedTrade], initial_capital: Decimal) -> 
     return path
 
 
-def _max_drawdown_from_path(path: Sequence[Decimal]) -> Decimal:
-    peak = path[0]
-    max_drawdown = Decimal(0)
-    for value in path:
-        if value > peak:
-            peak = value
-        elif peak > 0:
-            drawdown = (peak - value) / peak
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
-    return max_drawdown
-
-
 def run_monte_carlo(
     trades: Sequence[SimulatedTrade],
     *,
@@ -126,7 +113,7 @@ def run_monte_carlo(
 
         path = _equity_path(order, initial_capital)
         ending_equities.append(path[-1])
-        max_drawdowns.append(_max_drawdown_from_path(path))
+        max_drawdowns.append(max_drawdown_from_values(path))
 
     ending_equities.sort()
     max_drawdowns.sort()

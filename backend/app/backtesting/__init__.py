@@ -34,6 +34,7 @@ from backend.app.backtesting.metrics import (
     TradeExcursion,
     compute_performance_metrics,
     compute_trade_excursion,
+    max_drawdown_from_values,
 )
 from backend.app.backtesting.comparison import (
     ComparisonResult,
@@ -127,6 +128,7 @@ __all__ = [
     "compute_trade_excursion",
     "generate_walk_forward_windows",
     "iter_backtest_steps",
+    "max_drawdown_from_values",
     "run_monte_carlo",
     "run_parameter_stability",
     "run_walk_forward",
