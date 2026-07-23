@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from decimal import Decimal
 
-from backend.app.backtesting.engine import BacktestStep
+from backend.app.backtesting.history import BacktestStep
 from backend.app.backtesting.strategy.base import Strategy
 from backend.app.backtesting.strategy.context import StrategyContext
 from backend.app.backtesting.strategy.intent import IntentAction, SimulatedOrderIntent, translate_decision
@@ -52,7 +52,7 @@ def simulate_signals(steps: Iterable[BacktestStep], strategy: Strategy) -> tuple
             visible_candles=step.visible_candles, position=position, parameters=strategy.parameters
         )
         decision = strategy.decide(context)
-        intent = translate_decision(decision, position, step.candle.timestamp)
+        intent = translate_decision(decision, position, step.candle.timestamp, step.index)
         if intent is None:
             continue
 

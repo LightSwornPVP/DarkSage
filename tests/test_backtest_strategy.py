@@ -70,36 +70,37 @@ def _crossover_prices() -> list[str]:
 
 
 def test_translate_decision_hold_produces_no_intent() -> None:
-    assert translate_decision(HOLD_DECISION, FLAT_POSITION, START) is None
+    assert translate_decision(HOLD_DECISION, FLAT_POSITION, START, 0) is None
 
 
 def test_translate_decision_enter_long_while_flat_produces_intent() -> None:
     intent = translate_decision(
-        StrategyDecision(action=StrategyAction.ENTER_LONG), FLAT_POSITION, START
+        StrategyDecision(action=StrategyAction.ENTER_LONG), FLAT_POSITION, START, 0
     )
     assert intent is not None
     assert intent.action is IntentAction.OPEN_LONG
+    assert intent.signal_index == 0
 
 
 def test_translate_decision_enter_long_while_already_long_is_noop() -> None:
     long_position = PositionState(quantity=Decimal(1), average_entry_price=Decimal(100))
-    assert translate_decision(StrategyDecision(action=StrategyAction.ENTER_LONG), long_position, START) is None
+    assert translate_decision(StrategyDecision(action=StrategyAction.ENTER_LONG), long_position, START, 0) is None
 
 
 def test_translate_decision_exit_while_flat_is_noop() -> None:
-    assert translate_decision(StrategyDecision(action=StrategyAction.EXIT), FLAT_POSITION, START) is None
+    assert translate_decision(StrategyDecision(action=StrategyAction.EXIT), FLAT_POSITION, START, 0) is None
 
 
 def test_translate_decision_exit_while_long_produces_close_intent() -> None:
     long_position = PositionState(quantity=Decimal(1), average_entry_price=Decimal(100))
-    intent = translate_decision(StrategyDecision(action=StrategyAction.EXIT), long_position, START)
+    intent = translate_decision(StrategyDecision(action=StrategyAction.EXIT), long_position, START, 0)
     assert intent is not None
     assert intent.action is IntentAction.CLOSE
 
 
 def test_translate_decision_enter_short_while_long_is_noop() -> None:
     long_position = PositionState(quantity=Decimal(1), average_entry_price=Decimal(100))
-    assert translate_decision(StrategyDecision(action=StrategyAction.ENTER_SHORT), long_position, START) is None
+    assert translate_decision(StrategyDecision(action=StrategyAction.ENTER_SHORT), long_position, START, 0) is None
 
 
 def test_strategy_decision_rejects_non_positive_stop() -> None:

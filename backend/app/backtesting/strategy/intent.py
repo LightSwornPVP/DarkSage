@@ -59,24 +59,27 @@ class IntentAction(str, Enum):
 class SimulatedOrderIntent:
     """A simulation-only intent to transact — never a real order.
 
-    ``signal_time`` is the timestamp of the bar whose close the decision was
-    based on; Slice 2.3's execution simulator decides the earliest
-    permitted simulated fill time/price from this, never from information
-    later than ``signal_time``.
+    ``signal_time``/``signal_index`` identify the bar whose close the
+    decision was based on; Slice 2.3's execution simulator locates the
+    earliest permitted simulated fill from ``signal_index`` and never reads
+    any candle at a later index.
     """
 
     action: IntentAction
     signal_time: datetime
+    signal_index: int
     stop_price: Decimal | None = None
     target_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.signal_time.tzinfo is None:
             raise ValueError("SimulatedOrderIntent.signal_time must be timezone-aware")
+        if self.signal_index < 0:
+            raise ValueError("SimulatedOrderIntent.signal_index must be >= 0")
 
 
 def translate_decision(
-    decision: StrategyDecision, position: PositionState, signal_time: datetime
+    decision: StrategyDecision, position: PositionState, signal_time: datetime, signal_index: int
 ) -> SimulatedOrderIntent | None:
     """Reconcile a strategy decision against the current position.
 
@@ -94,6 +97,7 @@ def translate_decision(
         return SimulatedOrderIntent(
             action=IntentAction.OPEN_LONG,
             signal_time=signal_time,
+            signal_index=signal_index,
             stop_price=decision.stop_price,
             target_price=decision.target_price,
         )
@@ -104,6 +108,7 @@ def translate_decision(
         return SimulatedOrderIntent(
             action=IntentAction.OPEN_SHORT,
             signal_time=signal_time,
+            signal_index=signal_index,
             stop_price=decision.stop_price,
             target_price=decision.target_price,
         )
@@ -111,6 +116,6 @@ def translate_decision(
     if decision.action is StrategyAction.EXIT:
         if position.is_flat:
             return None
-        return SimulatedOrderIntent(action=IntentAction.CLOSE, signal_time=signal_time)
+        return SimulatedOrderIntent(action=IntentAction.CLOSE, signal_time=signal_time, signal_index=signal_index)
 
     raise AssertionError(f"unhandled StrategyAction: {decision.action}")

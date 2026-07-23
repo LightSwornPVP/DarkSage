@@ -4,7 +4,14 @@ the canonical TradeValidationPipeline; nothing here is, or feeds, a real
 broker/execution path.
 """
 
-from backend.app.backtesting.config import BacktestConfig, CostConfig, StrategyParameterValue
+from backend.app.backtesting.config import (
+    BacktestConfig,
+    CostConfig,
+    ExecutionConfig,
+    FillTiming,
+    PositionSizingConfig,
+    StrategyParameterValue,
+)
 from backend.app.backtesting.engine import (
     BacktestEngine,
     BacktestStep,
@@ -19,6 +26,8 @@ from backend.app.backtesting.errors import (
     InvalidExecutionConfigError,
     InvalidHistoryError,
 )
+from backend.app.backtesting.execution import ExecutionSimulator, SimulatedFill
+from backend.app.backtesting.portfolio import Portfolio
 from backend.app.backtesting.types import (
     FLAT_POSITION,
     BacktestResult,
@@ -38,11 +47,17 @@ __all__ = [
     "BacktestStep",
     "CostConfig",
     "EquityObservation",
+    "ExecutionConfig",
+    "ExecutionSimulator",
+    "FillTiming",
     "InsufficientHistoryError",
     "InvalidBacktestConfigError",
     "InvalidExecutionConfigError",
     "InvalidHistoryError",
+    "Portfolio",
+    "PositionSizingConfig",
     "PositionState",
+    "SimulatedFill",
     "SimulatedTrade",
     "StrategyParameterValue",
     "compute_run_id",

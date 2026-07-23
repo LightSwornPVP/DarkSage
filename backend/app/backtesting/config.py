@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 
 from backend.app.backtesting.errors import InvalidBacktestConfigError, InvalidExecutionConfigError
 from shared.models.candle import Timeframe
@@ -46,6 +47,55 @@ class CostConfig:
             raise InvalidExecutionConfigError("slippage_rate must be >= 0")
 
 
+class FillTiming(str, Enum):
+    """When a simulated fill may occur relative to the bar that produced
+    the signal — the explicit rule Slice 2.3 uses to avoid any lookahead
+    ambiguity about "what price could this order actually have filled at?".
+    """
+
+    NEXT_BAR_OPEN = "next_bar_open"
+    """Fill at the opening price of the bar *after* the signal bar. The
+    safest default: the signal is based on bar N's close, and the earliest
+    tradable price after that close is bar N+1's open."""
+
+    SAME_BAR_CLOSE = "same_bar_close"
+    """Fill at the same bar's close — only non-lookahead because the
+    strategy's decision was itself based on that same close, so no
+    information later than the signal is used."""
+
+
+@dataclass(frozen=True, slots=True)
+class PositionSizingConfig:
+    """How much to trade, expressed as a fraction of equity at entry time.
+
+    ``max_participation_rate``, if set, caps the entry quantity at that
+    fraction of the fill bar's volume — a simple, single-tranche liquidity
+    constraint. It is deliberately not a full partial-fill/order-book model
+    (that would be over-engineering for this slice): the cap only ever
+    reduces the *initial* sizing decision, and an exit always fully closes
+    the existing position regardless of that bar's volume.
+    """
+
+    equity_fraction: Decimal = Decimal(1)
+    max_participation_rate: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if not (Decimal(0) < self.equity_fraction <= Decimal(1)):
+            raise InvalidExecutionConfigError("equity_fraction must be in (0, 1]")
+        if self.max_participation_rate is not None and not (Decimal(0) < self.max_participation_rate <= Decimal(1)):
+            raise InvalidExecutionConfigError("max_participation_rate must be in (0, 1]")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionConfig:
+    """Everything Slice 2.3's execution simulator needs: costs, fill
+    timing, and position sizing."""
+
+    cost: CostConfig = field(default_factory=CostConfig)
+    fill_timing: FillTiming = FillTiming.NEXT_BAR_OPEN
+    position_sizing: PositionSizingConfig = field(default_factory=PositionSizingConfig)
+
+
 @dataclass(frozen=True, slots=True)
 class BacktestConfig:
     """The complete, reproducible configuration for one backtest run.
@@ -64,7 +114,7 @@ class BacktestConfig:
     end: datetime
     initial_capital: Decimal
     parameters: Mapping[str, StrategyParameterValue] = field(default_factory=dict)
-    cost_config: CostConfig = field(default_factory=CostConfig)
+    execution_config: ExecutionConfig = field(default_factory=ExecutionConfig)
     random_seed: int | None = None
     data_source_id: str | None = None
     reproducibility_id: str | None = None
