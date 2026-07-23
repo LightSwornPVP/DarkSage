@@ -14,7 +14,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Literal, Protocol
 
-from backend.app.scanner.types import FilterOutcome, ScanContext
+from backend.app.scanner.types import FilterOutcome, ScanContext, latest_single_indicator_value
 
 
 class Filter(Protocol):
@@ -147,15 +147,9 @@ class MovingAverageAlignmentFilter:
     def name(self) -> str:
         return f"ma_alignment_{self._fast_indicator}_{self._direction}_{self._slow_indicator}"
 
-    def _latest_single_value(self, context: ScanContext, indicator_name: str) -> Decimal | None:
-        result = context.indicators.get(indicator_name)
-        if result is None or result.latest is None:
-            return None
-        return next(iter(result.latest.values.values()), None)
-
     def evaluate(self, context: ScanContext) -> FilterOutcome:
-        fast_value = self._latest_single_value(context, self._fast_indicator)
-        slow_value = self._latest_single_value(context, self._slow_indicator)
+        fast_value = latest_single_indicator_value(context.indicators, self._fast_indicator)
+        slow_value = latest_single_indicator_value(context.indicators, self._slow_indicator)
         if fast_value is None or slow_value is None:
             return FilterOutcome(
                 passed=False,

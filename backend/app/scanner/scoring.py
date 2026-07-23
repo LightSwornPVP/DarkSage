@@ -22,7 +22,13 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Protocol
 
-from backend.app.scanner.types import ScanCandidate, ScanResult, ScanScore, ScoreComponent
+from backend.app.scanner.types import (
+    ScanCandidate,
+    ScanResult,
+    ScanScore,
+    ScoreComponent,
+    latest_single_indicator_value,
+)
 
 
 class ScoreComponentFn(Protocol):
@@ -39,13 +45,6 @@ class ScoreComponentFn(Protocol):
         data can't support it (never a fabricated 0)."""
 
 
-def _latest_single_value(candidate: ScanCandidate, indicator_name: str) -> Decimal | None:
-    result = candidate.indicators.get(indicator_name)
-    if result is None or result.latest is None:
-        return None
-    return next(iter(result.latest.values.values()), None)
-
-
 class TrendStructureComponent:
     """Percentage spread between a fast and slow moving average — positive
     means the fast average is above the slow one (bullish structure)."""
@@ -60,8 +59,8 @@ class TrendStructureComponent:
         return f"trend_{self._fast_indicator}_{self._slow_indicator}"
 
     def compute(self, candidate: ScanCandidate) -> Decimal | None:
-        fast_value = _latest_single_value(candidate, self._fast_indicator)
-        slow_value = _latest_single_value(candidate, self._slow_indicator)
+        fast_value = latest_single_indicator_value(candidate.indicators, self._fast_indicator)
+        slow_value = latest_single_indicator_value(candidate.indicators, self._slow_indicator)
         if fast_value is None or slow_value is None or slow_value == 0:
             return None
         return (fast_value - slow_value) / slow_value * Decimal(100)

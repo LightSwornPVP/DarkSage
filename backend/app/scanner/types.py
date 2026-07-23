@@ -24,6 +24,23 @@ class ScanContext:
     indicators: Mapping[str, IndicatorResult]
 
 
+def latest_single_indicator_value(
+    indicators: Mapping[str, IndicatorResult], indicator_name: str
+) -> Decimal | None:
+    """The latest value of a single-valued indicator (e.g. an EMA/SMA's one
+    ``"ema"``/``"sma"`` entry), or None if the indicator is missing, has no
+    points, or the specific key isn't otherwise known.
+
+    Shared by filters (``MovingAverageAlignmentFilter``) and scoring
+    (``TrendStructureComponent``) so both read a moving average's latest
+    value the same way.
+    """
+    result = indicators.get(indicator_name)
+    if result is None or result.latest is None:
+        return None
+    return next(iter(result.latest.values.values()), None)
+
+
 @dataclass(frozen=True, slots=True)
 class FilterOutcome:
     """The result of evaluating one filter against one ``ScanContext``."""

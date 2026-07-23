@@ -30,6 +30,7 @@ from backend.app.scanner.types import (
     ScanResult,
     ScanScore,
     ScoreComponent,
+    latest_single_indicator_value,
 )
 
 __all__ = [
@@ -53,4 +54,5 @@ __all__ = [
     "TrendStructureComponent",
     "VolatilityContextComponent",
     "VolumeParticipationComponent",
+    "latest_single_indicator_value",
 ]
