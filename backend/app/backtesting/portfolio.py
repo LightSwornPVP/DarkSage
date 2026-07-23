@@ -29,6 +29,7 @@ class Portfolio:
         self._position = FLAT_POSITION
         self._entry_time: datetime | None = None
         self._entry_commission = Decimal(0)
+        self._entry_stop_price: Decimal | None = None
         self._trades: list[SimulatedTrade] = []
 
     @property
@@ -56,17 +57,35 @@ class Portfolio:
 
     def apply_fill(self, fill: SimulatedFill) -> None:
         if fill.action is IntentAction.OPEN_LONG:
-            self._open(quantity=fill.quantity, price=fill.fill_price, commission=fill.commission, time=fill.fill_time)
+            self._open(
+                quantity=fill.quantity,
+                price=fill.fill_price,
+                commission=fill.commission,
+                time=fill.fill_time,
+                stop_price=fill.stop_price,
+            )
         elif fill.action is IntentAction.OPEN_SHORT:
             self._open(
-                quantity=-fill.quantity, price=fill.fill_price, commission=fill.commission, time=fill.fill_time
+                quantity=-fill.quantity,
+                price=fill.fill_price,
+                commission=fill.commission,
+                time=fill.fill_time,
+                stop_price=fill.stop_price,
             )
         elif fill.action is IntentAction.CLOSE:
             self._close(fill)
         else:
             raise AssertionError(f"unhandled IntentAction: {fill.action}")
 
-    def _open(self, *, quantity: Decimal, price: Decimal, commission: Decimal, time: datetime) -> None:
+    def _open(
+        self,
+        *,
+        quantity: Decimal,
+        price: Decimal,
+        commission: Decimal,
+        time: datetime,
+        stop_price: Decimal | None,
+    ) -> None:
         if not self._position.is_flat:
             raise ValueError("cannot open a new position while one is already open")
         # Buying (positive quantity) spends cash; short-selling (negative
@@ -76,6 +95,7 @@ class Portfolio:
         self._position = PositionState(quantity=quantity, average_entry_price=price)
         self._entry_time = time
         self._entry_commission = commission
+        self._entry_stop_price = stop_price
 
     def _close(self, fill: SimulatedFill) -> None:
         position = self._position
@@ -87,6 +107,7 @@ class Portfolio:
         entry_price = position.average_entry_price
         entry_time = self._entry_time
         entry_commission = self._entry_commission
+        entry_stop_price = self._entry_stop_price
         quantity_magnitude = abs(position.quantity)
         direction = position.direction
         assert direction is not None
@@ -116,8 +137,10 @@ class Portfolio:
                 quantity=quantity_magnitude,
                 fees_paid=total_fees,
                 pnl=gross_pnl - total_fees,
+                stop_price=entry_stop_price,
             )
         )
         self._position = FLAT_POSITION
         self._entry_time = None
         self._entry_commission = Decimal(0)
+        self._entry_stop_price = None

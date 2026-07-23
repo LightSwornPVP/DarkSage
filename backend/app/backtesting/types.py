@@ -83,6 +83,9 @@ class SimulatedTrade:
     quantity: Decimal
     fees_paid: Decimal
     pnl: Decimal
+    stop_price: Decimal | None = None
+    """The stop the strategy set at entry, if any — Slice 2.4's R-multiple
+    calculation is only defined for trades where this is present."""
 
     def __post_init__(self) -> None:
         if self.entry_time.tzinfo is None or self.exit_time.tzinfo is None:
@@ -95,6 +98,8 @@ class SimulatedTrade:
             raise ValueError("entry_price and exit_price must be > 0")
         if self.fees_paid < 0:
             raise ValueError("fees_paid must be >= 0")
+        if self.stop_price is not None and self.stop_price <= 0:
+            raise ValueError("stop_price must be > 0")
 
 
 @dataclass(frozen=True, slots=True)

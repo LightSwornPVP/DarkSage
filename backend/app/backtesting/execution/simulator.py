@@ -67,6 +67,7 @@ class ExecutionSimulator:
             fill_price=fill_price,
             quantity=quantity,
             commission=commission,
+            stop_price=intent.stop_price if intent.action is not IntentAction.CLOSE else None,
         )
 
     def _resolve_fill_candle(

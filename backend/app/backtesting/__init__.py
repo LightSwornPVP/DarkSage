@@ -27,6 +27,12 @@ from backend.app.backtesting.errors import (
     InvalidHistoryError,
 )
 from backend.app.backtesting.execution import ExecutionSimulator, SimulatedFill
+from backend.app.backtesting.metrics import (
+    PerformanceMetrics,
+    TradeExcursion,
+    compute_performance_metrics,
+    compute_trade_excursion,
+)
 from backend.app.backtesting.portfolio import Portfolio
 from backend.app.backtesting.types import (
     FLAT_POSITION,
@@ -54,13 +60,17 @@ __all__ = [
     "InvalidBacktestConfigError",
     "InvalidExecutionConfigError",
     "InvalidHistoryError",
+    "PerformanceMetrics",
     "Portfolio",
     "PositionSizingConfig",
     "PositionState",
     "SimulatedFill",
     "SimulatedTrade",
     "StrategyParameterValue",
+    "TradeExcursion",
+    "compute_performance_metrics",
     "compute_run_id",
+    "compute_trade_excursion",
     "iter_backtest_steps",
     "validate_backtest_history",
 ]

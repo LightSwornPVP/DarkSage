@@ -23,6 +23,9 @@ class SimulatedFill:
     fill_price: Decimal
     quantity: Decimal
     commission: Decimal
+    stop_price: Decimal | None = None
+    """Carried through from the opening intent so ``Portfolio`` can attach
+    it to the resulting ``SimulatedTrade`` for R-multiple support."""
 
     def __post_init__(self) -> None:
         if self.signal_time.tzinfo is None or self.fill_time.tzinfo is None:
@@ -35,3 +38,5 @@ class SimulatedFill:
             raise ValueError("quantity must be a positive magnitude")
         if self.commission < 0:
             raise ValueError("commission must be >= 0")
+        if self.stop_price is not None and self.stop_price <= 0:
+            raise ValueError("stop_price must be > 0")
