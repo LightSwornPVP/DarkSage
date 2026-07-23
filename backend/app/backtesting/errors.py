@@ -33,6 +33,12 @@ class InvalidExecutionConfigError(BacktestError):
     negative commission rate, an unrecognized fill-timing rule)."""
 
 
+class InsufficientSampleSizeError(BacktestError):
+    """Too few trades/observations exist to support a statistically
+    meaningful robustness analysis — raised instead of fabricating
+    confidence from a tiny dataset."""
+
+
 class InvalidPartitionError(BacktestError):
     """A date partition (train/validation/test, or a walk-forward window)
     is malformed, overlaps another partition, or cannot be constructed
