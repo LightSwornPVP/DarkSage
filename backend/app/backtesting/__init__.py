@@ -35,6 +35,16 @@ from backend.app.backtesting.metrics import (
     compute_performance_metrics,
     compute_trade_excursion,
 )
+from backend.app.backtesting.comparison import (
+    ComparisonResult,
+    ComparisonRow,
+    ExperimentEntry,
+    ExperimentRegistry,
+    RankedEntry,
+    build_comparison_table,
+    compare_experiments,
+    compare_two,
+)
 from backend.app.backtesting.portfolio import Portfolio
 from backend.app.backtesting.robustness import (
     MonteCarloConfig,
@@ -72,8 +82,12 @@ __all__ = [
     "BacktestResult",
     "BacktestRun",
     "BacktestStep",
+    "ComparisonResult",
+    "ComparisonRow",
     "CostConfig",
     "DatePartition",
+    "ExperimentEntry",
+    "ExperimentRegistry",
     "EquityObservation",
     "ExecutionConfig",
     "ExecutionSimulator",
@@ -92,6 +106,7 @@ __all__ = [
     "Portfolio",
     "PositionSizingConfig",
     "PositionState",
+    "RankedEntry",
     "SimulatedFill",
     "SimulatedTrade",
     "StrategyParameterValue",
@@ -100,6 +115,9 @@ __all__ = [
     "WalkForwardWindow",
     "WalkForwardWindowResult",
     "assess_stability",
+    "build_comparison_table",
+    "compare_experiments",
+    "compare_two",
     "compute_performance_metrics",
     "compute_run_id",
     "compute_trade_excursion",
