@@ -134,6 +134,26 @@ def compute_data_identity(candles: Sequence[Candle]) -> str:
     return hasher.hexdigest()
 
 
+def _hash_optional(hasher: "hashlib._Hash", kind: str, value: object) -> None:
+    """Frame an ``Optional`` identity field unambiguously: an explicit
+    presence marker, framed like every other field, plus — only when the
+    value is actually present — its own framed representation.
+
+    Serializing an ``Optional`` field through plain ``str(...)`` makes
+    ``field=None`` collide with the literal string ``field="None"`` for
+    str-typed fields, since ``str(None) == "None"`` — and likewise for any
+    other value that happens to render as the same text. Because the
+    marker itself goes through ``_hash_framed``, a value that happens to
+    contain marker-like text cannot be crafted to fake a different
+    presence state either.
+    """
+    if value is None:
+        _hash_framed(hasher, f"optional-{kind}:none")
+    else:
+        _hash_framed(hasher, f"optional-{kind}:some")
+        _hash_framed(hasher, str(value))
+
+
 def compute_run_id(config: BacktestConfig, candles: Sequence[Candle]) -> str:
     """A deterministic identifier derived from ``config`` AND the actual
     ``candles`` supplied — the same config run against materially different
@@ -151,28 +171,30 @@ def compute_run_id(config: BacktestConfig, candles: Sequence[Candle]) -> str:
     sequences differ because each field's exact length is encoded
     immediately before it (see ``_hash_framed``). Strategy parameters are
     hashed via ``canonical_parameters`` (type-preserving: ``True`` and
-    ``1``, or ``Decimal("1")`` and ``1``, are never conflated).
+    ``1``, or ``Decimal("1")`` and ``1``, are never conflated). Every
+    ``Optional``-typed field (``random_seed``, ``data_source_id``,
+    ``reproducibility_id``, ``max_participation_rate``) goes through
+    ``_hash_optional`` instead of bare ``str(...)``, so ``None`` is never
+    ambiguous with the literal text a present value might render as (see
+    ``_hash_optional``).
     """
     hasher = hashlib.sha256()
-    for field in (
-        config.strategy_id,
-        config.strategy_version,
-        config.symbol,
-        config.timeframe.value,
-        config.start.isoformat(),
-        config.end.isoformat(),
-        str(config.initial_capital),
-        repr(canonical_parameters(config.parameters)),
-        str(config.execution_config.cost.commission_rate),
-        str(config.execution_config.cost.spread),
-        str(config.execution_config.cost.slippage_rate),
-        config.execution_config.fill_timing.value,
-        str(config.execution_config.position_sizing.equity_fraction),
-        str(config.execution_config.position_sizing.max_participation_rate),
-        str(config.random_seed),
-        str(config.data_source_id),
-        str(config.reproducibility_id),
-        compute_data_identity(candles),
-    ):
-        _hash_framed(hasher, field)
+    _hash_framed(hasher, config.strategy_id)
+    _hash_framed(hasher, config.strategy_version)
+    _hash_framed(hasher, config.symbol)
+    _hash_framed(hasher, config.timeframe.value)
+    _hash_framed(hasher, config.start.isoformat())
+    _hash_framed(hasher, config.end.isoformat())
+    _hash_framed(hasher, str(config.initial_capital))
+    _hash_framed(hasher, repr(canonical_parameters(config.parameters)))
+    _hash_framed(hasher, str(config.execution_config.cost.commission_rate))
+    _hash_framed(hasher, str(config.execution_config.cost.spread))
+    _hash_framed(hasher, str(config.execution_config.cost.slippage_rate))
+    _hash_framed(hasher, config.execution_config.fill_timing.value)
+    _hash_framed(hasher, str(config.execution_config.position_sizing.equity_fraction))
+    _hash_optional(hasher, "decimal", config.execution_config.position_sizing.max_participation_rate)
+    _hash_optional(hasher, "int", config.random_seed)
+    _hash_optional(hasher, "string", config.data_source_id)
+    _hash_optional(hasher, "string", config.reproducibility_id)
+    _hash_framed(hasher, compute_data_identity(candles))
     return hasher.hexdigest()[:16]

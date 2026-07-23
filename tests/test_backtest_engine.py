@@ -9,7 +9,13 @@ from decimal import Decimal
 
 import pytest
 
-from backend.app.backtesting.config import BacktestConfig, CostConfig, ExecutionConfig, canonical_parameters
+from backend.app.backtesting.config import (
+    BacktestConfig,
+    CostConfig,
+    ExecutionConfig,
+    PositionSizingConfig,
+    canonical_parameters,
+)
 from backend.app.backtesting.engine import (
     BacktestEngine,
     compute_run_id,
@@ -249,6 +255,66 @@ def test_compute_run_id_differs_when_random_seed_changes() -> None:
     candles = _candles(5)
     config_a = _config(random_seed=1)
     config_b = _config(random_seed=2)
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+# --- Optional identity fields: None must never collide with a present value ---
+
+
+def test_compute_run_id_data_source_id_none_differs_from_literal_none_string() -> None:
+    candles = _candles(5)
+    config_a = _config(data_source_id=None)
+    config_b = _config(data_source_id="None")
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_data_source_id_none_differs_from_empty_string() -> None:
+    candles = _candles(5)
+    config_a = _config(data_source_id=None)
+    config_b = _config(data_source_id="")
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_data_source_id_empty_string_differs_from_literal_none_string() -> None:
+    candles = _candles(5)
+    config_a = _config(data_source_id="")
+    config_b = _config(data_source_id="None")
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_reproducibility_id_none_differs_from_literal_none_string() -> None:
+    candles = _candles(5)
+    config_a = _config(reproducibility_id=None)
+    config_b = _config(reproducibility_id="None")
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_reproducibility_id_none_differs_from_empty_string() -> None:
+    candles = _candles(5)
+    config_a = _config(reproducibility_id=None)
+    config_b = _config(reproducibility_id="")
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_identical_optional_values_remain_deterministic() -> None:
+    candles = _candles(5)
+    config_a = _config(data_source_id="stooq", reproducibility_id="repro-1", random_seed=42)
+    config_b = _config(data_source_id="stooq", reproducibility_id="repro-1", random_seed=42)
+    assert compute_run_id(config_a, candles) == compute_run_id(config_b, candles)
+
+    config_none_a = _config(data_source_id=None, reproducibility_id=None, random_seed=None)
+    config_none_b = _config(data_source_id=None, reproducibility_id=None, random_seed=None)
+    assert compute_run_id(config_none_a, candles) == compute_run_id(config_none_b, candles)
+
+
+def test_compute_run_id_max_participation_rate_none_differs_from_present_value() -> None:
+    candles = _candles(5)
+    config_a = _config(
+        execution_config=ExecutionConfig(position_sizing=PositionSizingConfig(max_participation_rate=None))
+    )
+    config_b = _config(
+        execution_config=ExecutionConfig(position_sizing=PositionSizingConfig(max_participation_rate=Decimal("0.5")))
+    )
     assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
 
 
