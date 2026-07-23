@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.app.backtesting.config import BacktestConfig, CostConfig, canonical_parameters
+from backend.app.backtesting.config import BacktestConfig, CostConfig, ExecutionConfig, canonical_parameters
 from backend.app.backtesting.engine import (
     BacktestEngine,
     compute_run_id,
@@ -223,6 +223,32 @@ def test_compute_run_id_distinguishes_decimal_from_int_parameter() -> None:
     candles = _candles(5)
     config_a = _config(parameters={"p": Decimal("1")})
     config_b = _config(parameters={"p": 1})
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_delimiter_collision_class_is_impossible() -> None:
+    # strategy_id="a|b" + strategy_version="c" naively concatenates the
+    # same as strategy_id="a" + strategy_version="b|c" under a "|"-joined
+    # payload -- framed (length-prefixed) hashing must not collide on this.
+    candles = _candles(5)
+    config_a = _config(strategy_id="a|b", strategy_version="c")
+    config_b = _config(strategy_id="a", strategy_version="b|c")
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_differs_when_a_single_execution_field_changes() -> None:
+    # Proves field-sensitivity beyond just strategy_id/version/parameters:
+    # every identity-relevant config field must be able to change the id.
+    candles = _candles(5)
+    config_a = _config(execution_config=ExecutionConfig(cost=CostConfig(commission_rate=Decimal("0.001"))))
+    config_b = _config(execution_config=ExecutionConfig(cost=CostConfig(commission_rate=Decimal("0.002"))))
+    assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
+
+
+def test_compute_run_id_differs_when_random_seed_changes() -> None:
+    candles = _candles(5)
+    config_a = _config(random_seed=1)
+    config_b = _config(random_seed=2)
     assert compute_run_id(config_a, candles) != compute_run_id(config_b, candles)
 
 

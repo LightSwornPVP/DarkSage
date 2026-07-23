@@ -140,27 +140,39 @@ def compute_run_id(config: BacktestConfig, candles: Sequence[Candle]) -> str:
     historical data must not collide on the same run id, and the same
     config + same data always yields the same run id, independent of
     wall-clock time.
+
+    Every identity-relevant field is fed through ``_hash_framed``
+    (length-prefixed, never delimiter-joined) in a fixed order, so two
+    materially different configs can never collide just because a
+    delimiter happened to appear inside a field value — e.g.
+    ``strategy_id="a|b", strategy_version="c"`` versus
+    ``strategy_id="a", strategy_version="b|c"`` would concatenate
+    identically under naive ``"|".join(...)``, but their framed byte
+    sequences differ because each field's exact length is encoded
+    immediately before it (see ``_hash_framed``). Strategy parameters are
+    hashed via ``canonical_parameters`` (type-preserving: ``True`` and
+    ``1``, or ``Decimal("1")`` and ``1``, are never conflated).
     """
-    payload = "|".join(
-        [
-            config.strategy_id,
-            config.strategy_version,
-            config.symbol,
-            config.timeframe.value,
-            config.start.isoformat(),
-            config.end.isoformat(),
-            str(config.initial_capital),
-            repr(canonical_parameters(config.parameters)),
-            str(config.execution_config.cost.commission_rate),
-            str(config.execution_config.cost.spread),
-            str(config.execution_config.cost.slippage_rate),
-            config.execution_config.fill_timing.value,
-            str(config.execution_config.position_sizing.equity_fraction),
-            str(config.execution_config.position_sizing.max_participation_rate),
-            str(config.random_seed),
-            str(config.data_source_id),
-            str(config.reproducibility_id),
-            compute_data_identity(candles),
-        ]
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    hasher = hashlib.sha256()
+    for field in (
+        config.strategy_id,
+        config.strategy_version,
+        config.symbol,
+        config.timeframe.value,
+        config.start.isoformat(),
+        config.end.isoformat(),
+        str(config.initial_capital),
+        repr(canonical_parameters(config.parameters)),
+        str(config.execution_config.cost.commission_rate),
+        str(config.execution_config.cost.spread),
+        str(config.execution_config.cost.slippage_rate),
+        config.execution_config.fill_timing.value,
+        str(config.execution_config.position_sizing.equity_fraction),
+        str(config.execution_config.position_sizing.max_participation_rate),
+        str(config.random_seed),
+        str(config.data_source_id),
+        str(config.reproducibility_id),
+        compute_data_identity(candles),
+    ):
+        _hash_framed(hasher, field)
+    return hasher.hexdigest()[:16]
