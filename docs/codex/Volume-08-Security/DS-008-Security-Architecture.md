@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-008 |
 | Title | Security Architecture |
-| Version | 0.2.1 |
+| Version | 0.2.2 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
@@ -24,6 +24,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 1 grouped pass (DS-007/DS-008/DS-009). Translates `SECURITY_RULES.md` and DS-002's DS-SEC family, together with DS-004's security-relevant architecture (DS-ARC-015/019/021/022/024) and DS-006's session/authentication contracts (DS-API-COR-004/010), into a consolidated security architecture under the `DS-SCA` prefix. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for three independent-audit High findings, added as new §13a (appended after existing content to preserve requirement-ID document order, mirroring the DS-004 §16a repair precedent): **H1** added `DS-SCA-023` (Protected Assets, Threat Actors, and Trust Boundaries) and `DS-SCA-024` (Material Threat Scenarios and Controls, a 10-row scenario/control/fail-safe/residual-risk table) making the threat model actionable, with a forward pointer added to DS-SCA-001. **H2** added `DS-SCA-025` (Audit-Log Integrity and Protection Architecture) — append-only/tamper-evident writes, authorized writer/reader boundaries, deterministic ordering, fail-closed-on-unavailable-audit behavior — without mandating a specific storage vendor. **H3** added `DS-SCA-026` (Security Incident Response Lifecycle) — a 10-step detection-through-post-incident-review lifecycle explicitly covering compromised sessions/credentials, suspected unauthorized trading, compromised update/dependency paths, audit-log integrity failures, malicious external data/integrations, and local-device compromise, preserving owner/user authority and requiring stronger validation before live-trading capability is restored. §14 Non-Goals updated to exclude operational-staffing/legal-response policy. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Narrow repair for independent-audit finding DS-008-H2 (audit-log integrity verification): added `DS-SCA-027` (Audit-Log Integrity Verification Contract, Committed/MVP) defining the deterministic detection behavior DS-SCA-025's append-only architecture required but did not itself specify — protected record set, integrity evidence for modification/reordering/truncation/selective-deletion/unauthorized-insertion, verification triggers (startup, pre-review, scheduled, post-fault), verification result states, fail-closed behavior, escalation into DS-SCA-026's incident lifecycle, evidence-preservation/repair boundaries, and an explicit prohibition on silently rebuilding audit history to hide a verification failure. Implementation-neutral — no vendor or cryptographic product mandated. DS-SCA-025 updated with a one-sentence pointer to DS-SCA-027; DS-SCA-026's audit-log-integrity-failure cross-reference updated to cite DS-SCA-027 as the detection/escalation mechanism. |
+| 0.2.2 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: added a Traceability note to `DS-SCA-019` explicitly cross-referencing it to §13a's threat-scenario table (DS-SCA-024 row 8), protected-assets list, and trust-boundary list (DS-SCA-023), and noting that the update/distribution-mechanism grounding gap is recorded once (Appendix A #2) rather than restated inconsistently. Also recorded, rather than silently closed, that DS-009 currently has no corresponding tamper/signature-verification test for this requirement. No security architecture, fail-closed behavior, or classification was changed. |
 
 ## 1. Purpose
 
@@ -281,9 +282,11 @@ The concrete protected-asset catalog, threat-actor list, trust-boundary list, an
 
 **Description:** Once DarkSage has a distribution/update mechanism (e.g., an Electron auto-updater or installer-based distribution), updates shall be delivered over secure transport (DS-SCA-011) and shall be integrity/signature-verified before install, consistent with the fail-closed principle (DS-SCA-001): an update that fails integrity verification is rejected, not installed with a warning.
 
+**Traceability:** This requirement is the governing reference for §13a's threat-scenario table (DS-SCA-024, row 8 — "Application integrity / Update-distribution channel"), which already cites `DS-SCA-019` as its Required Control basis; §13a's protected-assets list (DS-SCA-023) and trust-boundary list both name "update mechanism ↔ installed application (DS-SCA-019)" as the asset/boundary this requirement protects. The grounding gap this requirement carries — no DS-002/DS-004 requirement yet commits a specific update/distribution mechanism — is recorded once, in Appendix A Open Question #2, rather than restated inconsistently elsewhere; every other cross-reference to DS-SCA-019 in this document points here for that context instead of re-describing the gap.
+
 **Acceptance Criteria:** Deferred pending selection of a distribution/update mechanism; the secure-transport and signature-verification obligations are fixed now.
 
-**Testing:** Not yet applicable — deferred to the update mechanism's own implementation.
+**Testing:** Not yet applicable — deferred to the update mechanism's own implementation. Once a mechanism is selected, DS-009 (Testing and QA) is expected to add a corresponding tamper/signature-verification test alongside DS-SCA-024 row 8's other adversarial coverage; no such test currently exists in DS-009, a gap this repair records rather than silently closes.
 
 ## 13. Audit and Process Controls
 

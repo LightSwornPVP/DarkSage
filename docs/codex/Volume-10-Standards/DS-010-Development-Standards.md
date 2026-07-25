@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-010 |
 | Title | Development Standards |
-| Version | 0.2.0 |
+| Version | 0.2.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
@@ -23,6 +23,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 |---|---|---|---|
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 2 grouped pass (DS-010/DS-011/DS-012). Consolidates `AGENTS.md`, `SECURITY_RULES.md`'s development-facing sections, `docs/standards/*`, and this Codex's own established authoring/audit practice into a single development-standards volume under the `DS-DEV` prefix. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit findings DS-010-H1/H2. **H1:** repaired `DS-DEV-004`'s self-contradiction (claimed IDs are "never reused after removal" while also requiring renumbering on insertion) — controlled IDs are now permanently stable once assigned; document order may differ from numeric ID order; renumbering is permitted only pre-baseline or via an explicit, approved migration mapping. **H2:** `DS-DEV-006`, `DS-DEV-008`, `DS-DEV-009`, `DS-DEV-010`, and `DS-DEV-025` no longer cite `.ai-workflow/**` files as Governing Source — each now cites DS-010 itself (normative) or another public Codex/root source; local workflow files may implement a rule locally but never constitute its authority, consistent with `DS-DEV-025`'s own rule. §13 updated to record this fix. |
+| 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: clarified `DS-DEV-008`'s acceptance criteria, which previously read "no task requires more repair passes than the number of genuine Critical/High findings identified" — a criterion that was trivially satisfiable and did not mechanically capture the intended bundle-findings-into-one-pass discipline. Rewritten so the criterion is keyed to audit/verification cycles (one repair pass per cycle that identifies new findings) rather than raw finding count, and is checkable directly against each task's recorded blocker/finding history. The underlying blocker-only review philosophy and default workflow sequence are unchanged. |
 
 ## 1. Purpose
 
@@ -139,10 +140,12 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 **Description:** The default workflow is Author/Implement → Self-verify → One independent Critical/High audit → Repair blockers only if necessary → Final verification → Approve/commit. Additional passes are used only when genuinely necessary — as few passes as practical, as many as necessary. Unnecessary cosmetic review cycles are not created for their own sake. This sequence is normative on DS-010's own authority; any local session-coordination file that also records a version of it (e.g., an operational delegated-authority workflow) implements this practice locally but is never its source.
 
 **Acceptance Criteria:**
-- No task requires more repair passes than the number of genuine Critical/High findings identified (DS-DEV-009).
+- All Critical/High findings identified by a single independent audit or verification cycle are addressed together in one corresponding repair pass; findings from the same audit cycle are not serialized into separate repair passes without a documented reason (e.g., an explicit Keeper/Owner scope-narrowing decision).
+- A new repair pass begins only when a subsequent audit, focused verification, or Keeper/Owner-directed review identifies a Critical/High finding not already covered by the prior repair pass — never merely to re-check work already verified clean.
+- The number of repair passes recorded for a task therefore equals the number of distinct audit/verification cycles that identified at least one new Critical/High finding, not the raw count of individual findings — mechanically checkable against the task's recorded blocker/finding history (DS-DEV-009): each recorded repair-pass entry must trace to the specific audit cycle and finding set it resolved.
 - A repair pass addresses only the findings it was scoped to; it does not silently expand scope.
 
-**Testing:** Process audit against a task's recorded blocker/finding history (shared with DS-DEV-009's own test).
+**Testing:** Process audit against a task's recorded blocker/finding history, confirming each repair-pass entry traces to exactly one audit/verification cycle and its full finding set (shared with DS-DEV-009's own test).
 
 ### DS-DEV-009 — Critical/High Blocker Handling
 

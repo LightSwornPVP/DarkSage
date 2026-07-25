@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-014 |
 | Title | Idea Parking Lot |
-| Version | 0.2.0 |
+| Version | 0.2.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
@@ -23,6 +23,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 |---|---|---|---|
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the final grouped batch (DS-013/DS-014). Establishes the idea-parking governance model (`DS-IDG-NNN`) and a structured catalog of 25 exploratory ideas (`DS-IDEA-NNN`) — research directions, architectural inspirations, and speculative concepts not yet mature enough for DS-013. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit High finding H3 (third-party model privacy/security gates). `DS-IDG-004` expanded from four gates (licensing, benchmark, compute, integration) to **nine mandatory gates**: licensing, independent benchmarking, compute requirements, privacy, security (aligned with DS-008 in full), model-supply-chain risk, untrusted-artifact/weight handling, integration-boundary risk, and operational feasibility — no third-party model candidate may be promoted until all nine are satisfied and recorded. `DS-IDEA-002` (Kronos), `DS-IDEA-019` (Training Sage as a Dedicated Model), and `DS-IDEA-020` (Distillation) updated to reference the full nine-gate requirement; Kronos remains treated strictly as a research reference, never a committed dependency. |
+| 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: `DS-IDEA-018` no longer cites `.ai-workflow/AGENT_PROTOCOL.md` directly as a Promotion Criteria destination or Related Feature/Volume — a public controlled document must not depend on a local-only workflow file for authority (DS-DEV-025). It now points to DS-010 process documentation or another public, committed process record instead; any local file implementing a resulting practice is explicitly described as non-authoritative operational convenience only. Appendix A Open Question #2 (DS-IDEA-018's process-vs-product classification) is unchanged and remains open. |
 
 ## 1. Purpose
 
@@ -384,8 +385,8 @@ Each idea states: ID, Title, Description, Why It Is Interesting, Potential DarkS
 - **Potential DarkSage Value:** Process efficiency for future Codex authoring/maintenance, not a product capability.
 - **Risks/Unknowns:** Any tooling built for this purpose is internal development process, not product functionality — must remain clearly separated from DarkSage's own public product scope (DS-DEV-024's tool-neutral public-repository requirement applies to any resulting artifacts).
 - **Research Needed:** Retrospective analysis of this Codex's own authoring history for repeated patterns worth automating.
-- **Promotion Criteria:** Not applicable to DS-013 product-feature promotion — this idea, if pursued, would inform `.ai-workflow/AGENT_PROTOCOL.md` or DS-010 process documentation, not a product requirement.
-- **Related Features/Volumes:** DS-010 (development standards), `.ai-workflow/AGENT_PROTOCOL.md`.
+- **Promotion Criteria:** Not applicable to DS-013 product-feature promotion — this idea, if pursued, would inform DS-010 process documentation or another public, committed process record, not a product requirement. Any local, non-committed workflow file that happens to implement a resulting practice does so only as operational convenience and is never cited here as this idea's authority or destination (DS-DEV-025's local-workflow-authority rule).
+- **Related Features/Volumes:** DS-010 (development standards).
 - **Status:** Exploratory
 - **Notes:** This idea concerns DarkSage's own engineering process, not a DarkSage product feature — it is recorded here for completeness per the batch instruction but would never itself become a DS-002+ requirement; at most it could inform a future DS-010 revision.
 

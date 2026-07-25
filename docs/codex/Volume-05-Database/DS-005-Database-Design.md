@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-005 |
 | Title | Database Design |
-| Version | 0.2.0 |
+| Version | 0.2.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
@@ -23,6 +23,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 |---|---|---|---|
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft. Defines entity/schema design for the shared models `ARCHITECTURE.md` §6 names, on the SQLite-first strategy DS-ARC-016 already establishes, cross-referenced to DS-002's requirement families. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Repair pass addressing independent audit findings DS-005-A01 through A05. **A01:** added Transaction entity (DS-DB-025), Position and DS-DB-023 updated to reference it. **A02:** added Alert (DS-DB-026) and Notification (DS-DB-027) entities as new §13, sections renumbered 13→14 through 18→19 accordingly. **A03:** reclassified StrategyProfile and TradeDecision to Committed/MVP (Phase-1 base model, per ROADMAP.md/DS-ARC-005), reclassified BrokerState Future/Exploratory → Planned, made ScanConfiguration.profile_id nullable so it is independently satisfiable without the Planned UserProfile feature. **A04:** corrected Candle's foreign-key target (DS-DB-013 → DS-DB-014, SecurityIdentity); added signal_id to Signal and regime_id to MarketRegime as their primary identifiers, matching the foreign keys that already referenced them. **A05:** split StrategyProfile and TradeDecision into a Committed Phase-1 core and a Planned later-phase extension (Phase 2 for StrategyProfile's configuration/risk fields; Phase 6/7 for TradeDecision's AI-provider/pipeline fields), so neither Committed base model requires a Planned capability to be valid. |
+| 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: corrected DS-DB-004's stale Alert reference (Alert was already added as DS-DB-026 in the 0.2.0 A02 repair; the Key Relationships text still said "not yet in this document's entity set") to cite DS-DB-026 directly. Corrected DS-DB-027's channel field, which mislabeled DS-ALT-002 (in-app notification delivery) as "Committed" although DS-ALT-002 is formally Planned — both in-app (DS-ALT-002) and external (DS-ALT-003) channels are now correctly stated as Planned. No entity, classification, or relationship was otherwise changed. |
 
 ## 1. Purpose
 
@@ -100,7 +101,7 @@ Per DS-ARC-016: SQLite is the initial database; PostgreSQL/TimescaleDB migration
 
 **Key Fields:** signal_id (primary identifier), symbol_id (FK), strategy_id (FK, nullable for pure-scanner signals), direction, entry/stop/targets (nullable until a strategy assigns them), confidence, quantitative_score, technical_score, fundamental_score, sentiment_score, detected_patterns (JSON), indicators_snapshot (JSON), reasoning (text), grade (A+/A/B/C/D per `PROJECT_SPEC.md` §16), generated_at, expires_at (nullable).
 
-**Key Relationships:** Many Signals per SecurityIdentity; optionally linked to a StrategyProfile (DS-DB-005); referenced by Alert (DS-002 DS-ALT family, not yet in this document's entity set — see Appendix A).
+**Key Relationships:** Many Signals per SecurityIdentity; optionally linked to a StrategyProfile (DS-DB-005); optionally referenced as an Alert (DS-DB-026, Planned) condition target via `condition_definition`, per DS-DB-026's own Key Relationships.
 
 **Constraints/Invariants:** `grade` is derived from measurable inputs (`TRADING_RULES.md` "Signal Grades"), never assigned by unstructured AI judgment alone (DS-PRD-004 analog for scoring); a rejected signal retains its rejection reason (`PROJECT_SPEC.md` §17, Why-Trade/Why-Not-Trade), not deleted.
 
@@ -410,7 +411,7 @@ Added in the DS-005-A02 repair to close a gap: DS-ALT-001/002 (Planned) require 
 
 **Purpose:** The durable record of a fired alert or system event, sufficient to survive an application restart so a notification missed while closed/backgrounded is visible on next open (DS-ALT-002's edge case).
 
-**Key Fields:** notification_id (primary identifier), alert_id (nullable FK → Alert — nullable because a Notification may also originate from a non-Alert system event, e.g., a Risk Engine warning per DS-RSK-003 once that becomes Committed), triggered_at, condition_snapshot (JSON — the specific condition/value that triggered it, per DS-ALT-001's "timestamp, condition, triggering value"), delivered_at (nullable), read_at (nullable), channel (in_app / external — DS-ALT-002 Committed in-app; DS-ALT-003 Planned external channels).
+**Key Fields:** notification_id (primary identifier), alert_id (nullable FK → Alert — nullable because a Notification may also originate from a non-Alert system event, e.g., a Risk Engine warning per DS-RSK-003 once that becomes Committed), triggered_at, condition_snapshot (JSON — the specific condition/value that triggered it, per DS-ALT-001's "timestamp, condition, triggering value"), delivered_at (nullable), read_at (nullable), channel (in_app / external — both Planned: DS-ALT-002 governs in-app delivery, DS-ALT-003 governs external-channel delivery).
 
 **Key Relationships:** Many-to-one with Alert (when alert-originated); loosely referenced from other event-producing entities (RiskState, TradeDecision) the same way AuditLogEntry is (DS-DB-020), by id rather than a hard FK constraint.
 

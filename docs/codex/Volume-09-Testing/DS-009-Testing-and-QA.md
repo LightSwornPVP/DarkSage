@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-009 |
 | Title | Testing & QA |
-| Version | 0.2.1 |
+| Version | 0.2.3 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -24,6 +24,8 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 1 grouped pass (DS-007/DS-008/DS-009). Consolidates the testing obligations already stated per-requirement across DS-002 through DS-008 into a single testing/QA architecture under the `DS-QA` prefix — release gates, traceability, defect severity, and category-specific test requirements (unit, integration, contract, regression, e2e, security, performance, data-quality, model evaluation, backtesting validation, deterministic financial calculation). |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair pass. **DS-009-H1:** repaired `DS-QA-009`, which incorrectly listed the Planned `DS-API-EXE-006` alongside Committed governance boundaries; split into an always-required Committed pipeline-integrity constraint (DS-EXE-001/DS-API-EXE-001 only) and a conditional Planned Trade Proposal submission test (DS-API-EXE-005/006), with an explicit acceptance criterion barring any promotion of DS-API-EXE-006 to Committed. **Cross-volume alignment:** added `DS-QA-021` (Interface State Lifecycle Testing, covering DS-007's new DS-UX-016), `DS-QA-022` (Audit-Log Integrity Testing, covering DS-008's new DS-SCA-025), and `DS-QA-023` (Incident-Response Lifecycle Testing, covering DS-008's new DS-SCA-026); extended `DS-QA-013`'s acceptance criteria to require scenario-to-test mapping against DS-SCA-024's new threat-scenario table. Corrected stale `DS-UX-016`/`DS-UX-020` references (now `DS-UX-017`/`DS-UX-021`) following DS-007's H1 renumbering. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Narrow repair pass for the two remaining High findings. **DS-007-H1 alignment:** `DS-QA-021` split into Committed core-lifecycle testing (DS-UX-016) and Planned, conditional assistive-technology announcement testing (DS-UX-022) — the latter is never a Committed release gate before DS-UX-022 is implemented. **DS-008-H2 alignment:** `DS-QA-022` expanded to cover DS-008's new `DS-SCA-027` integrity-verification contract — direct-storage-corruption adversarial tests for modification, reordering, truncation, selective deletion, and unauthorized insertion; verification-trigger tests (startup, pre-review, scheduled, post-fault); a fail-closed-on-violation test; an evidence-preservation test; and an anti-silent-rebuild test — going beyond the prior API-level-only tamper tests. §13 Risks and Constraints updated to record DS-QA-021's split. |
+| 0.2.2 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: renamed `DS-QA-001` from "Unit Testing Baseline" to "Requirement Test-Coverage Completeness Baseline" — its actual normative content (every Committed/MVP requirement across DS-002 through DS-009 has at least one recorded automated or documented manual test) was never specific to unit testing as a test type, and no dedicated unit-testing requirement existed elsewhere in this document; the underlying requirement itself is unchanged. Added an explicit Severity Precedence Rule to `DS-QA-019`: when a defect matches more than one severity level's criteria, the highest-matching severity governs (Critical > High > Medium > Low), stated deterministically so a Critical/High finding touching correctness, security, safety, privacy, reproducibility, or architecture can never be reclassified downward by also matching a lower-severity criterion. No existing blocker category was downgraded; the four severity definitions and their blocking behavior are unchanged. |
+| 0.2.3 | 2026-07-25 | TheSinnerMan | Suite-audit blocker repair (SUITE-H01): `DS-QA-019` cited `.ai-workflow/AGENT_PROTOCOL.md` as Governing Source and `.ai-workflow/BLOCKERS.md` as the source of its severity vocabulary, violating DS-DEV-025's rule that no local-only workflow file is ever cited as Governing Source by a Committed/MVP requirement. Governing Source now reads DS-009 (normative), DS-DEV-009/DS-DEV-025 (DS-010), DS-ADR-010 (DS-012) — all committed public authority. The four severity definitions, the Severity Precedence Rule, and the release-blocking Acceptance Criteria are restated as fully self-contained and normative on DS-009's own authority, reproducible from the committed repository alone. `.ai-workflow/BLOCKERS.md` is now explicitly described as historical/operational context only, never required reading to define or apply the severity model. §12 Dependencies' `.ai-workflow/AGENT_PROTOCOL.md` entry removed and replaced with the DS-010/DS-012 citations above. No severity definition, precedence order, or blocking behavior was weakened or downgraded. |
 
 ## 1. Purpose
 
@@ -58,7 +60,7 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 ## 5. Test Category Definitions
 
-### DS-QA-001 — Unit Testing Baseline
+### DS-QA-001 — Requirement Test-Coverage Completeness Baseline
 
 **Release Classification:** Committed / MVP | **Governing Source:** DS-NFR-006 (Committed)
 
@@ -267,13 +269,16 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 ### DS-QA-019 — Defect Severity Classification
 
-**Release Classification:** Committed / MVP | **Governing Source:** `.ai-workflow/AGENT_PROTOCOL.md` (existing Critical/High audit-severity practice, formalized here for product code)
+**Release Classification:** Committed / MVP | **Governing Source:** DS-009 (this document, normative); DS-DEV-009, DS-DEV-025 (DS-010, both Committed); DS-ADR-010 (DS-012, Committed)
 
-**Description:** Defects are classified Critical, High, Medium, or Low, independent of the Release Classification of the requirement they violate: **Critical** — a safety, financial-correctness, or security breach, or a Risk Engine/TradeValidationPipeline bypass; **High** — a violation of a Committed/MVP requirement's acceptance criteria, or a Committed-requirement-depends-on-Planned-capability defect; **Medium** — a violation of a Planned requirement's acceptance criteria, or a non-safety-critical UX defect; **Low** — cosmetic or non-blocking. This reuses, rather than reinvents, the severity vocabulary this Codex's own audit process (Critical/High findings in `.ai-workflow/BLOCKERS.md`) already applies to documentation, extending it to product code defects.
+**Description:** Defects are classified Critical, High, Medium, or Low, independent of the Release Classification of the requirement they violate: **Critical** — a safety, financial-correctness, security, privacy, reproducibility, or architecture-boundary breach, or a Risk Engine/TradeValidationPipeline bypass; **High** — a violation of a Committed/MVP requirement's acceptance criteria, or a Committed-requirement-depends-on-Planned-capability defect; **Medium** — a violation of a Planned requirement's acceptance criteria, or a non-safety-critical UX defect; **Low** — cosmetic or non-blocking. This severity vocabulary is normative on DS-009's own authority and is the single definition applicable to both product code defects and this Codex's own documentation-audit findings — it is not derived from, and does not depend on, any local workflow file. DS-DEV-009 (DS-010, Committed) references this scale as the basis for its Critical/High blocker-handling rule, and DS-ADR-010 (DS-012, Committed) places local workflow files at the lowest tier of its conflict-resolution hierarchy, never authoritative for this or any other Committed/MVP requirement (DS-DEV-025). A local, non-committed file such as `.ai-workflow/BLOCKERS.md` may separately record defects using this vocabulary for day-to-day coordination; that record is historical/operational context only, is never required reading to define or apply this severity model, and never varies or supersedes the definition stated here.
+
+**Severity Precedence Rule:** A single defect may match the stated criteria for more than one severity level at once (e.g., it both breaches security and violates a Committed/MVP acceptance criterion). When this happens, the **highest-matching severity governs** — Critical outranks High, High outranks Medium, Medium outranks Low — and the defect is recorded under that single highest severity, never split across multiple severity records or averaged down. This precedence order exists specifically so that Critical/High findings touching correctness, security, safety, privacy, reproducibility, or architecture can never be reclassified downward by also matching a lower-severity criterion (e.g., a security breach that happens to also look like a "cosmetic" UX defect remains Critical, not Low). No existing blocker category is downgraded by this rule; it only makes explicit, deterministic, and auditable a resolution order that the four bullet definitions already implied but did not state.
 
 **Acceptance Criteria:**
-- Every recorded defect carries exactly one severity per this scale.
+- Every recorded defect carries exactly one severity per this scale, resolved via the Severity Precedence Rule when more than one level's criteria are met.
 - A Critical defect blocks release of the affected capability; a High defect blocks release of the affected Committed/MVP requirement; Medium/Low defects do not block release by themselves.
+- No defect matching a Critical or High criterion is ever recorded at a lower severity because it also matches a Medium or Low criterion.
 
 **Testing:** Defect-triage process audit confirming severity assignment consistency against this scale's definitions.
 
@@ -330,9 +335,9 @@ DS-009 does not: select a specific test framework, runner, or CI/CD tooling (DS-
 ## 12. Dependencies
 
 - [DS-001](../Volume-01-Foundation/DS-001-Executive-Vision.md), [DS-002](../Volume-02-Product/DS-002-SRS.md), [DS-003](../Volume-03-Sage/DS-003-Sage-AI-Bible.md), [DS-004](../Volume-04-Architecture/DS-004-Technical-Architecture.md), [DS-006](../Volume-06-API/DS-006-API-Specification.md), [DS-007](../Volume-07-UX/DS-007-UI-UX-Bible.md), [DS-008](../Volume-08-Security/DS-008-Security-Architecture.md)
+- [DS-010](../Volume-10-Standards/DS-010-Development-Standards.md) (DS-DEV-009, DS-DEV-025), [DS-012](../Volume-12-ADRs/DS-012-Architecture-Decision-Records.md) (DS-ADR-010)
 - `ROADMAP.md`, `SECURITY_RULES.md`, `TRADING_RULES.md`
 - `docs/traceability/TRACEABILITY_MATRIX.csv`
-- `.ai-workflow/AGENT_PROTOCOL.md` (precedent for DS-QA-019's severity vocabulary)
 
 ## 13. Risks and Constraints
 

@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-012 |
 | Title | Architecture Decision Records |
-| Version | 0.2.0 |
+| Version | 0.2.3 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -23,6 +23,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 |---|---|---|---|
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 2 grouped pass (DS-010/DS-011/DS-012). Establishes the ADR governance layer (lifecycle, creation/approval rules, metadata, decision-history, superseding/deprecating rules, conflict-resolution hierarchy) and indexes the four existing, approved ADRs (ADR-001 through ADR-004) without restating or weakening their decisions. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit findings DS-012-H1/H2. **H1:** `DS-ADR-003`/`DS-ADR-009` no longer cite `.ai-workflow/KEEPER_AUTHORITY.md` as Governing Source; ADR approval authority is now grounded in DS-012 itself (Owner authority, or explicitly delegated approval within documented scope, recorded as reproducible evidence in the ADR's own Decision History or an equivalent committed record) — local workflow files may facilitate an approval but never constitute its authority. Does not broaden delegated authority beyond its existing local operational boundary. **H2:** `DS-ADR-010` rewritten into one explicit six-tier conflict-resolution hierarchy (root mandatory safety governance → approved owner decisions → Approved ADRs → Approved Codex volumes → implementation documentation → local workflow files), stating explicitly that no ADR may weaken or override `SECURITY_RULES.md`, `TRADING_RULES.md`, Risk Engine authority, deterministic financial truth, or mandatory pipeline safeguards, that same-tier/ambiguous-tier conflicts stop work for Owner/governance resolution, and that superseding an ADR never supersedes root safety governance. |
+| 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: ADR-001 through ADR-004's previously template-minimal Context, Consequences, Alternatives Considered, and Related Requirements sections were populated (each ADR bumped 1.0.0 → 1.1.0) in this same pass, closing the retrofit item DS-ADR-003's Acceptance Criteria and Appendix A Open Question #1 recorded as deferred. §9 Index table updated to show Version 1.1.0 for all four ADRs; Appendix A Open Question #1 updated to reflect completion rather than deferral. **Correction (see 0.2.2):** this entry's claim that §13's retrofit note was also updated was inaccurate — that bullet was missed in this pass and remained stale until 0.2.2. |
+| 0.2.2 | 2026-07-25 | TheSinnerMan | Suite-audit follow-up: corrected the one remaining stale statement from 0.2.1 — §13 Risks and Constraints still read "Existing ADRs are template-minimal... not fixed in this batch," contradicting the retrofit 0.2.1 actually performed. Reworded to state the retrofit is complete (ADR-001–004 all Version 1.1.0, grounded in DS-001/002/003/004/007/009, no Decision/Status/authority change), retaining the entry for revision-history traceability rather than deleting it. No ADR content, DS-012 governance authority, or index data changed beyond this wording correction. |
+| 0.2.3 | 2026-07-25 | TheSinnerMan | Final mechanical repair: removed the two remaining stale retrofit statements missed by 0.2.1/0.2.2. `DS-ADR-004`'s Description referred to Context/Consequences/Alternatives Considered/Related Requirements' "current absence" in ADR-001–004; reworded to state they are now populated (retrofitted, each ADR at Version 1.1.0). §11 Non-Goals said the retrofit was "not performed here since it is outside this batch's authorized files"; reworded to state the retrofit has been completed directly in the four ADR files, with DS-012's Non-Goal being that it does not itself duplicate that retrofitted content (only indexes it, §9). No ADR Decision, Status, approval authority, or DS-012 governance content changed — wording-only correction. |
 
 ## 1. Purpose
 
@@ -92,11 +95,11 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 **Release Classification:** Committed / MVP | **Governing Source:** `docs/templates/markdown/ADR.md` (Committed, existing template)
 
-**Description:** Every ADR's Document Control table states, at minimum: Document ID (`ADR-NNN`), Title, Version, Status, Owner, Classification, Repository, Created, and Last Updated — matching the fields the four existing ADRs already carry. An ADR's body includes at minimum a Decision statement and a Decision History table; Context, Consequences, Alternatives Considered, and Related Requirements are present in the template and should be populated as the decision's history develops, but their current absence in ADR-001 through ADR-004 does not invalidate those already-Approved decisions (DS-ADR-001 — DS-012 does not weaken them).
+**Description:** Every ADR's Document Control table states, at minimum: Document ID (`ADR-NNN`), Title, Version, Status, Owner, Classification, Repository, Created, and Last Updated — matching the fields the four existing ADRs already carry. An ADR's body includes at minimum a Decision statement and a Decision History table; Context, Consequences, Alternatives Considered, and Related Requirements are present in the template and are now populated in ADR-001 through ADR-004 (retrofitted in the consolidated Codex cleanup pass, each bumped to Version 1.1.0). Their populated content is additive context grounded in already-approved material — it does not alter, and did not need to alter, those already-Approved decisions (DS-ADR-001 — DS-012 does not weaken them).
 
 **Acceptance Criteria:**
 - Every ADR's Document Control table matches `docs/templates/markdown/ADR.md`'s field set exactly.
-- A new ADR (created after this document) includes a populated Context and Consequences section from creation, since the template's expectation is now explicit; retrofitting those sections into ADR-001 through ADR-004 is a non-blocking editorial item (§13), not a defect in the decisions themselves.
+- A new ADR (created after this document) includes a populated Context and Consequences section from creation, since the template's expectation is now explicit; ADR-001 through ADR-004 had their Context, Consequences, Alternatives Considered, and Related Requirements sections retrofitted in the consolidated Codex cleanup pass (each now Version 1.1.0), closing the gap this criterion originally flagged as non-blocking.
 
 **Testing:** Metadata-field completeness check against the ADR template, performed on every ADR creation or revision.
 
@@ -210,10 +213,10 @@ The following table indexes the four existing, Approved ADRs. This index summari
 
 | ID | Title | Status | Version | Owner | Summary | Related Governing Volumes |
 |---|---|---|---|---|---|---|
-| [ADR-001](ADR-001-Desktop-First-Application.md) | Desktop-First Application | Approved | 1.0.0 | TheSinnerMan | DarkSage is desktop-first while preserving future service/API extensibility. | DS-001 §20; DS-ARC-002/003; DS-DEV-002 |
-| [ADR-002](ADR-002-Sage-Cannot-Bypass-the-Risk-Engine.md) | Sage Cannot Bypass the Risk Engine | Approved | 1.0.0 | TheSinnerMan | Sage may advise and calculate; Sage cannot bypass or silently override the Risk Engine. | DS-001 §13; DS-PRD-006; DS-RSK-001; DS-ARC-011/012; DS-SCA-012/015; DS-QA-006 |
-| [ADR-003](ADR-003-Deterministic-Financial-Calculations.md) | Deterministic Financial Calculations | Approved | 1.0.0 | TheSinnerMan | Material financial calculations shall use deterministic implementations rather than generative model output. | DS-001 §9/§11; DS-PRD-004; DS-RSK-002; DS-DEV-019; DS-QA-004/005 |
-| [ADR-004](ADR-004-Presentation-Independence.md) | Presentation Independence | Approved | 1.0.0 | TheSinnerMan | Workspace layout and widget visibility shall not determine enabled analytical capability or Sage evidence availability. | DS-001 §16; DS-PRD-003; DS-WKS; DS-UX-001 |
+| [ADR-001](ADR-001-Desktop-First-Application.md) | Desktop-First Application | Approved | 1.1.0 | TheSinnerMan | DarkSage is desktop-first while preserving future service/API extensibility. | DS-001 §20; DS-ARC-002/003; DS-DEV-002 |
+| [ADR-002](ADR-002-Sage-Cannot-Bypass-the-Risk-Engine.md) | Sage Cannot Bypass the Risk Engine | Approved | 1.1.0 | TheSinnerMan | Sage may advise and calculate; Sage cannot bypass or silently override the Risk Engine. | DS-001 §13; DS-PRD-006; DS-RSK-001; DS-ARC-011/012; DS-SCA-012/015; DS-QA-006 |
+| [ADR-003](ADR-003-Deterministic-Financial-Calculations.md) | Deterministic Financial Calculations | Approved | 1.1.0 | TheSinnerMan | Material financial calculations shall use deterministic implementations rather than generative model output. | DS-001 §9/§11; DS-PRD-004; DS-RSK-002; DS-DEV-019; DS-QA-004/005 |
+| [ADR-004](ADR-004-Presentation-Independence.md) | Presentation Independence | Approved | 1.1.0 | TheSinnerMan | Workspace layout and widget visibility shall not determine enabled analytical capability or Sage evidence availability. | DS-001 §16; DS-PRD-003; DS-WKS; DS-UX-001 |
 
 ## 10. Process for Adding Future ADRs
 
@@ -226,7 +229,7 @@ The following table indexes the four existing, Approved ADRs. This index summari
 
 ## 11. Non-Goals
 
-DS-012 does not: restate, alter, or weaken any existing ADR's Decision content (§9 indexes only); decide new architecture itself (a genuinely new decision is proposed as a new `ADR-NNN` file, not written into DS-012); duplicate the ADR files as a second, competing authority (DS-ADR-001 fixes this as a permanent constraint); or retrofit Context/Consequences/Alternatives into ADR-001 through ADR-004 (recorded as a non-blocking editorial item, §13, not performed here since it is outside this batch's authorized files).
+DS-012 does not: restate, alter, or weaken any existing ADR's Decision content (§9 indexes only); decide new architecture itself (a genuinely new decision is proposed as a new `ADR-NNN` file, not written into DS-012); duplicate the ADR files as a second, competing authority (DS-ADR-001 fixes this as a permanent constraint); or itself contain the retrofitted Context/Consequences/Alternatives Considered/Related Requirements content for ADR-001 through ADR-004 — that retrofit has been completed directly in the four ADR files as part of the consolidated Codex cleanup pass (see §13); DS-012 only indexes them (§9) and does not duplicate their content.
 
 ## 12. Dependencies
 
@@ -238,7 +241,7 @@ DS-012 does not: restate, alter, or weaken any existing ADR's Decision content (
 
 ## 13. Risks and Constraints
 
-- **Existing ADRs are template-minimal:** ADR-001 through ADR-004 currently populate only Document Control, Decision, and Decision History — the template's Context/Consequences/Alternatives Considered/Related Requirements sections are present but empty. This is a non-blocking editorial gap (DS-ADR-004 explicitly does not treat it as invalidating the Approved decisions) recorded here for the final consolidated Codex cleanup pass, not fixed in this batch since the ADR files themselves are outside this batch's authorized scope.
+- **Existing ADRs' template sections are complete:** ADR-001 through ADR-004's Context, Consequences, Alternatives Considered, and Related Requirements sections were retrofitted in the consolidated Codex cleanup pass, grounded in already-approved DS-001/002/003/004/007/009 content (each ADR bumped 1.0.0 → 1.1.0). No ADR's Decision, Status, or approval authority changed. This entry previously recorded the gap as a non-blocking editorial item deferred to that pass; it is retained here, corrected, for revision-history traceability rather than removed outright.
 - **No competing authority:** every DS-ADR-NNN requirement in this document was checked to ensure it governs process (lifecycle, approval, indexing) rather than restating any ADR's substantive Decision text, per the explicit instruction that DS-012 must not create duplicate architectural authority.
 - **Conflict-resolution hierarchy is new:** DS-ADR-010 is the first explicit statement of how Codex-internal (not just root-document) conflicts are resolved; it codifies practice this session has already followed (every prior repair pass resolved a conflict through audit/repair, never by silent document-number precedence) rather than introducing new behavior.
 
@@ -255,6 +258,6 @@ Each `DS-ADR-NNN` requirement states its own Testing. Document-level verificatio
 
 ## Appendix A — Open Questions
 
-1. **Retrofit of Context/Consequences/Alternatives into ADR-001–004** — recorded as a non-blocking editorial item (§13) for the final consolidated Codex cleanup pass; not performed in this batch since it is outside DS-012's authorized scope.
+1. **RESOLVED in the consolidated Codex cleanup pass.** Context, Consequences, Alternatives Considered, and Related Requirements were retrofitted into ADR-001 through ADR-004 (each bumped to Version 1.1.0), grounded in already-approved DS-001/DS-002/DS-003/DS-004/DS-007/DS-009 content, with no change to any Decision, Status, or approval authority. Retained here for revision-history traceability, not as an open item.
 2. **Future ADR candidates already implied by open questions elsewhere in this Codex** — e.g., the authentication token mechanism (DS-006 Appendix A #2) and the database-migration trigger (DS-004 Appendix A #1) are plausible future ADR topics once decided, per DS-ADR-008; not created preemptively here.
 3. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (`ROADMAP.md` phase boundaries as Codex release-scope authority; phase-mapping precision) are unaffected by DS-012 and not re-litigated here.
