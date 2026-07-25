@@ -4,13 +4,13 @@
 |---|---|
 | Document ID | DS-EXE |
 | Title | Execution, Auto-Trader & Broker |
-| Version | 0.1.0 |
+| Version | 0.2.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requirement conventions defined in DS-002 §5. Added in the DS-002-A03 repair pass. Product-level requirements for the canonical `TradeValidationPipeline` and Auto-Trader/Broker capability; the architectural contract lives in DS-004 (DS-ARC-011/012). This family states product-level obligations; it does not authorize live trading (DS-PRD-007 remains controlling).
 
@@ -159,3 +159,35 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** `TRADING_RULES.md`/`SECURITY_RULES.md` are authoritative for the complete prerequisite list.
 
 **Testing:** Requirements/governance review — this gate is Committed now specifically so it can be checked at any future point regardless of implementation phase.
+
+### DS-EXE-008 — Automation Mode Model
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Governing Source:** DS-EXE-001, DS-EXE-003, DS-EXE-004, DS-EXE-005, DS-EXE-007; ADR-002; DS-PRD-007; `TRADING_RULES.md`; `ROADMAP.md` Phase 7/13. Added as a narrow controlled amendment recording the Founder-approved automation direction; does not alter any prerequisite already fixed by DS-EXE-007.
+
+**Purpose:** Give the user-facing automation-authority level (how much unattended discretion the system currently holds) a single, named, five-value model, distinct from — and layered on top of — DS-EXE-003's lower-level Auto-Trader process state (disabled/enabled/paused/emergency_stop). This closes a naming gap the Founder Vision Alignment review flagged: the risk of conflating Sage's permanent advisory-only boundary (ADR-002 — Sage may never place an order) with the Auto-Trader's separate, phased path toward live execution authority.
+
+**Description:** DarkSage shall represent the current automation mode as exactly one of the following five values, authoritative in the backend (DS-ARC-001) and observed identically by every client:
+
+1. **Advisory Only** — Sage/the Signal system may propose and explain; no order of any kind is placed automatically; every trade requires full manual entry by the user. This is the mode in which ADR-002's Sage-never-executes boundary is the *only* automation boundary in effect.
+2. **Confirmation Required** — the system may prepare a fully validated Trade Proposal (having passed every `TradeValidationPipeline` stage per DS-EXE-001) but must not submit it to the Broker Adapter until the user explicitly confirms that specific trade.
+3. **Full-Auto Paper** — the system may submit validated Trade Proposals to the PaperBroker without per-trade confirmation, for approved strategies only, unattended, subject to realistic simulated fees/spreads/slippage/partial-fills/rejections/failures (DS-EXE-006), with complete audit history and versioned strategy behavior. Sage may analyze results and propose strategy revisions but may never silently modify an active strategy's live behavior — any change requires the same promotion/versioning path as a new strategy version.
+4. **Restricted Full-Auto Live** — a real, future-supported mode requiring separate live authorization on top of DS-EXE-007's Live Trading Gate; no per-trade approval once explicitly authorized, approved strategies only, operating inside a precommitted deterministic risk envelope (position/size/loss limits fixed while the user is calm, not adjustable mid-session), with mandatory lockouts, mobile monitoring and pause capability (DS-MOB-002), and Emergency Stop/Emergency Flatten remaining distinct controls (DS-EXE-004/DS-EXE-005) that Sage cannot override. This mode is **Planned/Future-gated, not Committed/MVP** — it does not become available merely because Full-Auto Paper exists; DS-EXE-007's full prerequisite list applies in addition to this requirement.
+5. **Paused / Emergency Stopped** — maps directly onto DS-EXE-003's `paused`/`emergency_stop` states; available as an immediate override from any of modes 1–4.
+
+**Precommitment rules (apply to modes 3–4):** the user selects strategy and risk boundaries while calm, before automation begins; pausing or reducing risk may take effect immediately; any *increase* in risk (position size, loss limit, symbol universe, or a mode transition toward more autonomy, e.g. Confirmation Required → Full-Auto Paper, or Full-Auto Paper → Restricted Full-Auto Live) requires stronger confirmation than a decrease, and may require reauthentication, a cooling-off interval, or next-session activation rather than taking effect immediately. Any strategy behavior change requires versioning and revalidation through the existing promotion pipeline (DS-STR/DS-BKT/DS-PERF-004) before it can run under Full-Auto Paper or Restricted Full-Auto Live.
+
+**Dependencies:** DS-EXE-001, DS-EXE-003, DS-EXE-004, DS-EXE-005, DS-EXE-006, DS-EXE-007; DS-MOB-002; ADR-002
+
+**Acceptance Criteria:**
+- Exactly one of the five named modes is authoritative at any time, held in the backend, never independently derived by a client.
+- No mode transition toward greater automation authority (e.g. into Full-Auto Paper or Restricted Full-Auto Live, or any risk-envelope increase within them) takes effect without the confirmation strength defined above; transitions toward less authority (Pause/Emergency Stop, or a risk decrease) may take effect immediately.
+- Restricted Full-Auto Live remains gated by every DS-EXE-007 prerequisite in addition to this requirement; nothing in this requirement authorizes live trading on its own.
+- Sage may never place an order directly in any mode (ADR-002 is unconditional); "automation" in modes 3–4 refers exclusively to the deterministic `TradeValidationPipeline` → Broker Adapter path, never to Sage bypassing that pipeline.
+
+**Edge Cases:** A mode-transition request arriving while an Emergency Stop/Flatten is in effect must be rejected until the emergency state is explicitly cleared by the user.
+
+**Implementation Notes:** Deferred to Phase 7 (modes 1–3) / Phase 13 (mode 4) authoring; this requirement fixes the model and naming now so client UI and audit logging can be designed against a stable vocabulary.
+
+**Testing:** Not yet applicable — Phase 7/13; requirements/governance review confirms no unrestricted live automation classification has been silently elevated to Committed/MVP by this entry.

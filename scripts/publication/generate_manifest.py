@@ -27,6 +27,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from _repo import (
@@ -93,6 +94,40 @@ for _vol_id, _vol_title in CODEX_VOLUMES:
                 "planned_artifact_path": f"docs/publication/releases/{_vol_id}.{_artifact_type}",
             }
         )
+
+# Priority diagrams rendered for the publication-output pass (Part A). Each
+# authored source (docs/publication/diagrams/source/*.mmd) yields two
+# rendered artifacts under docs/publication/diagrams/rendered/: an
+# authoritative SVG and a PNG fallback for DOCX embedding. Recorded here the
+# same way as any other artifact — generated/checksum/timestamp are derived
+# from whether the file actually exists on disk, never assumed.
+DIAGRAM_RENDERS = [
+    ("DIAGRAM-02", "Figure 2 — Public Authority Hierarchy", "docs/publication/diagrams/source/figure-02-authority-hierarchy.mmd", "figure-02-authority-hierarchy"),
+    ("DIAGRAM-03", "Figure 3 — Canonical Trade Validation Pipeline", "docs/publication/diagrams/source/figure-03-trade-validation-pipeline.mmd", "figure-03-trade-validation-pipeline"),
+    ("DIAGRAM-04", "Figure 4 — Backend-Authoritative Architecture", "docs/publication/diagrams/source/figure-04-backend-authoritative-architecture.mmd", "figure-04-backend-authoritative-architecture"),
+    ("DIAGRAM-05", "Figure 5 — Sage Advisory Boundary", "docs/publication/diagrams/source/figure-05-sage-advisory-boundary.mmd", "figure-05-sage-advisory-boundary"),
+    ("DIAGRAM-11", "Figure 11 — Paper-to-Live Promotion Path", "docs/publication/diagrams/source/figure-11-paper-to-live-promotion-path.mmd", "figure-11-paper-to-live-promotion-path"),
+    ("DIAGRAM-16", "Figure 16 — DS-013 vs DS-014 Boundary", "docs/publication/diagrams/source/figure-16-ds013-vs-ds014-boundary.mmd", "figure-16-ds013-vs-ds014-boundary"),
+    ("DIAGRAM-17", "Figure 17 — Phase 0-14 Roadmap", "docs/publication/diagrams/source/figure-17-phase-roadmap.mmd", "figure-17-phase-roadmap"),
+    ("DIAGRAM-19", "Figure 19 — Flagship Document Relationship", "docs/publication/diagrams/source/figure-19-flagship-publication-relationship.mmd", "figure-19-flagship-publication-relationship"),
+]
+
+GENERATOR_VERSION_BY_TYPE = {
+    "svg": "@mermaid-js/mermaid-cli 11.4.2 (scripts/publication/, Puppeteer pointed at local Edge via PUPPETEER_EXECUTABLE_PATH)",
+    "png": "@mermaid-js/mermaid-cli 11.4.2 (scripts/publication/, Puppeteer pointed at local Edge via PUPPETEER_EXECUTABLE_PATH)",
+    "docx": "scripts/publication/docgen (python-docx 1.1.2)",
+    "pdf": "scripts/publication/docgen (reportlab 4.2.5)",
+}
+
+
+def iso_mtime(path: Path) -> str | None:
+    """Return the file's actual filesystem mtime as UTC ISO-8601, or None if
+    it does not exist. Never a fabricated or current-time value — sourced
+    directly from the artifact's own modification time."""
+    if not path.is_file():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
 
 FIELD_RE = re.compile(r"\|\s*(Version|Register Version|Status)\s*\|\s*([^\|]+?)\s*\|")
 
@@ -165,9 +200,9 @@ def build_manifest() -> dict:
                 "artifact_type": planned["artifact_type"],
                 "planned_artifact_path": planned["planned_artifact_path"],
                 "generated": exists,
-                "generation_timestamp": None,
+                "generation_timestamp": iso_mtime(artifact_abs) if exists else None,
                 "checksum": sha256_of_file(artifact_abs) if exists else None,
-                "generator_version": None,
+                "generator_version": GENERATOR_VERSION_BY_TYPE.get(planned["artifact_type"]) if exists else None,
                 "notes": (
                     "No DOCX/PDF generation tooling exists yet in this repository (DSF-001 §H is not yet implemented); "
                     "this entry records the planned output per DSF-001 §J. Actual generated filename will follow "
@@ -177,6 +212,36 @@ def build_manifest() -> dict:
                 ),
             }
         )
+
+    for doc_id, title, source_path, basename in DIAGRAM_RENDERS:
+        for ext in ("svg", "png"):
+            artifact_rel = f"docs/publication/diagrams/rendered/{basename}.{ext}"
+            artifact_abs = resolve_repo_path(artifact_rel)
+            exists = artifact_abs.is_file()
+            entries.append(
+                {
+                    "document_id": doc_id,
+                    "title": title,
+                    "source_path": source_path,
+                    "source_version": None,
+                    "source_status": "Authored, rendered" if exists else "Authored (source only, not rendered)",
+                    "source_baseline": baseline,
+                    "artifact_type": ext,
+                    "planned_artifact_path": artifact_rel,
+                    "generated": exists,
+                    "generation_timestamp": iso_mtime(artifact_abs) if exists else None,
+                    "checksum": sha256_of_file(artifact_abs) if exists else None,
+                    "generator_version": GENERATOR_VERSION_BY_TYPE.get(ext) if exists else None,
+                    "notes": (
+                        "Rendered from the authored Mermaid source via a rendering-only, comment-header-stripped "
+                        "temporary copy (mmdc 11.4.2 fails to parse this file's leading %%-comment accessibility "
+                        "block directly); the committed source file itself is unmodified by this rendering step. "
+                        "See docs/publication/diagrams/README.md."
+                        if exists
+                        else "No renderer was available/authorized at authoring time; source exists, rendering pending."
+                    ),
+                }
+            )
 
     return {
         "manifest_schema_version": "1.0.0",

@@ -1,0 +1,9 @@
+{
+  "name": "darksage-publication-tooling",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Repository-local, dev-only tooling for rendering DarkSage publication Mermaid diagrams. Not part of the application. No runtime dependency, no publish, no network calls at render time.",
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "11.4.2"
+  }
+}

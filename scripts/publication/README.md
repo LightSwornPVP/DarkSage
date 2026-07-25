@@ -1,10 +1,50 @@
 # DarkSage Publication Tooling
 
-Deterministic, dependency-free tooling supporting the DarkSage visual-publication batch (`DSF-001`–`DSF-004`, `docs/publication/DIAGRAM_REGISTER.md`, `docs/publication/PUBLICATION_MANIFEST.json`). None of these tools generate a DOCX or PDF artifact — DSF-001 §H's generation pipeline is not yet implemented; these tools validate, index, and checksum what already exists, honestly.
+Deterministic tooling supporting the DarkSage visual-publication batch (`DSF-001`–`DSF-004`, `docs/publication/DIAGRAM_REGISTER.md`, `docs/publication/PUBLICATION_MANIFEST.json`).
+
+The validator/manifest/checksum scripts described below remain standard-library-only and dependency-free. A separate, opt-in document-generation and diagram-rendering toolchain (below) was added for the publication-output pass; it is isolated in its own repo-local venv/npm project and never touches the application's dependencies.
 
 ## Requirements
 
-Python 3.9+, standard library only (`hashlib`, `subprocess`, `pathlib`, `json`, `re`, `argparse`, `dataclasses`, `urllib.parse`). No third-party packages, no network access, no paid services. See `requirements.txt` (intentionally empty).
+Python 3.9+, standard library only (`hashlib`, `subprocess`, `pathlib`, `json`, `re`, `argparse`, `dataclasses`, `urllib.parse`). No third-party packages, no network access, no paid services. See `requirements.txt` (intentionally empty for these four scripts).
+
+## Document-Generation Tooling (`docgen/`)
+
+Markdown → DOCX/PDF generation for the Executive Product Plan, PRS, and Codex volumes. Fully offline at runtime; no cloud conversion service, no pandoc dependency.
+
+| Package | Version | License | Purpose | Installed into |
+|---|---|---|---|---|
+| `python-docx` | 1.1.2 | MIT | DOCX generation | `scripts/publication/.venv/` (isolated, repo-local, gitignored) |
+| `reportlab` | 4.2.5 | BSD | PDF generation | `scripts/publication/.venv/` (isolated, repo-local, gitignored) |
+
+This venv is **separate from the repository's application venv** (`.venv/` at repo root, used by the FastAPI backend) so publication tooling never pollutes or version-conflicts with application dependencies. Nothing here is installed system-wide.
+
+Setup:
+
+```
+cd scripts/publication
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install -r docgen/requirements.txt
+./.venv/Scripts/python.exe -m pip check   # dependency-conflict check
+```
+
+`pip check` was run after install on 2026-07-25: "No broken requirements found."
+
+## Diagram-Rendering Tooling (Mermaid CLI)
+
+`@mermaid-js/mermaid-cli` (`mmdc`) `11.4.2`, MIT license, declared as a `devDependency` in `scripts/publication/package.json` and installed only into `scripts/publication/node_modules/` (gitignored, never committed; `package.json`/`package-lock.json` are committed for reproducibility).
+
+`mmdc` depends on Puppeteer to drive a Chromium-family browser for rendering. Puppeteer's own postinstall Chromium download did not run (blocked by the repo's npm allow-scripts policy) and was **not** manually triggered — no browser binary was downloaded. Instead, rendering points at an already-installed, non-project browser via the `PUPPETEER_EXECUTABLE_PATH` environment variable (Microsoft Edge, present by default on Windows). No new browser binary is installed by this tooling; on a machine without Chrome/Edge already present, rendering must be skipped or the operator must separately authorize a Chromium download.
+
+`npm audit` after install on 2026-07-25: 0 vulnerabilities (266 dev/transitive packages).
+
+Render invocation:
+
+```
+cd scripts/publication
+PUPPETEER_EXECUTABLE_PATH="<path to an already-installed Chrome or Edge>" \
+  ./node_modules/.bin/mmdc -i <source>.mmd -o <output>.svg
+```
 
 ## Files
 

@@ -19,9 +19,10 @@ DSF-001 §H.3 and §316 name `docs/assets/diagrams/` as the repository's general
 
 ## Rendering Expectations
 
-- Rendering to SVG/PNG/PDF happens only when a compatible renderer (Mermaid CLI, Graphviz `dot`, or equivalent) is already available in the working environment. This repository does not assume one is installed, and this batch did not install rendering software system-wide (none was available: no `mmdc`, no `dot`, no Python `graphviz` module found at authoring time).
-- Where no renderer is available, the Diagram Register records the rendered path honestly as **Pending / Not Yet Rendered** — never a fabricated or assumed-generated file path.
-- If a rendered asset is produced later, its XML (SVG) is validated before being treated as complete (see `scripts/publication/validate_publication.py`), and the Diagram Register's Status column is updated to reflect the real file's existence.
+- Rendering to SVG/PNG happens via `@mermaid-js/mermaid-cli` (`mmdc`) 11.4.2, installed as a repo-local npm devDependency in `scripts/publication/` (see `scripts/publication/README.md`, "Diagram-Rendering Tooling") — never system-wide, and no new browser binary was downloaded (Puppeteer is pointed at the machine's existing Microsoft Edge via `PUPPETEER_EXECUTABLE_PATH`).
+- `mmdc` 11.4.2 cannot parse a source file whose very first line is a `%%` Mermaid comment (a real tooling limitation, confirmed by isolating it against a minimal reproduction). Rendering therefore runs against a temporary, non-committed copy of each source with its leading `%%`-comment accessibility header stripped; **the committed source file under `source/` is never modified by this step** — only `figure-11-paper-to-live-promotion-path.mmd` needed an actual content fix (an invalid chained `stateDiagram-v2` transition, split into separate transition lines with identical meaning; see Diagram Register v0.4.0).
+- All eight priority diagrams (Figures 2, 3, 4, 5, 11, 16, 17, 19) are rendered as of this pass; the remaining eleven diagrams in the 19-diagram inventory remain Not Yet Authored, so nothing renders them yet.
+- Every rendered asset's XML (SVG) validity and existence is checked by `scripts/publication/validate_publication.py`, and the Diagram Register's Status column reflects the real file's existence — never a fabricated or assumed-generated file path.
 
 ## Accessibility Rules
 
@@ -45,4 +46,4 @@ Run `python scripts/publication/validate_publication.py` from the repository roo
 
 ## Current Status
 
-Eight priority diagram sources exist under `source/` (Figures 2, 3, 4, 5, 11, 16, 17, 19 — see `DIAGRAM_REGISTER.md`). The remaining eleven diagrams in the 19-diagram inventory remain **Not Yet Authored**. No diagram in this repository has been rendered to SVG/PNG/PDF as of this pass.
+Eight priority diagram sources exist under `source/` (Figures 2, 3, 4, 5, 11, 16, 17, 19 — see `DIAGRAM_REGISTER.md`) and are now rendered to SVG + PNG under `rendered/`. The remaining eleven diagrams in the 19-diagram inventory remain **Not Yet Authored**.

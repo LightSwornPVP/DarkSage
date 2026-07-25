@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DSF-004 |
 | Title | DarkSage Executive Product Plan |
-| Version | 0.1.0 |
+| Version | 0.2.0 |
 | Status | Draft |
 | Owner | Keeper (delegated authority) |
 | Contributors | |
@@ -30,6 +30,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 | Version | Date | Author | Summary |
 |---|---|---|---|
 | 0.1.0 | 2026-07-25 | Keeper (delegated authority) | First controlled draft. Independent-audit HIGH1 repair: authored the DarkSage Executive Product Plan named but not yet authored by DSF-001 §B.1/§J. Twenty required sections, target 25–45 polished pages, zero independent requirement authority — every normative claim traces to DS-001, DS-011, or DSF-002. Figure placeholders reference `docs/publication/DIAGRAM_REGISTER.md` Figures 1, 5, 6, 11, 12, and 17 by exact ID. No DS-001 through DS-014 volume, ADR, DSF-001, DSF-002, or DSF-003 content was changed to produce this document. |
+| 0.2.0 | 2026-07-25 | Keeper (delegated authority) | Diagram-truth repair (H2): Figures 5, 11, and 17 were rendered to SVG/PNG in a later publication-tooling pass but this document's prose still described them as "placeholder... not yet rendered." Corrected all three to state "rendered" with their real artifact paths. Figures 1, 6, and 12 are unchanged — they remain genuinely "Not Yet Authored" per the Diagram Register and correctly still say so. No figure content, caption meaning, or normative claim changed. |
 
 ## Non-Goals
 
@@ -120,7 +121,7 @@ If Sage is asked to comment on the illustrative assessment, its response would e
 
 **Sage advises. The user decides.** (DS-001 §12, ADR-002.) Sage is DarkSage's intelligence and AI-assistance layer. It should explain reasoning, identify supporting evidence, communicate uncertainty, surface meaningful risks, and describe what could invalidate a conclusion — it should assist rather than replace judgment.
 
-**Figure 5 — Sage Advisory Boundary** *(placeholder; see `docs/publication/DIAGRAM_REGISTER.md` row 5 — status: Authored, source at `docs/publication/diagrams/source/figure-05-sage-advisory-boundary.mmd`, not yet rendered)*. States explicitly that no arrow exists from Sage directly to the Execution Engine or Broker Adapter under any circumstance.
+**Figure 5 — Sage Advisory Boundary** *(rendered; see `docs/publication/DIAGRAM_REGISTER.md` row 5 — status: Rendered, source at `docs/publication/diagrams/source/figure-05-sage-advisory-boundary.mmd`, rendered artifact at `docs/publication/diagrams/rendered/figure-05-sage-advisory-boundary.svg`)*. States explicitly that no arrow exists from Sage directly to the Execution Engine or Broker Adapter under any circumstance.
 
 Sage shall (DS-001 §12): distinguish evidence from inference; avoid unsupported certainty; avoid fabricating deterministic financial results; respect explicit user authority; never silently escalate from advice to execution authority; and never bypass or silently override the Risk Engine. Per [DSF-002](../requirements/DARKSAGE_PRODUCT_REQUIREMENTS_SPECIFICATION.md) §9.15, the requirements that hold this boundary in place — Model Independence, Evidence Provenance, Presentation Independence, Deterministic Financial Truth, User Decision Authority, Risk Engine Authority, No Unapproved Autonomous Trading, Data State Visibility, Uncertainty Communication, AI Output Validation — are **Committed/MVP regardless of Sage's own broader Planned/Phase-6 classification.**
 
@@ -177,11 +178,11 @@ Most tools in this space pick one lane: a screener finds candidates but doesn't 
 
 DarkSage's fifteen `ROADMAP.md` phases (0–14) are categorized by DS-RM-015 into Strict, Parallel, Optional/Deferred, and Gate-chain sequencing. Phase inclusion alone never promotes a deliverable to Committed or Planned (DS-RM-012) — this plan states each phase's category exactly as DS-011 §6 does, without upgrading any of them.
 
-**Figure 17 — Phase 0–14 Roadmap** *(placeholder; see `docs/publication/DIAGRAM_REGISTER.md` row 17 — status: Authored, source at `docs/publication/diagrams/source/figure-17-phase-roadmap.mmd`, not yet rendered)*.
+**Figure 17 — Phase 0–14 Roadmap** *(rendered; see `docs/publication/DIAGRAM_REGISTER.md` row 17 — status: Rendered, source at `docs/publication/diagrams/source/figure-17-phase-roadmap.mmd`, rendered artifact at `docs/publication/diagrams/rendered/figure-17-phase-roadmap.svg`)*.
 
 The **Gate-chain** — the strict paper-first/live-later sequence — is the backbone of DarkSage's path to real money:
 
-**Figure 11 — Paper-to-Live Promotion Path** *(placeholder; see `docs/publication/DIAGRAM_REGISTER.md` row 11 — status: Authored, source at `docs/publication/diagrams/source/figure-11-paper-to-live-promotion-path.mmd`, not yet rendered)*.
+**Figure 11 — Paper-to-Live Promotion Path** *(rendered; see `docs/publication/DIAGRAM_REGISTER.md` row 11 — status: Rendered, source at `docs/publication/diagrams/source/figure-11-paper-to-live-promotion-path.mmd`, rendered artifact at `docs/publication/diagrams/rendered/figure-11-paper-to-live-promotion-path.svg`)*.
 
 Phase 7 (Paper Auto-Trader) → Phase 8 (Shadow Trading and Strategy Tournament) → Phase 12 (Production Hardening) → Phase 13 (Limited Live Trading) → Phase 14 (Full Live Platform). Entry into Phase 13 — the first phase where any real money moves — requires every one of the eight DS-EXE-007 Live Trading Gate prerequisites: acceptable paper performance, an independent security review passed, broker reconciliation passed, the kill switch (Emergency Stop/Flatten) tested and passed, data-health checks passed, duplicate-order prevention passed, active monitoring, and the user having explicitly and separately unlocked live trading. **No development agent or AI process may satisfy this gate.**
 

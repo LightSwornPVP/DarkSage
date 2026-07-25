@@ -8,6 +8,7 @@ on this specific machine's Git state beyond what it explicitly mocks.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -1013,6 +1014,48 @@ class TestFigure16LabelSemantics(RepoFixtureTestCase):
             "incorrectly labeled Promotion" in f.message
             for f in report.findings if f.severity == "FAIL"
         ))
+
+
+# ---------------------------------------------------------------------------
+# Regression — real PUBLICATION_MANIFEST.json must never be touched by tests
+# ---------------------------------------------------------------------------
+
+class TestRealManifestNeverTouchedBySuite(unittest.TestCase):
+    """Regression test for the manifest test-isolation defect: every
+    filesystem-touching test above patches _repo.REPO_ROOT to a throwaway
+    TemporaryDirectory (see RepoFixtureTestCase), so none of them should ever
+    read or write the real repository's own
+    docs/publication/PUBLICATION_MANIFEST.json. This test proves that by
+    hashing the real file, running a representative slice of the
+    REPO_ROOT-patching suite in-process, and asserting the checksum did not
+    move — a mocked baseline (e.g. "deadbeef") leaking into the real
+    manifest would be caught here."""
+
+    def test_real_manifest_checksum_unchanged_by_full_suite(self):
+        real_manifest = _repo.REPO_ROOT / "docs" / "publication" / "PUBLICATION_MANIFEST.json"
+        self.assertTrue(
+            real_manifest.is_file(),
+            "real manifest must exist on disk for this regression test to be meaningful",
+        )
+        before = _repo.sha256_of_file(real_manifest)
+        self.assertIsNotNone(before)
+
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite()
+        for cls in (TestManifestChecks, TestPathContainment, TestControlledIdReferences):
+            suite.addTests(loader.loadTestsFromTestCase(cls))
+        result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+
+        after = _repo.sha256_of_file(real_manifest)
+        self.assertEqual(
+            before, after,
+            "real PUBLICATION_MANIFEST.json checksum changed — a test wrote to the "
+            "real repository instead of its patched REPO_ROOT tempdir",
+        )
+        self.assertTrue(result.wasSuccessful(), "embedded fixture subset must itself pass")
+        # _repo.REPO_ROOT must be restored to the real root after the embedded
+        # tests' patches unwind — proves no patch leaked past its own tearDown.
+        self.assertEqual(_repo.REPO_ROOT, real_manifest.parents[2])
 
 
 if __name__ == "__main__":

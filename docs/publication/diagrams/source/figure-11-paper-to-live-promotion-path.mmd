@@ -31,6 +31,7 @@ stateDiagram-v2
     Phase13 --> Phase14
 
     state Gate {
+        direction LR
         [*] --> G1
         G1: 1. Paper performance acceptable
         G2: 2. Independent security review passed
@@ -40,5 +41,12 @@ stateDiagram-v2
         G6: 6. Duplicate-order prevention passed
         G7: 7. Monitoring active
         G8: 8. User has explicitly and separately unlocked live trading
-        G1 --> G2 --> G3 --> G4 --> G5 --> G6 --> G7 --> G8 --> [*]
+        G1 --> G2
+        G2 --> G3
+        G3 --> G4
+        G4 --> G5
+        G5 --> G6
+        G6 --> G7
+        G7 --> G8
+        G8 --> [*]
     }

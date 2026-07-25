@@ -1,0 +1,24 @@
+# Pinned dependencies for the DarkSage publication DOCX/PDF generation
+# pipeline (scripts/publication/docgen/). Installed ONLY into the isolated,
+# repo-local virtual environment at scripts/publication/.venv/ — never into
+# the repository's application venv (.venv/ at repo root) and never
+# system-wide. No network access at runtime; both packages generate DOCX/PDF
+# offline from local Markdown sources.
+#
+#   python-docx==1.1.2   MIT license      DOCX (.docx) generation
+#   reportlab==4.2.5     BSD license      PDF (.pdf) generation
+#   pymupdf==1.28.0      AGPL-3.0 license PDF-to-image rasterization for
+#                                         manual visual QA only (renders a
+#                                         generated PDF's pages to PNG so a
+#                                         human/agent can inspect them) --
+#                                         not imported by generate.py itself,
+#                                         so it is not a runtime dependency
+#                                         of the generation pipeline proper.
+#
+# Setup:
+#   cd scripts/publication
+#   python -m venv .venv
+#   ./.venv/Scripts/python.exe -m pip install -r docgen/requirements.txt
+python-docx==1.1.2
+reportlab==4.2.5
+pymupdf==1.28.0

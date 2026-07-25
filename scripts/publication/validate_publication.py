@@ -254,7 +254,7 @@ def check_diagram_path_truthfulness(report: Report, rows) -> None:
         if src_match:
             src_path = resolve_repo_path(src_match.group(1))
             exists = src_path.is_file()
-            authored = status.startswith("Authored")
+            authored = status.startswith("Authored") or status == "Rendered"
             if authored and not exists:
                 report.fail(check, f"Figure {num}: Status says '{status}' but source path does not exist on disk: {src_match.group(1)}")
             elif not authored and exists:
@@ -386,9 +386,18 @@ ABS_PATH_PATTERNS = [
 ]
 
 
+_VENDORED_DIR_NAMES = {".venv", "node_modules", "__pycache__"}
+
+
+def _not_vendored(path: Path) -> bool:
+    return _VENDORED_DIR_NAMES.isdisjoint(path.parts)
+
+
 def check_no_absolute_personal_paths(report: Report) -> None:
     check = "no-absolute-personal-paths"
-    files = _iter_markdown_files(PUBLICATION_DIRS) + list(resolve_repo_path("scripts/publication").rglob("*.py"))
+    files = _iter_markdown_files(PUBLICATION_DIRS) + [
+        p for p in resolve_repo_path("scripts/publication").rglob("*.py") if _not_vendored(p)
+    ]
     hit = False
     for f in files:
         text = f.read_text(encoding="utf-8", errors="replace")
@@ -412,7 +421,11 @@ SECRET_PATTERNS = [
 
 def check_no_secrets(report: Report) -> None:
     check = "no-obvious-secrets"
-    files = _iter_markdown_files(PUBLICATION_DIRS) + list(resolve_repo_path("scripts/publication").rglob("*.py")) + list(resolve_repo_path("docs/publication/diagrams").rglob("*.mmd"))
+    files = (
+        _iter_markdown_files(PUBLICATION_DIRS)
+        + [p for p in resolve_repo_path("scripts/publication").rglob("*.py") if _not_vendored(p)]
+        + list(resolve_repo_path("docs/publication/diagrams").rglob("*.mmd"))
+    )
     hit = False
     for f in files:
         if not f.is_file():
