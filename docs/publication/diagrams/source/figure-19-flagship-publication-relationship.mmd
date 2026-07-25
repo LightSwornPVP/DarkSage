@@ -1,0 +1,29 @@
+%% Figure 19 — Flagship-Publication Relationship
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 19
+%% Source Volumes: DSF-001 (this document, §B)
+%% Type: Conceptual | Diagram Standard Class: Component
+%% Authoritative Labels: "Markdown (authoritative source)," "Executive Product Plan," "PRS," "Codex
+%% Complete Edition"
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 19 / DSF-003 §9.8):
+%% This diagram shows that all three publication artifacts — the Executive Product Plan, the Product
+%% Requirements Specification, and the Codex Complete Edition — derive from the same controlled
+%% Markdown source, and that none of the three is authoritative over another. The Markdown source is
+%% authoritative over all three.
+
+graph TD
+    MD["Markdown (authoritative source)<br/><i>docs/codex/**, DSF-001, DSF-002, DSF-003</i>"]
+    EPP["Executive Product Plan<br/><i>derived, zero independent requirement authority</i>"]
+    PRS["Product Requirements Specification (DSF-002)<br/><i>derived consolidation</i>"]
+    CCE["Codex Complete Edition<br/><i>packages DS-001-DS-014 unchanged</i>"]
+
+    MD -->|"authoritative source for"| EPP
+    MD -->|"authoritative source for"| PRS
+    MD -->|"authoritative source for"| CCE
+
+    classDef source fill:#0B0B0D,color:#F4F2EC,stroke:#C8A45D,stroke-width:2px;
+    classDef derived fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px;
+    class MD source;
+    class EPP derived;
+    class PRS derived;
+    class CCE derived;

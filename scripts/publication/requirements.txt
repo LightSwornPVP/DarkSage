@@ -1,0 +1,4 @@
+# Intentionally empty: scripts/publication/ uses Python 3.9+ standard library
+# only (hashlib, subprocess, pathlib, json, re, argparse, dataclasses,
+# urllib.parse, unittest). No third-party packages, no network access, no
+# paid services. Nothing to install.
