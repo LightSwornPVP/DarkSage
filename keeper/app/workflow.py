@@ -226,6 +226,7 @@ class WorkflowCoordinator:
         reason: str,
         stage: str | None = None,
         authorizer: str = "local-user",
+        reroute_authorization_id: str | None = None,
     ) -> dict[str, Any]:
         previous = self._run(run_id)
         expected = (
@@ -248,7 +249,15 @@ class WorkflowCoordinator:
         task = self._task(str(previous["task_id"]))
         thread = threading.Thread(
             target=self._execute_guarded,
-            args=(run_id, task, cancel, pause, approval, selected),
+            args=(
+                run_id,
+                task,
+                cancel,
+                pause,
+                approval,
+                selected,
+                reroute_authorization_id,
+            ),
             name=f"keeper-retry-{run_id}-{selected}",
             daemon=True,
         )
@@ -258,6 +267,116 @@ class WorkflowCoordinator:
             self._active[run_id] = ActiveRun(thread, cancel, pause, approval)
         thread.start()
         return current
+
+    def retry_routing_preview(self, run_id: str) -> dict[str, Any]:
+        run = self._run(run_id)
+        task = self._task(str(run["task_id"]))
+        attempts = run.get("routing_attempts")
+        if not isinstance(attempts, list) or not attempts:
+            raise PermissionError("retry routing state is missing or malformed")
+        _, _, proposed = _select_routes(
+            task,
+            self.store.get("settings", "providers") or {},
+        )
+        previous = attempts[-1]
+        decisions = previous.get("decisions")
+        if not isinstance(decisions, list):
+            raise PermissionError("prior routing decision is malformed")
+        return {
+            "run_id": run_id,
+            "task_id": run["task_id"],
+            "retry_stage": run.get("stopped_from")
+            or run.get("interrupted_from"),
+            "provider_policy": previous.get("provider_policy"),
+            "from_routing_digest": _routing_digest(decisions),
+            "to_routing_digest": _routing_digest(proposed),
+            "previous_decisions": decisions,
+            "proposed_decisions": proposed,
+        }
+
+    def _bind_retry_routing(
+        self,
+        run_id: str,
+        stored: dict[str, Any],
+        retry_stage: str,
+        providers: dict[str, AgentProvider],
+        proposed: list[dict[str, Any]],
+        authorization_id: str | None,
+    ) -> tuple[dict[str, AgentProvider], list[dict[str, Any]], str | None]:
+        run = self._run(run_id)
+        attempts = run.get("routing_attempts")
+        if not isinstance(attempts, list) or not attempts:
+            raise PermissionError("retry routing state is missing or malformed")
+        prior = attempts[-1]
+        prior_decisions = prior.get("decisions")
+        if (
+            not isinstance(prior_decisions, list)
+            or prior.get("provider_policy") != stored.get("provider_policy")
+        ):
+            raise PermissionError("retry provider policy or routing state changed")
+        _validate_routing_decisions(
+            prior_decisions, str(stored.get("provider_policy", ""))
+        )
+        _validate_routing_decisions(
+            proposed, str(stored.get("provider_policy", ""))
+        )
+        prior_digest = _routing_digest(prior_decisions)
+        proposed_digest = _routing_digest(proposed)
+        if prior_digest == proposed_digest:
+            prior_by_role = {
+                str(item["role"]): item
+                for item in prior_decisions
+                if isinstance(item, dict) and item.get("role")
+            }
+            provider_keys = {
+                "builder": "builder",
+                "reviewer": "reviewer",
+                "repairer": "repairer",
+                "post_repair_reviewer": "post-reviewer",
+            }
+            if set(prior_by_role) != set(provider_keys):
+                raise PermissionError("prior routing roles are incomplete")
+            rebound: list[dict[str, Any]] = []
+            for item in proposed:
+                role = str(item["role"])
+                previous = prior_by_role[role]
+                instance_id = str(previous.get("provider_instance_id") or "")
+                if not instance_id:
+                    raise PermissionError("prior provider instance identity is missing")
+                providers[provider_keys[role]].instance_id = instance_id
+                rebound.append({**item, "provider_instance_id": instance_id})
+            return providers, rebound, None
+        if not authorization_id:
+            raise PermissionError(
+                "original retry provider is unavailable or changed; reroute authorization is required"
+            )
+        authorization = self.store.get("authorizations", authorization_id)
+        if authorization is None:
+            raise PermissionError("reroute authorization is missing")
+        try:
+            expires = datetime.fromisoformat(str(authorization["expires_at"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermissionError("reroute authorization expiration is invalid") from error
+        expected = {
+            "capability": "provider_reroute",
+            "task_id": str(stored["id"]),
+            "run_id": run_id,
+            "retry_stage": retry_stage,
+            "provider_policy": stored.get("provider_policy"),
+            "from_routing_digest": prior_digest,
+            "to_routing_digest": proposed_digest,
+        }
+        if (
+            expires.tzinfo is None
+            or expires <= datetime.now(UTC)
+            or authorization.get("revoked_at") is not None
+            or authorization.get("consumed_at") is not None
+            or any(authorization.get(key) != value for key, value in expected.items())
+        ):
+            raise PermissionError("reroute authorization does not match this retry")
+        authorization["consumed_at"] = _now()
+        self.store.upsert("authorizations", authorization_id, authorization)
+        return providers, proposed, authorization_id
 
     def execute(self, task_id: str) -> dict[str, Any]:
         run = self.start(task_id)
@@ -331,9 +450,18 @@ class WorkflowCoordinator:
         pause: threading.Event,
         approval: threading.Event,
         retry_stage: str | None = None,
+        reroute_authorization_id: str | None = None,
     ) -> None:
         try:
-            self._execute(run_id, task, cancel, pause, approval, retry_stage)
+            self._execute(
+                run_id,
+                task,
+                cancel,
+                pause,
+                approval,
+                retry_stage,
+                reroute_authorization_id,
+            )
         except Exception as error:
             record = self._run(run_id)
             if record.get("stage") not in {
@@ -366,6 +494,7 @@ class WorkflowCoordinator:
         pause: threading.Event,
         approval: threading.Event,
         retry_stage: str | None = None,
+        reroute_authorization_id: str | None = None,
     ) -> None:
         repository = Path(str(stored["repository"])).resolve()
         if retry_stage is None:
@@ -378,6 +507,16 @@ class WorkflowCoordinator:
             stored,
             self.store.get("settings", "providers") or {},
         )
+        reroute_authorization: str | None = None
+        if retry_stage is not None:
+            providers, routing, reroute_authorization = self._bind_retry_routing(
+                run_id,
+                stored,
+                retry_stage,
+                providers,
+                routing,
+                reroute_authorization_id,
+            )
         with self._lock:
             active = self._active.get(run_id)
             if active is not None:
@@ -388,17 +527,14 @@ class WorkflowCoordinator:
                     if callable(callback):
                         callbacks.append(callback)
                 active.cancel_callbacks = callbacks
-        if retry_stage is None:
-            record = self._run(run_id)
-            record["providers"] = {
-                role: {
-                    "provider_name": provider.provider_name,
-                    "provider_instance_id": provider.instance_id,
-                }
-                for role, provider in providers.items()
-            }
-            record["routing_decisions"] = routing
-            self.store.upsert("runs", run_id, record)
+        self._record_routing_attempt(
+            run_id,
+            stored,
+            providers,
+            routing,
+            retry_stage,
+            reroute_authorization,
+        )
         if cancel.is_set():
             return
         if retry_stage is None:
@@ -724,6 +860,7 @@ class WorkflowCoordinator:
             "provider_policy": stored.get("provider_policy", "repository-default"),
             "provider_identities": provider_identities,
             "routing_rationale": list(run.get("routing_decisions", [])),
+            "routing_attempts": list(run.get("routing_attempts", [])),
             "lifecycle_stages": list(run.get("history", [])),
             "authorizations": authorizations,
             "waivers": waivers,
@@ -776,6 +913,46 @@ class WorkflowCoordinator:
         }
         finalize_evidence(evidence, report)
         return report
+
+    def _record_routing_attempt(
+        self,
+        run_id: str,
+        stored: dict[str, Any],
+        providers: dict[str, AgentProvider],
+        routing: list[dict[str, Any]],
+        retry_stage: str | None,
+        reroute_authorization: str | None,
+    ) -> None:
+        _validate_routing_decisions(
+            routing, str(stored.get("provider_policy", ""))
+        )
+        record = self._run(run_id)
+        record["providers"] = {
+            role: {
+                "provider_name": provider.provider_name,
+                "provider_instance_id": provider.instance_id,
+            }
+            for role, provider in providers.items()
+        }
+        record["routing_decisions"] = routing
+        attempts = list(record.get("routing_attempts", []))
+        attempts.append(
+            {
+                "attempt_id": str(
+                    record.get("active_stage_attempt_id")
+                    or f"{run_id}:initial"
+                ),
+                "attempt_number": len(attempts) + 1,
+                "retry_of": attempts[-1]["attempt_id"] if attempts else None,
+                "retry_stage": retry_stage,
+                "provider_policy": stored.get("provider_policy"),
+                "decisions": routing,
+                "reroute_authorization_id": reroute_authorization,
+                "recorded_at": _now(),
+            }
+        )
+        record["routing_attempts"] = attempts
+        self.store.upsert("runs", run_id, record)
 
     def _persist_process_ownership(self, ownership: dict[str, Any]) -> None:
         keeper_run_id = str(ownership.get("keeper_run_id") or "")
@@ -1117,11 +1294,38 @@ def _select_routes(
         "repairer": "repairer",
         "post_repair_reviewer": "post-reviewer",
     }
+    selected_provider_ids = {
+        "builder": author.provider_id,
+        "reviewer": reviewer.provider_id,
+        "repairer": repairer.provider_id,
+        "post_repair_reviewer": reviewer.provider_id,
+    }
+    diagnostics_by_id = {item.provider_id: item for item in real_diagnostics}
     decisions = [
         {
             "role": role,
+            "provider_id": selected_provider_ids[role],
             "provider": providers[target].provider_name,
             "provider_instance_id": providers[target].instance_id,
+            "executable": (
+                str(
+                    Path(
+                        str(
+                            diagnostics_by_id[
+                                selected_provider_ids[role]
+                            ].executable
+                        )
+                    ).resolve()
+                )
+                if diagnostics_by_id[selected_provider_ids[role]].executable
+                else ""
+            ),
+            "capability": role,
+            "independence": (
+                "independent-review"
+                if role in {"reviewer", "post_repair_reviewer"}
+                else "authoring"
+            ),
             "reasons": (
                 author.reasons
                 if role == "builder"
@@ -1281,9 +1485,18 @@ def _mock_routes(
     rationale = [
         {
             "role": role,
+            "provider_id": providers[provider_id].provider_name,
             "provider": providers[provider_id].provider_name,
             "provider_instance_id": providers[provider_id].instance_id,
+            "executable": "",
+            "capability": role,
+            "independence": (
+                "independent-review"
+                if role in {"reviewer", "post_repair_reviewer"}
+                else "authoring"
+            ),
             "reason": "deterministic capability match with independent identity",
+            "policy": "mock",
         }
         for role, provider_id in routes.items()
     ]
@@ -1306,6 +1519,66 @@ def _provider_records(evidence: Path) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             records.append(value)
     return records
+
+
+def _routing_digest(decisions: list[dict[str, Any]]) -> str:
+    fields = (
+        "role",
+        "policy",
+        "provider_id",
+        "provider",
+        "executable",
+        "capability",
+        "independence",
+    )
+    normalized = [
+        {key: item.get(key) for key in fields}
+        for item in sorted(decisions, key=lambda value: str(value.get("role", "")))
+    ]
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _validate_routing_decisions(
+    decisions: list[dict[str, Any]], policy: str
+) -> None:
+    required_roles = {
+        "builder",
+        "reviewer",
+        "repairer",
+        "post_repair_reviewer",
+    }
+    by_role = {
+        str(item.get("role")): item
+        for item in decisions
+        if isinstance(item, dict) and item.get("role")
+    }
+    if set(by_role) != required_roles or len(decisions) != len(required_roles):
+        raise PermissionError("routing decisions are incomplete or duplicated")
+    for role, item in by_role.items():
+        if (
+            item.get("policy") != policy
+            or item.get("capability") != role
+            or not item.get("provider_id")
+            or not item.get("provider")
+            or not item.get("provider_instance_id")
+        ):
+            raise PermissionError("routing decision identity is malformed")
+        if policy != "mock" and (
+            str(item.get("provider_id", "")).startswith("mock")
+            or str(item.get("provider", "")).startswith("mock")
+        ):
+            raise PermissionError("retry cannot downgrade routing to mock")
+    if (
+        by_role["reviewer"]["provider_id"]
+        == by_role["builder"]["provider_id"]
+        or by_role["post_repair_reviewer"]["provider_id"]
+        == by_role["builder"]["provider_id"]
+    ):
+        raise PermissionError("retry routing weakens reviewer independence")
 
 
 def _evidence_artifacts(evidence: Path) -> list[dict[str, Any]]:

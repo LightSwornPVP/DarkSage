@@ -431,8 +431,43 @@ class KeeperApplication:
         reason: str,
         stage: str | None = None,
         authorizer: str = "local-user",
+        reroute_authorization_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.workflow.retry(run_id, reason, stage, authorizer)
+        return self.workflow.retry(
+            run_id,
+            reason,
+            stage,
+            authorizer,
+            reroute_authorization_id,
+        )
+
+    def create_provider_reroute_authorization(
+        self,
+        run_id: str,
+        approving_authority: str,
+        minutes: int,
+    ) -> dict[str, Any]:
+        preview = self.workflow.retry_routing_preview(run_id)
+        if preview["from_routing_digest"] == preview["to_routing_digest"]:
+            raise ValueError("retry routing is unchanged and needs no authorization")
+        run = self.run_status(run_id)
+        return self.create_authorization(
+            "provider_reroute",
+            str(run["task_id"]),
+            str(run["repository"]),
+            approving_authority,
+            minutes,
+            reusable=False,
+            scope={
+                "run_id": run_id,
+                "retry_stage": preview["retry_stage"],
+                "provider_policy": preview["provider_policy"],
+                "from_routing_digest": preview["from_routing_digest"],
+                "to_routing_digest": preview["to_routing_digest"],
+                "previous_decisions": preview["previous_decisions"],
+                "proposed_decisions": preview["proposed_decisions"],
+            },
+        )
 
     def filtered_runs(
         self,
@@ -512,7 +547,13 @@ class KeeperApplication:
     ) -> dict[str, Any]:
         if minutes < 1 or minutes > 1440:
             raise ValueError("authorization duration must be between 1 and 1440 minutes")
-        if capability not in {"commit", "push", "network", "verification_waiver"}:
+        if capability not in {
+            "commit",
+            "push",
+            "network",
+            "verification_waiver",
+            "provider_reroute",
+        }:
             raise ValueError("authorization capability is unsupported")
         if not approving_authority.strip():
             raise ValueError("approving authority is required")

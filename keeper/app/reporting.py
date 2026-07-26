@@ -77,6 +77,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "scope": {},
         "provider_identities": {},
         "routing_rationale": [],
+        "routing_attempts": [],
         "lifecycle_stages": [],
         "authorizations": [],
         "waivers": [],
