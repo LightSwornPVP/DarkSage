@@ -76,3 +76,8 @@ temp/
 # Local test artifacts
 artifacts/
 reports/local/
+
+# Shared Keeper workflow configuration is source-controlled even when a local
+# repository exclude file ignores development workflow state.
+!.ai-workflow/
+!.ai-workflow/**

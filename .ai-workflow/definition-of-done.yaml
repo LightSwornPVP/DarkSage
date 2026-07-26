@@ -1,0 +1,10 @@
+version: 1
+required:
+  - acceptance_criteria_satisfied
+  - required_verification_passed
+  - no_critical_findings
+  - no_high_findings
+  - required_documentation_updated
+  - allowed_path_scope_preserved
+  - workspace_recoverable
+  - completion_report_recorded

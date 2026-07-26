@@ -1,0 +1,23 @@
+{
+  "auto_commit": false,
+  "maximum_process_restarts": 2,
+  "maximum_repair_passes": 1,
+  "process_timeout_seconds": 1800,
+  "provider_command": []
+  ,
+  "ollama_endpoint": "http://127.0.0.1:11434",
+  "ollama_model": "qwen3-coder:30b",
+  "provider_routes": {
+    "builder": "primary_builder",
+    "repairer": "primary_repairer",
+    "post_repair_reviewer": "primary_post_repair_reviewer",
+    "reviewer": "primary_reviewer",
+    "preliminary_reviewer": "ollama",
+    "acceptance_checker": "ollama",
+    "diff_summarizer": "ollama",
+    "test_gap_analyzer": "ollama",
+    "documentation_reviewer": "ollama",
+    "log_analyzer": "ollama",
+    "implementation_advisor": "ollama"
+  }
+}

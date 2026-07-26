@@ -1,0 +1,263 @@
+{
+  "architecture": {
+    "layers": [
+      "validated models and state machine",
+      "atomic persistence and recovery",
+      "workspace isolation and scope policy",
+      "shared provider abstraction and explicit routing",
+      "verification and finding disposition",
+      "orchestration and CLI"
+    ]
+  },
+  "audit_performed": false,
+  "base_commit": "ccb4587",
+  "changed_files": [
+    " M .gitignore",
+    "?? .ai-workflow/autonomy-policy.yaml",
+    "?? .ai-workflow/cleanup-register.json",
+    "?? .ai-workflow/config.json",
+    "?? .ai-workflow/current-state.json",
+    "?? .ai-workflow/definition-of-done.yaml",
+    "?? .ai-workflow/recovery-state.json",
+    "?? .ai-workflow/reviewer-policy.yaml",
+    "?? .ai-workflow/runs/.gitkeep",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-132e0c6d29e5/prompt.md",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-132e0c6d29e5/run.json",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-132e0c6d29e5/stderr.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-132e0c6d29e5/stdout.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-f6cbb675f8e5/prompt.md",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-f6cbb675f8e5/run.json",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-f6cbb675f8e5/stderr.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-builder-f6cbb675f8e5/stdout.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-repairer-b56add802163/prompt.md",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-repairer-b56add802163/run.json",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-repairer-b56add802163/stderr.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-repairer-b56add802163/stdout.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-reviewer-58c222290787/prompt.md",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-reviewer-58c222290787/run.json",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-reviewer-58c222290787/stderr.log",
+    "?? .ai-workflow/runs/keeper-pilot-lifecycle-reviewer-58c222290787/stdout.log",
+    "?? .ai-workflow/runs/mock-pilot-summary.json",
+    "?? .ai-workflow/runs/pilot-recovery-probe/run.json",
+    "?? .ai-workflow/tasks/keeper-pilot-lifecycle.json",
+    "?? docs/keeper/OVERVIEW.md",
+    "?? docs/keeper/RECOVERY.md",
+    "?? docs/keeper/SECURITY.md",
+    "?? docs/keeper/SETUP.md",
+    "?? docs/keeper/TASK_FORMAT.md",
+    "?? docs/keeper/WORKFLOW.md",
+    "?? keeper/__init__.py",
+    "?? keeper/__main__.py",
+    "?? keeper/agent_runner.py",
+    "?? keeper/cli.py",
+    "?? keeper/config.py",
+    "?? keeper/logging_config.py",
+    "?? keeper/models/__init__.py",
+    "?? keeper/models/decision.py",
+    "?? keeper/models/finding.py",
+    "?? keeper/models/run.py",
+    "?? keeper/models/task.py",
+    "?? keeper/orchestrator.py",
+    "?? keeper/policies.py",
+    "?? keeper/providers/__init__.py",
+    "?? keeper/providers/base.py",
+    "?? keeper/providers/codex_cli.py",
+    "?? keeper/providers/mock.py",
+    "?? keeper/providers/ollama.py",
+    "?? keeper/providers/routing.py",
+    "?? keeper/recovery.py",
+    "?? keeper/reviewer.py",
+    "?? keeper/state_machine.py",
+    "?? keeper/task_queue.py",
+    "?? keeper/verifier.py",
+    "?? keeper/workspace.py",
+    "?? scripts/keeper-mock-pilot.py",
+    "?? scripts/keeper-pause.sh",
+    "?? scripts/keeper-prepare-audit.py",
+    "?? scripts/keeper-resume.sh",
+    "?? scripts/keeper-start.sh",
+    "?? scripts/keeper-status.sh",
+    "?? scripts/keeper-verify.sh",
+    "?? tests/keeper/__init__.py",
+    "?? tests/keeper/test_ollama_provider.py",
+    "?? tests/keeper/test_policy_and_recovery.py",
+    "?? tests/keeper/test_provider_verifier_review.py",
+    "?? tests/keeper/test_state_and_queue.py",
+    "?? tests/keeper/test_workspace_and_orchestrator.py"
+  ],
+  "concerns": [
+    {
+      "description": "A verified prompt-file/direct-JSON adapter or compatible executable is required.",
+      "severity": "High",
+      "status": "open",
+      "title": "Real provider protocol is not configured"
+    },
+    {
+      "description": "Direct invocation misses bundled utilities; login-shell invocation passes.",
+      "severity": "Low",
+      "status": "open",
+      "title": "Foundation script invocation is PATH-sensitive on Windows"
+    }
+  ],
+  "known_limitations": [
+    "Primary provider command remains unconfigured because no inspected CLI matches the current protocol.",
+    "Real-provider pilot remains blocked.",
+    "Worktrees are preserved on failure and clean removal preserves their branches.",
+    "Foundation checks require login-shell PATH initialization on this Windows environment."
+  ],
+  "patch_file": "implementation-from-ccb4587.patch",
+  "patch_scope_note": "Exact base diff including untracked implementation and pilot evidence; excludes this audit output directory to avoid self-reference.",
+  "pilot": {
+    "cleanup_status": "completed-clean-worktree-removed-branch-preserved",
+    "final_status": "COMPLETED",
+    "pilot_id": "keeper-pilot-lifecycle",
+    "protected_actions": [],
+    "providers": [
+      {
+        "provider_instance_id": "01d0086adb5b41998227752468372f38",
+        "provider_name": "mock-builder",
+        "role": "builder"
+      },
+      {
+        "provider_instance_id": "5c0c7c19a1804ec49bff998cec0d94f1",
+        "provider_name": "mock-builder",
+        "role": "builder"
+      },
+      {
+        "provider_instance_id": "d5b523695ac0467fa19e699d835b7132",
+        "provider_name": "mock-repairer",
+        "role": "repairer"
+      },
+      {
+        "provider_instance_id": "b2c5398682f04401af0cc7f5261ef328",
+        "provider_name": "mock-reviewer",
+        "role": "reviewer"
+      }
+    ],
+    "recorded_at": "2026-07-26T08:57:41.735524+00:00",
+    "repair_recorded": true,
+    "review_disposition_recorded": true,
+    "run_ids": [
+      "keeper-pilot-lifecycle-builder-132e0c6d29e5",
+      "keeper-pilot-lifecycle-builder-f6cbb675f8e5",
+      "keeper-pilot-lifecycle-repairer-b56add802163",
+      "keeper-pilot-lifecycle-reviewer-58c222290787"
+    ],
+    "started_from": "BACKLOG",
+    "transition_history": [
+      {
+        "from": "BACKLOG",
+        "timestamp": "2026-07-26T08:55:58.874044+00:00",
+        "to": "READY"
+      },
+      {
+        "from": "READY",
+        "timestamp": "2026-07-26T08:55:58.875525+00:00",
+        "to": "BUILDING"
+      },
+      {
+        "from": "BUILDING",
+        "timestamp": "2026-07-26T08:55:59.194059+00:00",
+        "to": "SELF_VERIFYING"
+      },
+      {
+        "from": "SELF_VERIFYING",
+        "timestamp": "2026-07-26T08:55:59.202460+00:00",
+        "to": "FAILED"
+      },
+      {
+        "from": "FAILED",
+        "timestamp": "2026-07-26T08:57:40.897387+00:00",
+        "to": "READY"
+      },
+      {
+        "from": "READY",
+        "timestamp": "2026-07-26T08:57:40.898920+00:00",
+        "to": "BUILDING"
+      },
+      {
+        "from": "BUILDING",
+        "timestamp": "2026-07-26T08:57:41.237428+00:00",
+        "to": "SELF_VERIFYING"
+      },
+      {
+        "from": "SELF_VERIFYING",
+        "timestamp": "2026-07-26T08:57:41.337920+00:00",
+        "to": "INDEPENDENT_AUDIT"
+      },
+      {
+        "from": "INDEPENDENT_AUDIT",
+        "timestamp": "2026-07-26T08:57:41.444332+00:00",
+        "to": "REPAIRING"
+      },
+      {
+        "from": "REPAIRING",
+        "timestamp": "2026-07-26T08:57:41.544845+00:00",
+        "to": "FINAL_VERIFY"
+      },
+      {
+        "from": "FINAL_VERIFY",
+        "timestamp": "2026-07-26T08:57:41.715149+00:00",
+        "to": "APPROVED"
+      },
+      {
+        "from": "APPROVED",
+        "timestamp": "2026-07-26T08:57:41.717824+00:00",
+        "to": "COMPLETED"
+      }
+    ],
+    "verification_recorded": true,
+    "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-mvp\\.ai-workflow\\pilot-worktrees\\keeper-pilot-lifecycle"
+  },
+  "prepared_at": "2026-07-26T09:02:12.462996+00:00",
+  "protected_actions": [
+    "force push and history rewrite",
+    "repository or backup-branch deletion",
+    "secret publication and paid resources",
+    "production deployment and live trading",
+    "real trades and weakened security or tests",
+    "unapproved major architecture changes"
+  ],
+  "provider_routing": {
+    "builder": "independent primary-provider instance",
+    "legacy_local_provider": "disabled",
+    "local_general_provider": "explicit routes only; never silent fallback",
+    "repairer": "independent primary-provider instance",
+    "reviewer": "independent primary-provider instance"
+  },
+  "recovery": "Atomic JSON replacement; dead recorded processes become interrupted with an exact reason.",
+  "run_records": [
+    "keeper-pilot-lifecycle-builder-132e0c6d29e5",
+    "keeper-pilot-lifecycle-builder-f6cbb675f8e5",
+    "keeper-pilot-lifecycle-repairer-b56add802163",
+    "keeper-pilot-lifecycle-reviewer-58c222290787",
+    "pilot-recovery-probe"
+  ],
+  "security_boundaries": [
+    "argument-array process execution without shell expansion",
+    "credential-oriented child-environment filtering",
+    "repository-relative path normalization and traversal rejection",
+    "allowed and blocked changed-path enforcement",
+    "structured provider-output validation",
+    "protected actions require explicit authorization"
+  ],
+  "state_transitions": [
+    "BACKLOG -> READY",
+    "READY -> BUILDING",
+    "BUILDING -> SELF_VERIFYING",
+    "SELF_VERIFYING -> INDEPENDENT_AUDIT",
+    "INDEPENDENT_AUDIT -> REPAIRING or FINAL_VERIFY",
+    "REPAIRING -> FINAL_VERIFY",
+    "FINAL_VERIFY -> APPROVED",
+    "APPROVED -> COMPLETED"
+  ],
+  "verification": {
+    "foundation_checks": "passed through Git login shell",
+    "full_tests": "434 passed",
+    "git_diff_check": "passed",
+    "keeper_tests": "26 passed",
+    "python_compilation": "passed",
+    "ruff": "not declared and not installed; not run",
+    "strict_mypy": "passed"
+  }
+}

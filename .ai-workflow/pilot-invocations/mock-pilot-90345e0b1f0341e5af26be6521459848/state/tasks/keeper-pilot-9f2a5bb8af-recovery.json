@@ -1,0 +1,46 @@
+{
+  "acceptance_criteria": [],
+  "active_attempt_id": "recovery-attempt",
+  "active_run_stage": "BUILDING",
+  "allowed_paths": [
+    "keeper/"
+  ],
+  "attempts": 0,
+  "blocked_paths": [],
+  "branch_name": null,
+  "capabilities": [],
+  "component": "keeper",
+  "created_timestamp": "2026-07-26T09:45:07.388114+00:00",
+  "dependencies": [],
+  "description": "Invocation-scoped interrupted run.",
+  "final_verification_commands": [],
+  "id": "keeper-pilot-9f2a5bb8af-recovery",
+  "maximum_attempts": 2,
+  "phase": "pilot",
+  "priority": 100,
+  "provider": "primary",
+  "required_verification_categories": [
+    "task"
+  ],
+  "risk": "low",
+  "sequence": 2,
+  "size": "small",
+  "status": "FAILED",
+  "title": "Recovery probe",
+  "transition_history": [
+    {
+      "from": "BUILDING",
+      "timestamp": "2026-07-26T09:45:07.430907+00:00",
+      "to": "FAILED"
+    }
+  ],
+  "updated_timestamp": "2026-07-26T09:45:07.430912+00:00",
+  "verification_commands": [
+    [
+      "keeper:file-equals",
+      "tracked.txt",
+      "safe\n"
+    ]
+  ],
+  "workspace_path": null
+}
