@@ -14,6 +14,7 @@ from keeper.app.reporting import finalize_evidence
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.providers.adapters import ProviderDiscovery
+from keeper.version import VERSION
 
 
 class KeeperApplication:
@@ -28,7 +29,7 @@ class KeeperApplication:
         providers = [item.to_dict() for item in ProviderDiscovery(self.provider_paths()).discover()]
         writable = _writable(self.data_directory)
         return {
-            "keeper_version": "0.2.0",
+            "keeper_version": VERSION,
             "python": sys.version.split()[0],
             "python_supported": sys.version_info >= (3, 12),
             "git": shutil.which("git"),
