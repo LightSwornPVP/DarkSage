@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from keeper.agent_runner import AgentRunner
 from keeper.app.verification_policy import VerificationSpec, validate_semantic_bindings
@@ -39,6 +39,7 @@ class Keeper:
         runner: AgentRunner,
         workspace_manager: WorkspaceManager,
         router: ProviderRouter | None = None,
+        lifecycle_observer: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self.runner = runner
@@ -46,6 +47,7 @@ class Keeper:
         self.workspace_manager = workspace_manager
         self.queue = TaskQueue(config.state_root / "tasks")
         self.verifier = Verifier()
+        self.lifecycle_observer = lifecycle_observer
 
     def _run_agent(
         self,
@@ -85,10 +87,14 @@ class Keeper:
             {"from": previous.value, "to": target.value, "timestamp": now_iso()}
         )
         self.save_task(task)
+        if self.lifecycle_observer is not None:
+            self.lifecycle_observer(target.value)
 
     def _set_stage(self, task: Task, stage: str) -> None:
         task.active_run_stage = stage
         self.save_task(task)
+        if self.lifecycle_observer is not None:
+            self.lifecycle_observer(stage)
 
     @staticmethod
     def _prompt(task: Task, role: str, diff: str = "", findings: list[Finding] | None = None) -> str:

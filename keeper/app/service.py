@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from keeper.app.demo import run_mock_demonstration
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
+from keeper.app.workflow import WorkflowCoordinator
 from keeper.providers.adapters import ProviderDiscovery
 from keeper.version import VERSION
 
@@ -24,6 +25,7 @@ class KeeperApplication:
         self.store.migrate()
         self.git = GitSafetyService()
         self.lifecycle = RunLifecycle(self.store)
+        self.workflow = WorkflowCoordinator(self.store, self.data_directory, self.notify)
 
     def diagnostics(self) -> dict[str, Any]:
         providers = [item.to_dict() for item in ProviderDiscovery(self.provider_paths()).discover()]
@@ -106,6 +108,10 @@ class KeeperApplication:
         if missing:
             raise ValueError(f"task is missing required fields: {missing}")
         task_id = str(values.get("id") or f"task-{uuid.uuid4().hex[:12]}")
+        active = self.active_project()
+        repository = str(values.get("repository") or (active or {}).get("repository", ""))
+        if not repository:
+            raise ValueError("task requires an active repository")
         task = {
             "id": task_id,
             "title": str(values["title"]),
@@ -121,6 +127,9 @@ class KeeperApplication:
             "required_reviewers": list(values.get("required_reviewers", ["independent"])),
             "completion_criteria": list(values.get("completion_criteria", [])),
             "delegation_mode": bool(values.get("delegation_mode", False)),
+            "repository": str(Path(repository).resolve()),
+            "provider_policy": str(values.get("provider_policy", "mock")),
+            "mock_scenario": str(values.get("mock_scenario", "repair")),
             "status": "INTAKE",
             "created_at": _now(),
         }
@@ -141,7 +150,20 @@ class KeeperApplication:
         self.lifecycle.transition(run_id, RunStage(str(run["interrupted_from"])))
 
     def cancel_run(self, run_id: str) -> None:
-        self.lifecycle.transition(run_id, RunStage.CANCELLED)
+        self.workflow.cancel(run_id)
+
+    def start_task(self, task_id: str) -> dict[str, Any]:
+        return self.workflow.start(task_id)
+
+    def execute_task(self, task_id: str) -> dict[str, Any]:
+        return self.workflow.execute(task_id)
+
+    def wait_for_run(self, run_id: str, timeout: float | None = None) -> dict[str, Any]:
+        self.workflow.wait(run_id, timeout)
+        run = self.store.get("runs", run_id)
+        if run is None:
+            raise LookupError("run not found")
+        return run
 
     def filtered_runs(
         self,
@@ -205,10 +227,20 @@ class KeeperApplication:
         self.store.upsert("authorizations", identifier, value)
 
     def run_mock_demo(self) -> dict[str, Any]:
-        summary = run_mock_demonstration(self.data_directory)
-        self.store.upsert("runs", str(summary["invocation_id"]), summary)
-        self.notify("run_completed", "Mock workflow completed", str(summary["status"]))
-        return summary
+        repository = self._demo_repository()
+        project = self.add_project(repository, "Keeper demonstration")
+        task = self.create_task(
+            {
+                "title": "Keeper deterministic demonstration",
+                "objective": "Exercise the unified production orchestration path.",
+                "baseline": project["head"],
+                "target_branch": "keeper/demo",
+                "included_paths": [".keeper-workflow/"],
+                "required_validations": ["task"],
+                "mock_scenario": "repair",
+            }
+        )
+        return self.execute_task(str(task["id"]))
 
     def notify(self, event: str, title: str, detail: str) -> dict[str, Any]:
         identifier = f"notification-{uuid.uuid4().hex}"
@@ -274,6 +306,24 @@ class KeeperApplication:
         finalize_evidence(destination, report)
         return destination
 
+    def _demo_repository(self) -> Path:
+        root = self.data_directory / "demonstrations" / f"demo-{uuid.uuid4().hex}"
+        repository = root / "repository"
+        repository.mkdir(parents=True)
+        commands = (
+            ("init",),
+            ("config", "user.email", "keeper@example.invalid"),
+            ("config", "user.name", "Keeper Demonstration"),
+        )
+        for command in commands:
+            _git(repository, *command)
+        (repository / "README.md").write_text(
+            "Keeper demonstration\n", encoding="utf-8"
+        )
+        _git(repository, "add", "README.md")
+        _git(repository, "commit", "-m", "demonstration baseline")
+        return repository
+
 
 def _writable(directory: Path) -> bool:
     try:
@@ -288,3 +338,17 @@ def _writable(directory: Path) -> bool:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _git(repository: Path, *arguments: str) -> None:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        shell=False,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "unable to prepare demonstration")

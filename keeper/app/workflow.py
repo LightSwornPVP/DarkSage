@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+import json
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Callable
+
+from keeper.agent_runner import AgentRunner
+from keeper.app.lifecycle import RunLifecycle, RunStage
+from keeper.app.reporting import finalize_evidence
+from keeper.app.storage import KeeperStore
+from keeper.config import KeeperConfig
+from keeper.models.task import Task
+from keeper.orchestrator import Keeper
+from keeper.providers.mock import MockProvider
+from keeper.providers.base import AgentProvider
+from keeper.providers.routing import ProviderRouter
+from keeper.workspace import WorkspaceManager
+
+
+@dataclass(slots=True)
+class ActiveRun:
+    thread: threading.Thread
+    cancel_requested: threading.Event
+
+
+class WorkflowCoordinator:
+    """Connect persisted desktop tasks to the production Keeper orchestrator."""
+
+    def __init__(
+        self,
+        store: KeeperStore,
+        data_directory: Path,
+        notify: Callable[[str, str, str], dict[str, Any]],
+    ) -> None:
+        self.store = store
+        self.data_directory = data_directory
+        self.lifecycle = RunLifecycle(store)
+        self.notify = notify
+        self._active: dict[str, ActiveRun] = {}
+        self._lock = threading.Lock()
+
+    def start(self, task_id: str) -> dict[str, Any]:
+        task = self._task(task_id)
+        run_id = f"run-{uuid.uuid4().hex}"
+        run = self.lifecycle.create(run_id, task_id)
+        run.update(
+            {
+                "repository": task["repository"],
+                "branch": task["target_branch"],
+                "baseline": task["baseline"],
+                "objective": task["objective"],
+                "started_at": _now(),
+                "provider": None,
+                "latest_log": None,
+            }
+        )
+        self.store.upsert("runs", run_id, run)
+        cancel = threading.Event()
+        thread = threading.Thread(
+            target=self._execute_guarded,
+            args=(run_id, task, cancel),
+            name=f"keeper-{run_id}",
+            daemon=True,
+        )
+        with self._lock:
+            self._active[run_id] = ActiveRun(thread, cancel)
+        thread.start()
+        return self._run(run_id)
+
+    def execute(self, task_id: str) -> dict[str, Any]:
+        run = self.start(task_id)
+        self.wait(str(run["id"]), timeout=120)
+        return self._run(str(run["id"]))
+
+    def wait(self, run_id: str, timeout: float | None = None) -> None:
+        with self._lock:
+            active = self._active.get(run_id)
+        if active is not None:
+            active.thread.join(timeout)
+
+    def cancel(self, run_id: str) -> None:
+        with self._lock:
+            active = self._active.get(run_id)
+        if active is None or not active.thread.is_alive():
+            raise ValueError("run is not active")
+        active.cancel_requested.set()
+        self.lifecycle.transition(run_id, RunStage.CANCELLED)
+        self.notify("run_cancelled", "Run cancelled", f"Run {run_id}")
+
+    def _execute_guarded(
+        self, run_id: str, task: dict[str, Any], cancel: threading.Event
+    ) -> None:
+        try:
+            self._execute(run_id, task, cancel)
+        except Exception as error:
+            record = self._run(run_id)
+            if record.get("stage") not in {
+                RunStage.CANCELLED.value,
+                RunStage.BLOCKED.value,
+            }:
+                self.lifecycle.transition(run_id, RunStage.BLOCKED)
+            record = self._run(run_id)
+            record["failure_reason"] = str(error)
+            record["ended_at"] = _now()
+            self.store.upsert("runs", run_id, record)
+            self.notify("provider_failure", "Workflow blocked", f"Run {run_id}")
+        finally:
+            with self._lock:
+                self._active.pop(run_id, None)
+
+    def _execute(
+        self, run_id: str, stored: dict[str, Any], cancel: threading.Event
+    ) -> None:
+        repository = Path(str(stored["repository"])).resolve()
+        self._advance(run_id, RunStage.SCOPE_VALIDATION)
+        _validate_task_scope(stored, repository)
+        self._advance(run_id, RunStage.RISK_CLASSIFICATION)
+        self._advance(run_id, RunStage.AUTHORIZATION_RESOLUTION)
+        self._advance(run_id, RunStage.PROVIDER_SELECTION)
+        providers, routes, routing = _mock_routes(str(stored.get("mock_scenario", "repair")))
+        record = self._run(run_id)
+        record["providers"] = {
+            role: {
+                "provider_name": provider.provider_name,
+                "provider_instance_id": provider.instance_id,
+            }
+            for role, provider in providers.items()
+        }
+        record["routing_decisions"] = routing
+        self.store.upsert("runs", run_id, record)
+        if cancel.is_set():
+            return
+        self._advance(run_id, RunStage.WORKTREE_PREPARATION)
+        evidence = self.data_directory / "evidence" / run_id
+        state = evidence / ".ai-workflow"
+        config = KeeperConfig(
+            repository,
+            state,
+            self.data_directory / "worktrees" / run_id,
+            (),
+            provider_routes=tuple(routes.items()),
+            process_timeout_seconds=int(stored.get("timeout_seconds", 30)),
+        )
+        domain_task = _domain_task(stored, run_id)
+        routed_providers: dict[str, AgentProvider] = dict(providers)
+        router = ProviderRouter(routed_providers, routes)
+        observer = _LifecycleObserver(self.lifecycle, run_id, cancel)
+        engine = Keeper(
+            config,
+            AgentRunner(providers["builder"], state / "runs", 30),
+            WorkspaceManager(repository, config.workspace_root, state / "ownership"),
+            router,
+            observer,
+        )
+        result = engine.run_task(domain_task)
+        if cancel.is_set():
+            return
+        if result.status.value != "COMPLETED":
+            self.lifecycle.transition(run_id, RunStage.BLOCKED)
+            self.notify("workflow_blocked", "Workflow blocked", f"Run {run_id}")
+            return
+        observer.finish_validation()
+        report = {
+            **self._run(run_id),
+            "task": stored,
+            "orchestrator_task": result.to_dict(),
+            "terminal_status": "COMPLETED",
+            "end_time": _now(),
+            "evidence_paths": str(evidence),
+        }
+        finalize_evidence(evidence, report)
+        self._advance(run_id, RunStage.EVIDENCE_FINALIZATION)
+        self._advance(run_id, RunStage.CLOSED)
+        record = self._run(run_id)
+        record.update(
+            {
+                "status": "COMPLETED",
+                "outcome": "approved",
+                "ended_at": _now(),
+                "evidence_root": str(evidence),
+                "report_markdown": str(evidence / "final-report.md"),
+                "report_json": str(evidence / "final-report.json"),
+            }
+        )
+        self.store.upsert("runs", run_id, record)
+        self.notify("run_completed", "Run completed", f"Run {run_id}")
+
+    def _advance(self, run_id: str, stage: RunStage) -> None:
+        self.lifecycle.transition(run_id, stage)
+
+    def _task(self, task_id: str) -> dict[str, Any]:
+        task = self.store.get("tasks", task_id)
+        if task is None:
+            raise LookupError("task not found")
+        return task
+
+    def _run(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get("runs", run_id)
+        if run is None:
+            raise LookupError("run not found")
+        return run
+
+
+class _LifecycleObserver:
+    def __init__(
+        self, lifecycle: RunLifecycle, run_id: str, cancel: threading.Event
+    ) -> None:
+        self.lifecycle = lifecycle
+        self.run_id = run_id
+        self.cancel = cancel
+
+    def __call__(self, value: str) -> None:
+        if self.cancel.is_set():
+            raise RuntimeError("run cancellation requested")
+        mapping = {
+            "BUILDING": RunStage.AUTHOR_EXECUTION,
+            "SELF_VERIFYING": RunStage.AUTHOR_SELF_VERIFICATION,
+            "INDEPENDENT_AUDIT": RunStage.INDEPENDENT_AUDIT,
+            "REPAIRING": RunStage.REPAIR_EXECUTION,
+            "POST_REPAIR_REVIEWING": RunStage.POST_REPAIR_VERIFICATION,
+            "FINAL_VERIFY": RunStage.FINAL_VALIDATION,
+        }
+        target = mapping.get(value)
+        if target is None:
+            return
+        current = RunStage(str(self.lifecycle.store.get("runs", self.run_id)["stage"]))  # type: ignore[index]
+        if target == RunStage.FINAL_VALIDATION and current == RunStage.POST_REPAIR_VERIFICATION:
+            self.lifecycle.transition(self.run_id, RunStage.INDEPENDENT_AUDIT)
+        self.lifecycle.transition(self.run_id, target)
+
+    def finish_validation(self) -> None:
+        record = self.lifecycle.store.get("runs", self.run_id)
+        if record is None:
+            raise LookupError("run not found")
+        current = RunStage(str(record["stage"]))
+        if current != RunStage.FINAL_VALIDATION:
+            raise RuntimeError("orchestrator completed without final validation")
+        self.lifecycle.transition(self.run_id, RunStage.APPROVAL_DECISION)
+
+
+def _validate_task_scope(task: dict[str, Any], repository: Path) -> None:
+    if not (repository / ".git").exists():
+        # Worktrees use a .git file.
+        if not (repository / ".git").is_file():
+            raise ValueError("task repository is not a Git repository")
+    included = task.get("included_paths")
+    if not isinstance(included, list) or not included:
+        raise ValueError("task requires included paths")
+    if any(".." in Path(str(value)).parts for value in included):
+        raise PermissionError("task scope contains traversal")
+
+
+def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
+    scenario = str(stored.get("mock_scenario", "repair"))
+    final = "repaired\n" if scenario == "repair" else "built\n"
+    return Task(
+        str(stored["id"]),
+        str(stored["title"]),
+        str(stored["objective"]),
+        "desktop",
+        1,
+        risk=str(stored.get("risk", "low")),
+        verification_commands=[
+            ["keeper:file-equals", ".keeper-workflow/result.txt", "built\n"]
+        ],
+        final_verification_commands=[
+            ["keeper:file-equals", ".keeper-workflow/result.txt", final]
+        ],
+        verification_specs=[
+            {
+                "category": "task",
+                "arguments": ["keeper:file-equals", ".keeper-workflow/result.txt", "built\n"],
+                "validator": "file-equals",
+                "required": True,
+            }
+        ],
+        final_verification_specs=[
+            {
+                "category": "task",
+                "arguments": ["keeper:file-equals", ".keeper-workflow/result.txt", final],
+                "validator": "file-equals",
+                "required": True,
+            }
+        ],
+        allowed_paths=[".keeper-workflow/"],
+        capabilities=["repository_write", "run_verification"],
+        provider="mock",
+    )
+
+
+def _mock_routes(
+    scenario: str,
+) -> tuple[dict[str, MockProvider], dict[str, str], list[dict[str, Any]]]:
+    finding: list[dict[str, object]] = []
+    if scenario == "repair":
+        finding = [
+            {
+                "finding_id": "MOCK-H-1",
+                "severity": "High",
+                "title": "Deterministic repair",
+                "description": "The acceptance scenario requires repair.",
+            }
+        ]
+    providers = {
+        "builder": MockProvider(
+            provider_name="mock-author",
+            output={"status": "completed", "files_changed": [".keeper-workflow/result.txt"]},
+            file_writes={".keeper-workflow/result.txt": "built\n"},
+        ),
+        "reviewer": MockProvider(
+            provider_name="mock-reviewer",
+            output={"status": "completed", "files_changed": [], "findings": finding},
+        ),
+        "repairer": MockProvider(
+            provider_name="mock-repairer",
+            output={"status": "completed", "files_changed": [".keeper-workflow/result.txt"]},
+            file_writes={".keeper-workflow/result.txt": "repaired\n"},
+        ),
+        "post-reviewer": MockProvider(
+            provider_name="mock-post-reviewer",
+            output={
+                "status": "completed",
+                "files_changed": [],
+                "findings": [],
+                "dispositions": (
+                    [
+                        {
+                            "finding_id": "MOCK-H-1",
+                            "status": "resolved",
+                            "justification": "Deterministic repair verified.",
+                        }
+                    ]
+                    if finding
+                    else []
+                ),
+            },
+        ),
+    }
+    routes = {
+        "builder": "builder",
+        "reviewer": "reviewer",
+        "repairer": "repairer",
+        "post_repair_reviewer": "post-reviewer",
+    }
+    rationale = [
+        {
+            "role": role,
+            "provider": providers[provider_id].provider_name,
+            "provider_instance_id": providers[provider_id].instance_id,
+            "reason": "deterministic capability match with independent identity",
+        }
+        for role, provider_id in routes.items()
+    ]
+    return providers, routes, rationale
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
