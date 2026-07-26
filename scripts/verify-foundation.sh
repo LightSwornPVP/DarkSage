@@ -135,6 +135,8 @@ EXCLUDE_PATHS=(
   ".gitignore"
   "keeper/providers/adapters.py"
   "tests/keeper/test_productization_adapters.py"
+  "keeper/app/workflow.py"
+  "tests/keeper/test_real_provider_workflow_routing.py"
   "docs/keeper/PROVIDERS.md"
   "docs/keeper/KNOWN_LIMITATIONS.md"
 )

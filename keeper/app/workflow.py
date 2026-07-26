@@ -59,7 +59,9 @@ class WorkflowCoordinator:
         self._lock = threading.Lock()
         self.recover_interrupted_runs()
 
-    def start(self, task_id: str) -> dict[str, Any]:
+    def start(
+        self, task_id: str, metadata: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         task = self._task(task_id)
         run_id = f"run-{uuid.uuid4().hex}"
         run = self.lifecycle.create(run_id, task_id)
@@ -76,6 +78,7 @@ class WorkflowCoordinator:
                 "attempt": 1,
             }
         )
+        run.update(metadata or {})
         self.store.upsert("runs", run_id, run)
         cancel = threading.Event()
         pause = threading.Event()
@@ -142,16 +145,14 @@ class WorkflowCoordinator:
             raise PermissionError("run is not eligible for persisted retry")
         if recovery.get("previous_process_running"):
             raise PermissionError("uncertain running provider must be resolved before retry")
-        retried = self.start(str(previous["task_id"]))
-        current = self._run(str(retried["id"]))
-        current.update(
+        current = self.start(
+            str(previous["task_id"]),
             {
                 "retry_of": run_id,
                 "attempt": int(previous.get("attempt", 1)) + 1,
                 "retry_reason": reason,
-            }
+            },
         )
-        self.store.upsert("runs", str(current["id"]), current)
         previous["superseded_by"] = current["id"]
         previous["retry_history"] = [
             *list(previous.get("retry_history", [])),

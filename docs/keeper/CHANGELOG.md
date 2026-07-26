@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0
+
+- Routed automatic and provider-specific desktop policies through discovered command
+  and local-model adapters with independent review selection.
+- Added startup interruption classification, immutable explicit retry attempts, and
+  irreversible-stage retry rejection.
+- Connected exact-scoped commit and push authority to durable lifecycle stages.
+- Persisted live evidence roots, semantic command records, waiver details, Git
+  results, retry history, and lifecycle notifications.
+- Added a packaged rendered-Tk diagnostic mode with explicit unavailable reporting.
+
 ## 0.3.0
 
 - Connected desktop tasks to the production orchestrator and durable lifecycle.
