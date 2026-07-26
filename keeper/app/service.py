@@ -186,6 +186,12 @@ class KeeperApplication:
             raise LookupError("run not found")
         return run
 
+    def recover_runs(self) -> list[dict[str, Any]]:
+        return self.workflow.recover_interrupted_runs()
+
+    def retry_run(self, run_id: str, reason: str) -> dict[str, Any]:
+        return self.workflow.retry(run_id, reason)
+
     def filtered_runs(
         self,
         *,

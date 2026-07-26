@@ -29,6 +29,7 @@ from keeper.providers.adapters import (
 )
 from keeper.providers.ollama import OllamaProvider
 from keeper.workspace import WorkspaceManager
+from keeper.recovery import process_exists
 
 
 @dataclass(slots=True)
@@ -55,6 +56,7 @@ class WorkflowCoordinator:
         self.notify = notify
         self._active: dict[str, ActiveRun] = {}
         self._lock = threading.Lock()
+        self.recover_interrupted_runs()
 
     def start(self, task_id: str) -> dict[str, Any]:
         task = self._task(task_id)
@@ -69,6 +71,8 @@ class WorkflowCoordinator:
                 "started_at": _now(),
                 "provider": None,
                 "latest_log": None,
+                "evidence_root": str(self.data_directory / "evidence" / run_id),
+                "attempt": 1,
             }
         )
         self.store.upsert("runs", run_id, run)
@@ -85,6 +89,75 @@ class WorkflowCoordinator:
             self._active[run_id] = ActiveRun(thread, cancel, pause, approval)
         thread.start()
         return self._run(run_id)
+
+    def recover_interrupted_runs(self) -> list[dict[str, Any]]:
+        recovered: list[dict[str, Any]] = []
+        terminal = {"COMPLETED", "REJECTED", "blocked", "cancelled"}
+        for record in self.store.list("runs"):
+            if record.get("status") in terminal:
+                continue
+            run_id = str(record.get("id", ""))
+            if not run_id:
+                continue
+            stage = str(record.get("stage", ""))
+            pid = record.get("process_id")
+            running = isinstance(pid, int) and process_exists(pid)
+            if stage != RunStage.INTERRUPTED.value:
+                try:
+                    self.lifecycle.transition(run_id, RunStage.INTERRUPTED)
+                except (RuntimeError, ValueError):
+                    continue
+            current = self._run(run_id)
+            current.update(
+                {
+                    "status": "interrupted",
+                    "recovery": {
+                        "classification": "uncertain" if running else "recoverable",
+                        "previous_process_running": running,
+                        "retry_safe": stage
+                        not in {
+                            RunStage.AUTHORIZED_COMMIT.value,
+                            RunStage.AUTHORIZED_PUSH.value,
+                            RunStage.EVIDENCE_FINALIZATION.value,
+                        },
+                        "detected_at": _now(),
+                    },
+                }
+            )
+            self.store.upsert("runs", run_id, current)
+            recovered.append(current)
+        return recovered
+
+    def retry(self, run_id: str, reason: str) -> dict[str, Any]:
+        if not reason.strip():
+            raise ValueError("retry reason is required")
+        previous = self._run(run_id)
+        recovery = previous.get("recovery")
+        if (
+            previous.get("status") not in {"blocked", "interrupted"}
+            or not isinstance(recovery, dict)
+            or not recovery.get("retry_safe")
+        ):
+            raise PermissionError("run is not eligible for persisted retry")
+        if recovery.get("previous_process_running"):
+            raise PermissionError("uncertain running provider must be resolved before retry")
+        retried = self.start(str(previous["task_id"]))
+        current = self._run(str(retried["id"]))
+        current.update(
+            {
+                "retry_of": run_id,
+                "attempt": int(previous.get("attempt", 1)) + 1,
+                "retry_reason": reason,
+            }
+        )
+        self.store.upsert("runs", str(current["id"]), current)
+        previous["superseded_by"] = current["id"]
+        previous["retry_history"] = [
+            *list(previous.get("retry_history", [])),
+            {"run_id": current["id"], "reason": reason, "timestamp": _now()},
+        ]
+        self.store.upsert("runs", run_id, previous)
+        return current
 
     def execute(self, task_id: str) -> dict[str, Any]:
         run = self.start(task_id)
@@ -206,6 +279,7 @@ class WorkflowCoordinator:
             return
         self._advance(run_id, RunStage.WORKTREE_PREPARATION)
         evidence = self.data_directory / "evidence" / run_id
+        evidence.mkdir(parents=True, exist_ok=True)
         state = evidence / ".ai-workflow"
         config = KeeperConfig(
             repository,
