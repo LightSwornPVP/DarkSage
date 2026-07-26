@@ -1,0 +1,11 @@
+artifact_id,artifact_name,owner,reviewing_professional_role,required_stage,status,last_review_date,evidence_path,jurisdictions,user_acceptance_required,change_notification_required,notes
+LEGAL-0001,Terms of Service,DS-019,Legal Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional legal review required before commercial release."
+LEGAL-0002,Privacy Policy,DS-021,Privacy Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional privacy review required before commercial release."
+LEGAL-0003,Cookie Policy,DS-021,Privacy Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,No,Yes,"Drafted; professional privacy review required before commercial release."
+LEGAL-0004,Acceptable Use Policy,DS-021,Security Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional security review required before commercial release."
+LEGAL-0005,Subscription Terms,DS-019,Legal Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional legal review required before commercial release."
+LEGAL-0006,Refund Policy,DS-019,Legal Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,No,Yes,"Drafted; professional legal review required before commercial release."
+LEGAL-0007,Financial-Risk Disclosure,DS-021,Legal Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional legal review required before commercial release."
+LEGAL-0008,Automated Trading Consent,DS-021,Legal Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional legal review required before commercial release."
+LEGAL-0009,Broker-Linking Consent,DS-021,Legal Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,Yes,Yes,"Drafted; professional legal review required before commercial release."
+LEGAL-0010,Vulnerability Disclosure Policy,DS-021,Security Counsel,Stage 5 -- Initial Commercial Release,Draft Not Reviewed,,,TBD,No,Yes,"Drafted; professional security review required before commercial release."

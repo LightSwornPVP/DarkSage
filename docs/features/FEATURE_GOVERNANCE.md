@@ -87,6 +87,10 @@ See `FEATURE_STATUS_DEFINITIONS.md` for the full status vocabulary and its evide
 
 **Dependency cycles are prohibited.** The canonical graph in `FEATURE_DEPENDENCIES.csv` must be acyclic — no feature may depend, directly or transitively, on itself. `validate_feature_registry.py` detects and fails on any cycle (self-dependency, two-node cycle, or longer cycle), reporting the exact cycle path. A cycle may be permitted only if a future, explicit, controlled exception mechanism is introduced into this governance document and the validator together; no such mechanism exists today, and none may be assumed.
 
+## 4b. Launch Readiness and Publication-State Integration
+
+Launch readiness artifacts are treated as first-class operational features in the Complete Features System: every launch gate, checklist item, and readiness artifact is owned by a primary DS volume and must reference real supporting volumes. Publication state governance is a separate but related control layer: expansion volumes DS-015 through DS-023 are deliberately tracked as `Skeleton` or `Draft` in the publication state register and are not permitted to be marked `Released` until all release evidence is complete. This governance document affirms that launch readiness, publication state, and feature dependencies are evaluated together, not in isolation.
+
 ## 5. Validation
 
 Enforced by `scripts/publication/validate_feature_registry.py`: unique `feature_id`s, allowed `implementation_status`/`release_stage`/`groundwork_required_now`/`safety_classification` values, every `owner_volume` resolves to a real DS-NNN volume (DS-001–DS-023), every feature has a non-empty `release_stage`, the specific cross-field rules in §4, the dependency-graph canonical-authority and acyclicity rules in §4a, and the Designed/Removed evidence rules above. See that script's own docstring for the authoritative, current check list.

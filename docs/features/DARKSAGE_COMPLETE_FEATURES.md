@@ -161,6 +161,10 @@ The provider-abstraction and ingestion layer. **This is the most mature category
 
 1 feature, added 2026-07-26: **Founder Sage Developer Mode** (`FEAT-0268`) -- a Founder-only, private, local-workstation AI coding/research assistant (repository inspection, code/test generation, failure diagnosis, diff preparation, Founder-review commit staging). Sandboxed and policy-bounded: no auto-push/merge/force-push/history-rewrite/protected-branch-deletion, no spending, no production-credential or secret access, no security/privacy-boundary changes, and no trading/broker authority merely because coding tools exist. Not required for the customer commercial release; groundwork begins Stage 1, usable private version targeted for Stage 3 Founder Workstation Beta. Represented as a `feature_id` (catalog-internal), not a new numbered DS requirement volume, so it does not change the Core Codex's controlled-ID totals. Owned by DS-018; supported by DS-015 (edition/repository boundary), DS-021 (sandboxing/secrets/repository security), DS-023 (logging/diagnostics/rollback/recovery/resource limits).
 
+## 34. Launch Readiness and Go-to-Market Operations
+
+14 features: internal launch gate system, Founder alpha/beta readiness, customer beta readiness, live-trading pilot readiness, commercial release readiness, launch-day runbook, rollback plan, post-launch 90-day review, customer discovery, waitlist/early access, analytics taxonomy, transactional email system, billing test matrix, legal artifact inventory, support operations, status page, help center, beta qualification, demo package, and pricing validation. Owned by DS-019/DS-021/DS-022/DS-023, with each launch asset explicitly mapped to its primary owner.
+
 ---
 
 ## Initial Release Boundary (Stage 5)

@@ -267,3 +267,23 @@ FEAT-0265,Institutional routing (explicitly excluded from initial release),Yes,N
 FEAT-0266,Public strategy/signal marketplace (long-term backlog),Yes,No,No,Yes,Yes,Yes,
 FEAT-0267,Global/institutional expansion features,Yes,No,No,Yes,Yes,Yes,
 FEAT-0268,Founder Sage Developer Mode,Yes,Yes,Yes,No,No,No,Founder desktop/workstation runtime only; never a web/iOS/Android runtime.
+FEAT-0269,Launch Gate System,Yes,Yes,Yes,Yes,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0270,Founder Alpha Readiness,Yes,Yes,Yes,No,No,No,Auto-added launch readiness matrix entry
+FEAT-0271,Customer Beta Readiness,No,No,No,Yes,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0272,Commercial Release Readiness,Yes,Yes,Yes,Yes,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0273,Customer Discovery Program,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0274,Waitlist and Early Access,No,No,No,Yes,No,No,Auto-added launch readiness matrix entry
+FEAT-0275,Product Analytics Event Taxonomy,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0276,Transactional Email System,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0277,Billing Scenario Test Matrix,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0278,Legal Artifact Inventory,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0279,Support Operations,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0280,Launch-Day Runbook,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0281,Commercial Rollback Plan,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0282,Post-Launch 90-Day Review,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0283,Customer Feedback and Churn Analysis,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0284,Status Page,No,No,No,Yes,No,No,Auto-added launch readiness matrix entry
+FEAT-0285,Help Center and Knowledge Base,No,No,No,Yes,No,No,Auto-added launch readiness matrix entry
+FEAT-0286,Beta Recruitment and Qualification,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0287,Demo and Screenshot Package,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry
+FEAT-0288,Pricing Validation,N/A,N/A,N/A,N/A,N/A,N/A,Auto-added launch readiness matrix entry

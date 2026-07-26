@@ -39,6 +39,10 @@ Stage 0–2 estimates are Medium confidence because they build directly on work 
 
 Groundwork begins in Stage 1 (Local Technical Foundation); a usable private version is targeted for Stage 3 (Founder Workstation Beta), alongside Founder Local Sage and Founder-only Python research extensions. It is Founder-only and carries no customer-facing timeline commitment at any stage.
 
+## Launch Readiness and Publication State
+
+Stage 5 includes the internal launch readiness system and publication state package for the expansion volumes. The launch readiness system is a separate control layer that tracks Founder and customer beta readiness, the commercial release gate matrix, rollback readiness, and post-launch stabilization. The publication state package distinguishes released Core volumes (DS-001 through DS-014) from expansion draft skeletons (DS-015 through DS-023).
+
 ## How to Read Per-Feature Timeline Fields
 
 Each `FEATURE_REGISTRY.csv` row's `tentative_start_window`/`tentative_completion_window`/`timeline_confidence` are independent of the stage-level table above where a feature's own blocker or dependency chain places it earlier or later than its nominal stage would suggest (e.g. a feature blocked on an external decision carries `blocker` text explaining the actual constraint, not just a stage label).

@@ -50,3 +50,5 @@ The Core Codex (DS-001 through DS-014, commit `1e48041fb59593b3bc62c490e3bb60d34
 | [DS-023](Volume-23-Reliability/DS-023-Reliability-Operations-Data-Governance-and-Recovery.md) | Reliability, Operations, Data Governance, and Recovery | Draft (Skeleton) |
 
 See `../features/DARKSAGE_COMPLETE_FEATURES.md` for the master feature catalog and `../features/FEATURE_GOVERNANCE.md` for the controlled-ID family registry (including collision resolutions against existing DS-002/DS-007 families) governing this expansion.
+
+A new launch readiness and publication state package has been added under `../launch/` and `../publication/` to track readiness gates, legal and billing artifacts, product analytics, transactional email requirements, and the publication lifecycle for DS-001 through DS-023.

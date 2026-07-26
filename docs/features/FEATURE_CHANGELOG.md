@@ -39,3 +39,4 @@ Records every material change to the Complete Features System: new features adde
 |---|---|---|
 | 0.1.0 | 2026-07-25 | Initial changelog entry documenting the foundation pass. |
 | 0.2.0 | 2026-07-26 | Independent-audit repair pass (see above). |
+| 0.3.0 | 2026-07-26 | Added launch readiness and publication-state foundation package, including new operational feature category and publication register governance. |

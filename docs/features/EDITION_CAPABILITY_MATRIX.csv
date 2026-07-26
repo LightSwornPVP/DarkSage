@@ -267,3 +267,23 @@ FEAT-0265,Institutional routing (explicitly excluded from initial release),Yes,Y
 FEAT-0266,Public strategy/signal marketplace (long-term backlog),Yes,Yes,
 FEAT-0267,Global/institutional expansion features,Yes,Yes,
 FEAT-0268,Founder Sage Developer Mode,Yes,No,Founder-only; excluded from all customer builds; never customer-enabled.
+FEAT-0269,Launch Gate System,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0270,Founder Alpha Readiness,Yes,No,Auto-added launch readiness matrix entry
+FEAT-0271,Customer Beta Readiness,No,Yes,Auto-added launch readiness matrix entry
+FEAT-0272,Commercial Release Readiness,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0273,Customer Discovery Program,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0274,Waitlist and Early Access,No,Yes,Auto-added launch readiness matrix entry
+FEAT-0275,Product Analytics Event Taxonomy,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0276,Transactional Email System,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0277,Billing Scenario Test Matrix,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0278,Legal Artifact Inventory,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0279,Support Operations,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0280,Launch-Day Runbook,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0281,Commercial Rollback Plan,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0282,Post-Launch 90-Day Review,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0283,Customer Feedback and Churn Analysis,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0284,Status Page,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0285,Help Center and Knowledge Base,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0286,Beta Recruitment and Qualification,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0287,Demo and Screenshot Package,Yes,Yes,Auto-added launch readiness matrix entry
+FEAT-0288,Pricing Validation,Yes,Yes,Auto-added launch readiness matrix entry

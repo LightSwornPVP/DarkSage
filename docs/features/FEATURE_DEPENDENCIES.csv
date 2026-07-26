@@ -52,3 +52,27 @@ FEAT-0268,Founder Sage Developer Mode,FEAT-0008,Device trust and revocation,requ
 FEAT-0268,Founder Sage Developer Mode,FEAT-0249,"Observability (logging, metrics, tracing)",requires,Action/command logging builds on the same observability infrastructure.
 FEAT-0268,Founder Sage Developer Mode,FEAT-0247,Incident and recovery center,requires,Rollback/clean-diff recovery escalates through the same incident-and-recovery-center pattern.
 FEAT-0268,Founder Sage Developer Mode,FEAT-0251,Cloud and model cost controls,requires,CPU/memory/disk/execution-time/command-count/concurrency limits build on the same resource-control guardrails.
+FEAT-0270,Founder Alpha Readiness,FEAT-0269,Launch Gate System,requires,Founder alpha readiness depends on the launch gate system.
+FEAT-0271,Customer Beta Readiness,FEAT-0269,Launch Gate System,requires,Customer beta readiness depends on the launch gate system.
+FEAT-0272,Commercial Release Readiness,FEAT-0269,Launch Gate System,requires,Commercial release readiness depends on launch readiness governance.
+FEAT-0272,Commercial Release Readiness,FEAT-0271,Customer Beta Readiness,requires,Commercial release readiness depends on customer beta readiness.
+FEAT-0273,Customer Discovery Program,FEAT-0269,Launch Gate System,requires,Customer discovery program depends on launch readiness governance.
+FEAT-0274,Waitlist and Early Access,FEAT-0273,Customer Discovery Program,requires,Waitlist readiness depends on customer discovery program.
+FEAT-0275,Product Analytics Event Taxonomy,FEAT-0274,Waitlist and Early Access,requires,Event taxonomy depends on early-access and product metrics scope.
+FEAT-0276,Transactional Email System,FEAT-0274,Waitlist and Early Access,requires,Transactional email system depends on early-access flows.
+FEAT-0272,Commercial Release Readiness,FEAT-0277,Billing Scenario Test Matrix,requires,Commercial release readiness depends on billing scenario test matrix.
+FEAT-0278,Legal Artifact Inventory,FEAT-0269,Launch Gate System,requires,Legal artifact inventory depends on launch readiness governance.
+FEAT-0279,Support Operations,FEAT-0269,Launch Gate System,requires,Support operations depends on overall launch readiness governance.
+FEAT-0280,Launch-Day Runbook,FEAT-0272,Commercial Release Readiness,requires,Launch-day runbook depends on commercial release readiness.
+FEAT-0280,Launch-Day Runbook,FEAT-0279,Support Operations,requires,Launch-day runbook depends on support operations.
+FEAT-0281,Commercial Rollback Plan,FEAT-0272,Commercial Release Readiness,requires,Rollback plan depends on commercial release readiness.
+FEAT-0281,Commercial Rollback Plan,FEAT-0279,Support Operations,requires,Rollback plan depends on support operations.
+FEAT-0282,Post-Launch 90-Day Review,FEAT-0280,Launch-Day Runbook,requires,Post-launch review depends on launch-day readiness.
+FEAT-0282,Post-Launch 90-Day Review,FEAT-0281,Commercial Rollback Plan,requires,Post-launch review depends on rollback readiness.
+FEAT-0283,Customer Feedback and Churn Analysis,FEAT-0282,Post-Launch 90-Day Review,requires,Feedback analysis depends on post-launch review.
+FEAT-0284,Status Page,FEAT-0279,Support Operations,requires,Status page depends on support operations readiness.
+FEAT-0285,Help Center and Knowledge Base,FEAT-0279,Support Operations,requires,Help center depends on support operations readiness.
+FEAT-0286,Beta Recruitment and Qualification,FEAT-0273,Customer Discovery Program,requires,Beta recruitment depends on customer discovery program.
+FEAT-0287,Demo and Screenshot Package,FEAT-0273,Customer Discovery Program,requires,Demo package depends on customer discovery insights.
+FEAT-0288,Pricing Validation,FEAT-0274,Waitlist and Early Access,requires,Pricing validation depends on waitlist and customer segmentation data.
+FEAT-0288,Pricing Validation,FEAT-0277,Billing Scenario Test Matrix,requires,Pricing validation depends on billing scenario coverage.
