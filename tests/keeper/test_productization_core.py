@@ -154,17 +154,40 @@ def test_git_commit_authorization_is_scoped_expiring_and_one_time(
     (repository / "readme.txt").write_text("changed\n", encoding="utf-8")
     _git(repository, "add", "readme.txt")
     authorization: dict[str, object] = {
+        "id": "authorization-1",
         "capability": "commit",
         "repository": str(repository.resolve()),
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "worktree": str(repository.resolve()),
+        "branch": _git(repository, "branch", "--show-current"),
+        "head": _git(repository, "rev-parse", "HEAD"),
+        "staged_paths": ["readme.txt"],
         "approving_authority": "founder",
         "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         "consumed_at": None,
         "revoked_at": None,
     }
-    GitSafetyService().commit(repository, "test commit", authorization)
+    GitSafetyService().commit(
+        repository,
+        "test commit",
+        authorization,
+        task_id="task-1",
+        run_id="run-1",
+        worktree=repository,
+        branch=str(authorization["branch"]),
+    )
     assert authorization["consumed_at"] is not None
     with pytest.raises(PermissionError):
-        GitSafetyService().commit(repository, "replay", authorization)
+        GitSafetyService().commit(
+            repository,
+            "replay",
+            authorization,
+            task_id="task-1",
+            run_id="run-1",
+            worktree=repository,
+            branch=str(authorization["branch"]),
+        )
 
 
 def test_report_is_valid_json_and_tamper_evident(tmp_path: Path) -> None:

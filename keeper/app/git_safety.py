@@ -95,22 +95,79 @@ class GitSafetyService:
             raise PermissionError("unexpected binary addition requires separate authorization")
 
     def commit(
-        self, repository: Path, message: str, authorization: dict[str, object]
+        self,
+        repository: Path,
+        message: str,
+        authorization: dict[str, object],
+        *,
+        task_id: str,
+        run_id: str,
+        worktree: Path,
+        branch: str,
     ) -> str:
-        self._require_authorization("commit", repository, authorization)
+        inspection = self.inspect(worktree)
+        context: dict[str, object] = {
+            "task_id": task_id,
+            "run_id": run_id,
+            "worktree": str(worktree.resolve()),
+            "branch": branch,
+            "head": inspection.head,
+            "staged_paths": sorted(inspection.staged),
+        }
+        self._require_authorization("commit", repository, authorization, context)
+        if inspection.root != str(worktree.resolve()) or inspection.branch != branch:
+            raise PermissionError("commit worktree or branch identity changed")
         if not message.strip():
             raise ValueError("commit message cannot be empty")
-        result = self._git(repository.resolve(), "commit", "-m", message)
+        result = self._git(worktree.resolve(), "commit", "-m", message)
         authorization["consumed_at"] = datetime.now(UTC).isoformat()
         return result.stdout.strip()
 
     def push(
-        self, repository: Path, remote: str, branch: str, authorization: dict[str, object]
+        self,
+        repository: Path,
+        remote: str,
+        source_ref: str,
+        destination_ref: str,
+        authorization: dict[str, object],
+        *,
+        task_id: str,
+        run_id: str,
+        worktree: Path,
     ) -> str:
-        self._require_authorization("push", repository, authorization)
-        if not remote or not branch or branch.startswith("-"):
+        if (
+            not remote
+            or not source_ref
+            or not destination_ref
+            or any(value.startswith("-") for value in (remote, source_ref, destination_ref))
+            or "+" in destination_ref
+        ):
             raise ValueError("push target is invalid")
-        result = self._git(repository.resolve(), "push", remote, branch)
+        inspection = self.inspect(worktree)
+        remote_url = self._git(
+            worktree.resolve(), "remote", "get-url", remote
+        ).stdout.strip()
+        context: dict[str, object] = {
+            "task_id": task_id,
+            "run_id": run_id,
+            "worktree": str(worktree.resolve()),
+            "branch": inspection.branch,
+            "head": inspection.head,
+            "remote": remote,
+            "remote_url": remote_url,
+            "source_ref": source_ref,
+            "destination_ref": destination_ref,
+            "expected_commit": inspection.head,
+            "force": False,
+        }
+        self._require_authorization("push", repository, authorization, context)
+        result = self._git(
+            worktree.resolve(),
+            "push",
+            "--",
+            remote,
+            f"{source_ref}:{destination_ref}",
+        )
         authorization["consumed_at"] = datetime.now(UTC).isoformat()
         return result.stderr.strip() or result.stdout.strip()
 
@@ -155,7 +212,10 @@ class GitSafetyService:
 
     @staticmethod
     def _require_authorization(
-        capability: str, repository: Path, authorization: dict[str, object]
+        capability: str,
+        repository: Path,
+        authorization: dict[str, object],
+        context: dict[str, object] | None = None,
     ) -> None:
         expires_at = authorization.get("expires_at")
         try:
@@ -165,6 +225,8 @@ class GitSafetyService:
         if expires.tzinfo is None or expires.utcoffset() is None:
             raise PermissionError("authorization expiration must be timezone-aware")
         if (
+            not authorization.get("id")
+            or
             authorization.get("capability") != capability
             or authorization.get("repository") != str(repository.resolve())
             or authorization.get("consumed_at") is not None
@@ -173,3 +235,9 @@ class GitSafetyService:
             or expires <= datetime.now(UTC)
         ):
             raise PermissionError(f"explicit scoped {capability} authorization is required")
+        for key, actual in (context or {}).items():
+            expected = authorization.get(key)
+            if key == "staged_paths":
+                expected = sorted(str(item) for item in expected) if isinstance(expected, list) else expected
+            if expected != actual:
+                raise PermissionError(f"authorization scope mismatch: {key}")

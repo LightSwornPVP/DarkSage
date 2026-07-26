@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from keeper.agent_runner import AgentRunner
-from keeper.app.verification_policy import VerificationSpec, validate_semantic_bindings
+from keeper.app.verification_policy import (
+    VerificationSpec,
+    VerificationWaiver,
+    environment_summary,
+    validate_semantic_bindings,
+)
+from keeper.policies import filtered_environment
+import os
 from keeper.config import KeeperConfig
 from keeper.models.finding import Finding
 from keeper.models.task import Task, now_iso
@@ -176,12 +183,34 @@ class Keeper:
                 )
                 for item in raw_specs
             ]
+            waivers = [
+                VerificationWaiver(
+                    waiver_id=str(item["waiver_id"]),
+                    category=str(item["category"]),
+                    task_id=str(item["task_id"]),
+                    approving_authority=str(item["approving_authority"]),
+                    reason=str(item["reason"]),
+                    expires_at=str(item["expires_at"]),
+                    revoked_at=(
+                        str(item["revoked_at"])
+                        if item.get("revoked_at") is not None
+                        else None
+                    ),
+                )
+                for item in task.verification_waivers
+            ]
             validate_semantic_bindings(
-                semantic_specs, task.required_verification_categories
+                semantic_specs,
+                task.required_verification_categories,
+                waivers,
+                task.id,
             )
+            executable_specs = [
+                spec for spec in semantic_specs if spec.waiver_id is None
+            ]
             commands = [
                 VerificationCommand(arguments=spec.arguments, required=spec.required)
-                for spec in semantic_specs
+                for spec in executable_specs
             ]
         else:
             specifications = (
@@ -193,7 +222,7 @@ class Keeper:
         if not raw_specs and len(commands) < len(task.required_verification_categories):
             raise ValueError("mandatory verification categories are incomplete")
         before = self._workspace_identity(workspace.path)
-        results = self.verifier.run(workspace.path, commands)
+        results = self.verifier.run(workspace.path, commands) if commands else []
         after = self._workspace_identity(workspace.path)
         if before != after:
             raise RuntimeError("workspace changed while verification evidence was collected")
@@ -208,6 +237,76 @@ class Keeper:
             tree_identity=after[1],
             results=results,
         )
+        if raw_specs:
+            result_index = iter(results)
+            command_evidence: list[dict[str, object]] = []
+            output_root = self.config.state_root / "verification" / run_id / stage
+            output_root.mkdir(parents=True, exist_ok=True)
+            for index, spec in enumerate(semantic_specs, start=1):
+                command_id = f"{run_id}-{stage}-{index}"
+                if spec.waiver_id is not None:
+                    command_evidence.append(
+                        {
+                            "command_id": command_id,
+                            "categories": [spec.category],
+                            "validator": spec.validator,
+                            "arguments": spec.arguments,
+                            "working_directory": str(workspace.path.resolve()),
+                            "environment": environment_summary(
+                                filtered_environment(dict(os.environ))
+                            ),
+                            "start_time": now_iso(),
+                            "end_time": now_iso(),
+                            "timed_out": False,
+                            "exit_code": None,
+                            "output_path": None,
+                            "result": "waived",
+                            "waiver_id": spec.waiver_id,
+                            "evidence_hash": hashlib.sha256(
+                                json.dumps(spec.arguments).encode("utf-8")
+                            ).hexdigest(),
+                        }
+                    )
+                    continue
+                result = next(result_index)
+                output_path = output_root / f"{index:03d}.log"
+                bounded = (result.stdout + result.stderr)[:1_000_000]
+                output_path.write_text(bounded, encoding="utf-8")
+                classification = (
+                    "passed"
+                    if result.passed
+                    else "unavailable"
+                    if result.exit_code == 127
+                    else "failed"
+                )
+                command_evidence.append(
+                    {
+                        "command_id": command_id,
+                        "categories": [spec.category],
+                        "validator": spec.validator,
+                        "arguments": result.arguments,
+                        "working_directory": str(workspace.path.resolve()),
+                        "environment": environment_summary(
+                            filtered_environment(dict(os.environ))
+                        ),
+                        "start_time": now_iso(),
+                        "end_time": now_iso(),
+                        "timed_out": result.timed_out,
+                        "exit_code": result.exit_code,
+                        "output_path": str(output_path),
+                        "result": classification,
+                        "waiver_id": None,
+                        "evidence_hash": hashlib.sha256(
+                            output_path.read_bytes()
+                        ).hexdigest(),
+                    }
+                )
+            evidence["semantic_commands"] = command_evidence
+            passed = all(
+                item["result"] in {"passed", "waived"} for item in command_evidence
+            )
+            evidence["passed"] = passed
+            return passed, evidence
         return self.verifier.required_passed(results), evidence
 
     def _authorize_task(self, task: Task) -> None:

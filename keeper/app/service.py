@@ -200,6 +200,7 @@ class KeeperApplication:
         approving_authority: str,
         minutes: int,
         reusable: bool = False,
+        scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if minutes < 1 or minutes > 1440:
             raise ValueError("authorization duration must be between 1 and 1440 minutes")
@@ -215,6 +216,7 @@ class KeeperApplication:
             "reusable": reusable,
             "consumed_at": None,
             "revoked_at": None,
+            **(scope or {}),
         }
         self.store.upsert("authorizations", identifier, authorization)
         return authorization

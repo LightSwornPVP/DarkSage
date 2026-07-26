@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -22,6 +23,7 @@ class VerificationWaiver:
     approving_authority: str
     reason: str
     expires_at: str
+    revoked_at: str | None = None
 
 
 REGISTERED_CATEGORIES: dict[str, frozenset[str]] = {
@@ -38,12 +40,16 @@ REGISTERED_CATEGORIES: dict[str, frozenset[str]] = {
 def validate_semantic_bindings(
     specs: Iterable[VerificationSpec],
     required_categories: Iterable[str],
+    waivers: Iterable[VerificationWaiver] = (),
+    task_id: str | None = None,
+    now: datetime | None = None,
 ) -> None:
     values = list(specs)
     if not values:
         raise ValueError("verification specification cannot be empty")
     seen_commands: set[tuple[str, ...]] = set()
     covered: set[str] = set()
+    waiver_map = {item.waiver_id: item for item in waivers}
     for spec in values:
         if not spec.arguments:
             raise ValueError("verification command cannot be empty")
@@ -57,11 +63,43 @@ def validate_semantic_bindings(
         if fingerprint in seen_commands:
             raise ValueError("the same command cannot be counted more than once")
         seen_commands.add(fingerprint)
-        if spec.required and spec.waiver_id is None:
-            covered.add(spec.category)
+        if spec.required:
+            if spec.waiver_id is None:
+                covered.add(spec.category)
+            else:
+                waiver = waiver_map.get(spec.waiver_id)
+                if waiver is None:
+                    raise PermissionError("verification waiver is missing or malformed")
+                validate_waiver(
+                    waiver,
+                    task_id=task_id or "",
+                    category=spec.category,
+                    now=now or datetime.now(UTC),
+                )
+                covered.add(spec.category)
     missing = set(required_categories) - covered
     if missing:
         raise ValueError(f"mandatory verification categories are unsatisfied: {sorted(missing)}")
+
+
+def validate_waiver(
+    waiver: VerificationWaiver, *, task_id: str, category: str, now: datetime
+) -> None:
+    try:
+        expires = datetime.fromisoformat(waiver.expires_at)
+    except ValueError as error:
+        raise PermissionError("verification waiver expiration is malformed") from error
+    if expires.tzinfo is None or expires.utcoffset() is None:
+        raise PermissionError("verification waiver expiration must be timezone-aware")
+    if (
+        waiver.task_id != task_id
+        or waiver.category != category
+        or not waiver.approving_authority.strip()
+        or not waiver.reason.strip()
+        or waiver.revoked_at is not None
+        or expires <= now
+    ):
+        raise PermissionError("verification waiver is invalid for this task and category")
 
 
 def environment_summary(environment: dict[str, str]) -> dict[str, object]:
