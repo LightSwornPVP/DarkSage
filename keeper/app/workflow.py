@@ -19,6 +19,15 @@ from keeper.orchestrator import Keeper
 from keeper.providers.mock import MockProvider
 from keeper.providers.base import AgentProvider
 from keeper.providers.routing import ProviderRouter
+from keeper.providers.adapters import (
+    ClaudeCommandAdapter,
+    CodexCommandAdapter,
+    ProviderDiagnostic,
+    ProviderDiscovery,
+    RoutingRequest,
+    route_provider,
+)
+from keeper.providers.ollama import OllamaProvider
 from keeper.workspace import WorkspaceManager
 
 
@@ -179,7 +188,10 @@ class WorkflowCoordinator:
         self._advance(run_id, RunStage.RISK_CLASSIFICATION)
         self._advance(run_id, RunStage.AUTHORIZATION_RESOLUTION)
         self._advance(run_id, RunStage.PROVIDER_SELECTION)
-        providers, routes, routing = _mock_routes(str(stored.get("mock_scenario", "repair")))
+        providers, routes, routing = _select_routes(
+            stored,
+            self.store.get("settings", "providers") or {},
+        )
         record = self._run(run_id)
         record["providers"] = {
             role: {
@@ -397,9 +409,90 @@ def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
     )
 
 
+def _select_routes(
+    stored: dict[str, Any], configured_paths: dict[str, Any]
+) -> tuple[dict[str, AgentProvider], dict[str, str], list[dict[str, Any]]]:
+    policy = str(stored.get("provider_policy", "mock"))
+    if policy == "mock":
+        return _mock_routes(str(stored.get("mock_scenario", "repair")))
+    diagnostics = ProviderDiscovery(
+        {str(key): str(value) for key, value in configured_paths.items()}
+    ).discover()
+    if policy not in {"automatic", "strongest"}:
+        diagnostics = [
+            item for item in diagnostics if item.provider_id in {policy, "mock"}
+        ]
+    author = route_provider(
+        RoutingRequest("builder", str(stored.get("risk", "low")), "keeper"),
+        diagnostics,
+    )
+    reviewer = route_provider(
+        RoutingRequest(
+            "reviewer",
+            str(stored.get("risk", "low")),
+            "keeper",
+            frozenset({author.provider_id}),
+            author.provider_id == "ollama",
+        ),
+        diagnostics,
+    )
+    repairer = route_provider(
+        RoutingRequest("repairer", str(stored.get("risk", "low")), "keeper"),
+        diagnostics,
+    )
+    selected = {author.provider_id, reviewer.provider_id, repairer.provider_id}
+    instances = {
+        provider_id: _adapter(
+            next(item for item in diagnostics if item.provider_id == provider_id)
+        )
+        for provider_id in selected
+    }
+    providers: dict[str, AgentProvider] = {
+        "builder": instances[author.provider_id],
+        "reviewer": instances[reviewer.provider_id],
+        "repairer": instances[repairer.provider_id],
+        "post-reviewer": instances[reviewer.provider_id],
+    }
+    routes = {
+        "builder": "builder",
+        "reviewer": "reviewer",
+        "repairer": "repairer",
+        "post_repair_reviewer": "post-reviewer",
+    }
+    decisions = [
+        {
+            "role": role,
+            "provider": providers[target].provider_name,
+            "provider_instance_id": providers[target].instance_id,
+            "reasons": (
+                author.reasons
+                if role == "builder"
+                else reviewer.reasons
+                if role in {"reviewer", "post_repair_reviewer"}
+                else repairer.reasons
+            ),
+            "policy": policy,
+        }
+        for role, target in routes.items()
+    ]
+    return providers, routes, decisions
+
+
+def _adapter(diagnostic: ProviderDiagnostic) -> AgentProvider:
+    if diagnostic.provider_id == "codex" and diagnostic.executable:
+        return CodexCommandAdapter(diagnostic.executable)
+    if diagnostic.provider_id == "claude" and diagnostic.executable:
+        return ClaudeCommandAdapter(diagnostic.executable)
+    if diagnostic.provider_id == "ollama":
+        return OllamaProvider()
+    if diagnostic.provider_id == "mock":
+        return MockProvider(provider_name="mock")
+    raise RuntimeError(f"provider adapter is unavailable: {diagnostic.provider_id}")
+
+
 def _mock_routes(
     scenario: str,
-) -> tuple[dict[str, MockProvider], dict[str, str], list[dict[str, Any]]]:
+) -> tuple[dict[str, AgentProvider], dict[str, str], list[dict[str, Any]]]:
     finding: list[dict[str, object]] = []
     if scenario == "repair":
         finding = [
@@ -410,7 +503,7 @@ def _mock_routes(
                 "description": "The acceptance scenario requires repair.",
             }
         ]
-    providers = {
+    providers: dict[str, AgentProvider] = {
         "builder": MockProvider(
             provider_name="mock-author",
             output={"status": "completed", "files_changed": [".keeper-workflow/result.txt"]},
