@@ -1,0 +1,218 @@
+{
+  "attempt_ids": [
+    "keeper-pilot-31302ad318-attempt-1",
+    "keeper-pilot-31302ad318-attempt-2"
+  ],
+  "bounded_retry": true,
+  "branch_identity": "keeper/keeper-pilot-31302ad318",
+  "cleanup_result": "not performed: parent task explicitly prohibited worktree deletion; pilot worktree preserved",
+  "final_status": "COMPLETED",
+  "high_finding": "PILOT-H-1",
+  "interruption_recovery": [
+    {
+      "action": "mark_interrupted",
+      "run_id": "recovery-probe",
+      "timestamp": "2026-07-26T19:25:08.439106+00:00"
+    }
+  ],
+  "mock_providers": true,
+  "pilot_invocation_id": "mock-pilot-3b97e0e88dac4ef9856652c5a90a86e9",
+  "post_repair_review_run_ids": [
+    "keeper-pilot-31302ad318-post_repair_reviewer-35f71d1d352a"
+  ],
+  "process_id": 23856,
+  "provider_context_identities": [
+    {
+      "provider_instance_id": "a20b1f804e8c4a7e9efd8b727e943d82",
+      "provider_name": "mock-builder",
+      "role": "builder"
+    },
+    {
+      "provider_instance_id": "a20b1f804e8c4a7e9efd8b727e943d82",
+      "provider_name": "mock-builder",
+      "role": "builder"
+    },
+    {
+      "provider_instance_id": "ed4728add83e4e5b93982c147bf7bc76",
+      "provider_name": "mock-post-reviewer",
+      "role": "post_repair_reviewer"
+    },
+    {
+      "provider_instance_id": "732c150445824139b19991e111404c06",
+      "provider_name": "mock-repairer",
+      "role": "repairer"
+    },
+    {
+      "provider_instance_id": "7c41f8ba07c84ff18787ee157f475284",
+      "provider_name": "mock-reviewer",
+      "role": "reviewer"
+    }
+  ],
+  "recorded_at": "2026-07-26T19:25:08.449619+00:00",
+  "repair_run_ids": [
+    "keeper-pilot-31302ad318-repairer-506b50402fec"
+  ],
+  "run_ids": [
+    "keeper-pilot-31302ad318-builder-09955c37e73f",
+    "keeper-pilot-31302ad318-builder-7e8f81fd40fe",
+    "keeper-pilot-31302ad318-post_repair_reviewer-35f71d1d352a",
+    "keeper-pilot-31302ad318-repairer-506b50402fec",
+    "keeper-pilot-31302ad318-reviewer-3c71a15b9cd0"
+  ],
+  "started_from": "BACKLOG",
+  "state_transitions": [
+    {
+      "from": "BACKLOG",
+      "timestamp": "2026-07-26T19:25:05.944558+00:00",
+      "to": "READY"
+    },
+    {
+      "from": "READY",
+      "timestamp": "2026-07-26T19:25:06.235852+00:00",
+      "to": "BUILDING"
+    },
+    {
+      "from": "BUILDING",
+      "timestamp": "2026-07-26T19:25:06.342155+00:00",
+      "to": "SELF_VERIFYING"
+    },
+    {
+      "from": "SELF_VERIFYING",
+      "timestamp": "2026-07-26T19:25:06.935287+00:00",
+      "to": "FAILED"
+    },
+    {
+      "from": "FAILED",
+      "timestamp": "2026-07-26T19:25:06.937868+00:00",
+      "to": "READY"
+    },
+    {
+      "from": "READY",
+      "timestamp": "2026-07-26T19:25:06.987924+00:00",
+      "to": "BUILDING"
+    },
+    {
+      "from": "BUILDING",
+      "timestamp": "2026-07-26T19:25:07.087661+00:00",
+      "to": "SELF_VERIFYING"
+    },
+    {
+      "from": "SELF_VERIFYING",
+      "timestamp": "2026-07-26T19:25:07.335500+00:00",
+      "to": "INDEPENDENT_AUDIT"
+    },
+    {
+      "from": "INDEPENDENT_AUDIT",
+      "timestamp": "2026-07-26T19:25:07.517932+00:00",
+      "to": "REPAIRING"
+    },
+    {
+      "from": "REPAIRING",
+      "timestamp": "2026-07-26T19:25:07.977740+00:00",
+      "to": "FINAL_VERIFY"
+    },
+    {
+      "from": "FINAL_VERIFY",
+      "timestamp": "2026-07-26T19:25:08.377604+00:00",
+      "to": "APPROVED"
+    },
+    {
+      "from": "APPROVED",
+      "timestamp": "2026-07-26T19:25:08.382255+00:00",
+      "to": "COMPLETED"
+    }
+  ],
+  "task_id": "keeper-pilot-31302ad318",
+  "verification_evidence": [
+    {
+      "attempt_id": "keeper-pilot-31302ad318-attempt-1",
+      "branch": "keeper/keeper-pilot-31302ad318",
+      "commands": [
+        {
+          "arguments": [
+            "keeper:file-equals",
+            ".keeper-pilot/result.txt",
+            "built\n"
+          ],
+          "exit_code": 1,
+          "required": true,
+          "stderr": "unexpected content in .keeper-pilot/result.txt\n",
+          "stdout": "",
+          "timed_out": false
+        }
+      ],
+      "head": "7cb90ed2a12eb25a9a4ae6a1610daa884b1cf3a1",
+      "passed": false,
+      "run_id": "keeper-pilot-31302ad318-builder-09955c37e73f",
+      "stage": "self",
+      "task_id": "keeper-pilot-31302ad318",
+      "timestamp": "2026-07-26T19:25:06.932252+00:00",
+      "tree_identity": "1400474d41de277ff6e1d9b3b3b8f0098e1e1a3eefd3904502e39fa018ba4668",
+      "workspace": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\52c5a90a86e9\\keeper-pilot-31302ad318"
+    },
+    {
+      "attempt_id": "keeper-pilot-31302ad318-attempt-2",
+      "branch": "keeper/keeper-pilot-31302ad318",
+      "commands": [
+        {
+          "arguments": [
+            "keeper:file-equals",
+            ".keeper-pilot/result.txt",
+            "built\n"
+          ],
+          "exit_code": 0,
+          "required": true,
+          "stderr": "",
+          "stdout": "file content matched\n",
+          "timed_out": false
+        }
+      ],
+      "head": "7cb90ed2a12eb25a9a4ae6a1610daa884b1cf3a1",
+      "passed": true,
+      "run_id": "keeper-pilot-31302ad318-builder-7e8f81fd40fe",
+      "stage": "self",
+      "task_id": "keeper-pilot-31302ad318",
+      "timestamp": "2026-07-26T19:25:07.329029+00:00",
+      "tree_identity": "f10c333dd4b3d2fd71b9c253187de7b02d9fc74bce4f5852cb5db422dd192559",
+      "workspace": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\52c5a90a86e9\\keeper-pilot-31302ad318"
+    },
+    {
+      "attempt_id": "keeper-pilot-31302ad318-attempt-2",
+      "branch": "keeper/keeper-pilot-31302ad318",
+      "commands": [
+        {
+          "arguments": [
+            "keeper:file-equals",
+            ".keeper-pilot/result.txt",
+            "repaired\n"
+          ],
+          "exit_code": 0,
+          "required": true,
+          "stderr": "",
+          "stdout": "file content matched\n",
+          "timed_out": false
+        }
+      ],
+      "head": "7cb90ed2a12eb25a9a4ae6a1610daa884b1cf3a1",
+      "passed": true,
+      "run_id": "keeper-pilot-31302ad318-post_repair_reviewer-35f71d1d352a",
+      "stage": "final",
+      "task_id": "keeper-pilot-31302ad318",
+      "timestamp": "2026-07-26T19:25:08.375048+00:00",
+      "tree_identity": "c0c78b84c724557bd19e74e65e8e4d8131f8b5caae36dff67d59b367f0fcafb6",
+      "workspace": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\52c5a90a86e9\\keeper-pilot-31302ad318"
+    }
+  ],
+  "worktree_identity": {
+    "active_attempt_id": "keeper-pilot-31302ad318-attempt-2",
+    "attempt_ids": [
+      "keeper-pilot-31302ad318-attempt-1",
+      "keeper-pilot-31302ad318-attempt-2"
+    ],
+    "branch": "keeper/keeper-pilot-31302ad318",
+    "created_at": "2026-07-26T19:25:06.224467+00:00",
+    "repository": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization",
+    "task_id": "keeper-pilot-31302ad318",
+    "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\52c5a90a86e9\\keeper-pilot-31302ad318"
+  }
+}
