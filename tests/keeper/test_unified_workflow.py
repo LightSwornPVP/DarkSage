@@ -39,6 +39,8 @@ def create_task(app: KeeperApplication, root: Path, scenario: str = "repair") ->
             "baseline": head,
             "target_branch": f"keeper/{scenario}",
             "included_paths": [".keeper-workflow/"],
+            "is_demo": True,
+            "provider_policy": "mock",
             "mock_scenario": scenario,
         }
     )

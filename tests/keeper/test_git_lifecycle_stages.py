@@ -47,6 +47,8 @@ def test_authorized_commit_and_push_are_lifecycle_stages(tmp_path: Path) -> None
             "baseline": project["head"],
             "target_branch": "keeper/git",
             "included_paths": [".keeper-workflow/"],
+            "is_demo": True,
+            "provider_policy": "mock",
             "mock_scenario": "no-repair",
             "requires_manual_approval": True,
             "commit_requested": True,

@@ -36,6 +36,8 @@ def manual_task(app: KeeperApplication, root: Path) -> str:
             "target_branch": "keeper/manual",
             "included_paths": [".keeper-workflow/"],
             "requires_manual_approval": True,
+            "is_demo": True,
+            "provider_policy": "mock",
             "mock_scenario": "no-repair",
         }
     )
@@ -92,11 +94,11 @@ def test_first_run_controller_navigation_validation_and_persistence(
     for expected in controller.STEPS[1:]:
         assert controller.next() == expected
     controller.evidence_directory = str(tmp_path / "evidence")
-    controller.provider_policy = "mock"
+    controller.provider_policy = "automatic"
     controller.finish()
     assert app.setup_complete()
     assert app.store.get("settings", "routing") == {
-        "default_provider_policy": "mock"
+        "default_provider_policy": "automatic"
     }
 
 

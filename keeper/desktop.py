@@ -90,7 +90,10 @@ class FirstRunController:
         self.index = 0
         self.evidence_directory = str(application.data_directory / "evidence")
         self.repository = ""
-        self.provider_policy = "mock"
+        routing = application.store.get("settings", "routing") or {}
+        self.provider_policy = str(
+            routing.get("default_provider_policy") or "automatic"
+        )
 
     @property
     def step(self) -> str:
@@ -235,6 +238,40 @@ class KeeperDesktop:
             variable = self.tk.StringVar()
             self.task_fields[key] = variable
             self.ttk.Entry(frame, textvariable=variable).pack(fill="x", padx=8)
+        routing = self.application.store.get("settings", "routing") or {}
+        self.task_fields["provider_policy"] = self.tk.StringVar(
+            value=str(routing.get("default_provider_policy") or "automatic")
+        )
+        self.ttk.Label(frame, text="Provider policy").pack(
+            anchor="w", padx=8, pady=(5, 0)
+        )
+        self.ttk.Combobox(
+            frame,
+            textvariable=self.task_fields["provider_policy"],
+            values=(
+                "automatic",
+                "local-only",
+                "strongest",
+                "codex",
+                "claude",
+                "ollama",
+                "mock",
+            ),
+            state="readonly",
+        ).pack(fill="x", padx=8)
+        provider_status = [
+            {
+                "id": item["provider_id"],
+                "available": item["available"],
+                "verification": item["verification_status"],
+            }
+            for item in self.application.diagnostics()["providers"]
+        ]
+        self.ttk.Label(
+            frame,
+            text=json.dumps(provider_status, indent=2),
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=4)
         self.ttk.Button(frame, text="Save task", command=self._create_task).pack(anchor="w", padx=8, pady=8)
 
     def _build_workflow(self) -> None:
@@ -366,10 +403,12 @@ class KeeperDesktop:
         )
         evidence = self.tk.StringVar(value=controller.evidence_directory)
         repository = self.tk.StringVar()
+        provider_policy = self.tk.StringVar(value=controller.provider_policy)
 
         def render() -> None:
             controller.evidence_directory = evidence.get()
             controller.repository = repository.get()
+            controller.provider_policy = provider_policy.get()
             descriptions = {
                 "boundaries": "Keeper cannot merge, force-push, deploy, trade, spend, or delete repositories.",
                 "storage": f"Confirm evidence directory:\n{evidence.get()}",
@@ -386,10 +425,26 @@ class KeeperDesktop:
         self.ttk.Entry(entries, textvariable=evidence).pack(fill="x")
         self.ttk.Label(entries, text="First repository (optional)").pack(anchor="w")
         self.ttk.Entry(entries, textvariable=repository).pack(fill="x")
+        self.ttk.Label(entries, text="Default provider policy").pack(anchor="w")
+        self.ttk.Combobox(
+            entries,
+            textvariable=provider_policy,
+            values=(
+                "automatic",
+                "local-only",
+                "strongest",
+                "codex",
+                "claude",
+                "ollama",
+                "mock",
+            ),
+            state="readonly",
+        ).pack(fill="x")
 
         def finish() -> None:
             controller.evidence_directory = evidence.get()
             controller.repository = repository.get()
+            controller.provider_policy = provider_policy.get()
             controller.finish()
             wizard.destroy()
             self.status.set(

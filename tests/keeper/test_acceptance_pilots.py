@@ -36,6 +36,8 @@ def task(app: KeeperApplication, root: Path, scenario: str) -> str:
             "baseline": head,
             "target_branch": f"keeper/{scenario}",
             "included_paths": [".keeper-workflow/"],
+            "is_demo": True,
+            "provider_policy": "mock",
             "mock_scenario": scenario,
         }
     )
@@ -104,6 +106,8 @@ def test_scoped_waiver_is_persisted_executed_and_reported(tmp_path: Path) -> Non
             "target_branch": "keeper/waiver",
             "included_paths": [".keeper-workflow/"],
             "verification_waivers": [waiver],
+            "is_demo": True,
+            "provider_policy": "mock",
             "mock_scenario": "no-repair",
         }
     )

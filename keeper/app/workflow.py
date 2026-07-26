@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -685,6 +687,7 @@ def _validate_task_scope(task: dict[str, Any], repository: Path) -> None:
 
 
 def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
+    is_demo = bool(stored.get("is_demo", False))
     scenario = str(stored.get("mock_scenario", "repair"))
     final = "repaired\n" if scenario == "repair" else "built\n"
     waivers = [
@@ -693,6 +696,45 @@ def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
         if isinstance(item, dict)
     ]
     waiver_id = str(waivers[0]["waiver_id"]) if waivers else None
+    if is_demo:
+        commands = [["keeper:file-equals", ".keeper-workflow/result.txt", "built\n"]]
+        final_commands = [["keeper:file-equals", ".keeper-workflow/result.txt", final]]
+        specs = [
+            {
+                "category": "task",
+                "arguments": commands[0],
+                "validator": "file-equals",
+                "registration_id": "keeper:demo-file-equals",
+                "required": True,
+                "waiver_id": waiver_id,
+            }
+        ]
+        final_specs = [
+            {
+                "category": "task",
+                "arguments": final_commands[0],
+                "validator": "file-equals",
+                "registration_id": "keeper:demo-file-equals",
+                "required": True,
+                "waiver_id": waiver_id,
+            }
+        ]
+        categories = ["task"]
+        allowed_paths = [".keeper-workflow/"]
+        blocked_paths: list[str] = []
+    else:
+        specs = _registered_verification_specs(stored)
+        final_specs = [dict(item) for item in specs]
+        commands = []
+        for item in specs:
+            arguments = item.get("arguments")
+            if not isinstance(arguments, list) or not arguments:
+                raise ValueError("registered verification arguments must be a non-empty list")
+            commands.append([str(value) for value in arguments])
+        final_commands = [list(item) for item in commands]
+        categories = [str(value) for value in stored.get("required_validations", [])]
+        allowed_paths = [str(value) for value in stored.get("included_paths", [])]
+        blocked_paths = [str(value) for value in stored.get("excluded_paths", [])]
     return Task(
         str(stored["id"]),
         str(stored["title"]),
@@ -700,33 +742,18 @@ def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
         "desktop",
         1,
         risk=str(stored.get("risk", "low")),
-        verification_commands=[
-            ["keeper:file-equals", ".keeper-workflow/result.txt", "built\n"]
+        acceptance_criteria=[
+            str(value) for value in stored.get("completion_criteria", [])
         ],
-        final_verification_commands=[
-            ["keeper:file-equals", ".keeper-workflow/result.txt", final]
-        ],
-        verification_specs=[
-            {
-                "category": "task",
-                "arguments": ["keeper:file-equals", ".keeper-workflow/result.txt", "built\n"],
-                "validator": "file-equals",
-                "required": True,
-                "waiver_id": waiver_id,
-            }
-        ],
-        final_verification_specs=[
-            {
-                "category": "task",
-                "arguments": ["keeper:file-equals", ".keeper-workflow/result.txt", final],
-                "validator": "file-equals",
-                "required": True,
-                "waiver_id": waiver_id,
-            }
-        ],
-        allowed_paths=[".keeper-workflow/"],
+        verification_commands=commands,
+        final_verification_commands=final_commands,
+        verification_specs=specs,
+        final_verification_specs=final_specs,
+        required_verification_categories=categories,
+        allowed_paths=allowed_paths,
+        blocked_paths=blocked_paths,
         capabilities=["repository_write", "run_verification"],
-        provider="mock",
+        provider=str(stored.get("provider_policy", "automatic")),
         verification_waivers=waivers,
     )
 
@@ -736,17 +763,26 @@ def _select_routes(
 ) -> tuple[dict[str, AgentProvider], dict[str, str], list[dict[str, Any]]]:
     policy = str(stored.get("provider_policy", "mock"))
     if policy == "mock":
+        if not bool(stored.get("is_demo", False)):
+            raise PermissionError("mock routing is restricted to explicit demonstrations")
         return _mock_routes(str(stored.get("mock_scenario", "repair")))
     diagnostics = ProviderDiscovery(
         {str(key): str(value) for key, value in configured_paths.items()}
     ).discover()
-    if policy not in {"automatic", "strongest"}:
-        diagnostics = [
-            item for item in diagnostics if item.provider_id in {policy, "mock"}
+    real_diagnostics = [item for item in diagnostics if item.provider_id != "mock"]
+    if policy == "local-only":
+        author_pool = [
+            item for item in real_diagnostics if item.capabilities.local_only
+        ]
+    elif policy in {"automatic", "strongest"}:
+        author_pool = real_diagnostics
+    else:
+        author_pool = [
+            item for item in real_diagnostics if item.provider_id == policy
         ]
     author = route_provider(
         RoutingRequest("builder", str(stored.get("risk", "low")), "keeper"),
-        diagnostics,
+        author_pool,
     )
     reviewer = route_provider(
         RoutingRequest(
@@ -756,16 +792,16 @@ def _select_routes(
             frozenset({author.provider_id}),
             author.provider_id == "ollama",
         ),
-        diagnostics,
+        real_diagnostics,
     )
     repairer = route_provider(
         RoutingRequest("repairer", str(stored.get("risk", "low")), "keeper"),
-        diagnostics,
+        real_diagnostics,
     )
     selected = {author.provider_id, reviewer.provider_id, repairer.provider_id}
     instances = {
         provider_id: _adapter(
-            next(item for item in diagnostics if item.provider_id == provider_id)
+            next(item for item in real_diagnostics if item.provider_id == provider_id)
         )
         for provider_id in selected
     }
@@ -798,6 +834,75 @@ def _select_routes(
         for role, target in routes.items()
     ]
     return providers, routes, decisions
+
+
+def _registered_verification_specs(stored: dict[str, Any]) -> list[dict[str, Any]]:
+    supplied = stored.get("verification_specs", [])
+    if supplied:
+        if not isinstance(supplied, list) or not all(
+            isinstance(item, dict) for item in supplied
+        ):
+            raise ValueError("verification specifications must be object records")
+        return [dict(item) for item in supplied]
+    repository = Path(str(stored["repository"])).resolve()
+    specifications: list[dict[str, Any]] = []
+    for category_value in stored.get("required_validations", []):
+        category = str(category_value).strip().lower()
+        if category == "tests":
+            arguments = ["{python}", "-m", "pytest", "-q"]
+            validator = "pytest"
+        elif category == "typing":
+            arguments = [
+                "{python}",
+                "-m",
+                "mypy",
+                "--strict",
+                "keeper",
+                "tests/keeper",
+            ]
+            validator = "mypy"
+        elif category == "compilation":
+            arguments = [
+                "{python}",
+                "-m",
+                "compileall",
+                "-q",
+                "keeper",
+                "tests/keeper",
+            ]
+            validator = "compileall"
+        elif category == "foundation":
+            script = (repository / "scripts" / "verify-foundation.sh").resolve()
+            if (
+                not script.is_relative_to(repository)
+                or script.is_symlink()
+                or not script.is_file()
+            ):
+                raise PermissionError("foundation validator script is unavailable or unsafe")
+            bash = shutil.which("bash")
+            if bash is None:
+                raise RuntimeError("foundation validator requires Git Bash")
+            arguments = [bash, str(script)]
+            validator = "foundation-script"
+        else:
+            raise ValueError(
+                f"validation category requires an explicit registered specification: {category}"
+            )
+        specification: dict[str, Any] = {
+            "category": category,
+            "arguments": arguments,
+            "validator": validator,
+            "registration_id": f"keeper:{category}:v1",
+            "required": True,
+        }
+        if validator == "foundation-script":
+            specification["expected_sha256"] = hashlib.sha256(
+                Path(arguments[-1]).read_bytes()
+            ).hexdigest()
+        specifications.append(specification)
+    if not specifications:
+        raise ValueError("normal tasks require registered validation categories")
+    return specifications
 
 
 def _adapter(diagnostic: ProviderDiagnostic) -> AgentProvider:

@@ -8,6 +8,7 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from keeper.app.git_safety import GitSafetyService
@@ -116,24 +117,58 @@ class KeeperApplication:
         repository = str(values.get("repository") or (active or {}).get("repository", ""))
         if not repository:
             raise ValueError("task requires an active repository")
+        repository_path = Path(repository).resolve()
+        included_paths = _validated_task_paths(
+            repository_path, values.get("included_paths", ["keeper/"]), "included"
+        )
+        excluded_paths = _validated_task_paths(
+            repository_path, values.get("excluded_paths", []), "excluded"
+        )
+        routing = self.store.get("settings", "routing") or {}
+        selected_policy = str(
+            values.get("provider_policy")
+            or routing.get("default_provider_policy")
+            or "automatic"
+        ).strip().lower()
+        if selected_policy == "repository/default":
+            selected_policy = str(
+                routing.get("default_provider_policy") or "automatic"
+            ).strip().lower()
+        allowed_policies = {
+            "automatic",
+            "mock",
+            "local-only",
+            "strongest",
+            "codex",
+            "claude",
+            "ollama",
+        }
+        if selected_policy not in allowed_policies:
+            raise ValueError(f"unsupported provider policy: {selected_policy}")
+        is_demo = bool(values.get("is_demo", False))
+        if selected_policy == "mock" and not is_demo:
+            raise PermissionError("mock policy is restricted to explicit demonstration tasks")
+        validations = list(values.get("required_validations", ["tests"])) or ["tests"]
         task: dict[str, Any] = {
             "id": task_id,
             "title": str(values["title"]),
             "objective": str(values["objective"]),
-            "included_paths": list(values.get("included_paths", ["keeper/"])),
-            "excluded_paths": list(values.get("excluded_paths", [])),
+            "included_paths": included_paths,
+            "excluded_paths": excluded_paths,
             "baseline": str(values["baseline"]),
             "target_branch": str(values["target_branch"]),
             "risk": str(values.get("risk", "low")),
             "allowed_actions": list(values.get("allowed_actions", [])),
             "prohibited_actions": list(values.get("prohibited_actions", [])),
-            "required_validations": list(values.get("required_validations", [])),
+            "required_validations": validations,
+            "verification_specs": list(values.get("verification_specs", [])),
             "verification_waivers": list(values.get("verification_waivers", [])),
             "required_reviewers": list(values.get("required_reviewers", ["independent"])),
             "completion_criteria": list(values.get("completion_criteria", [])),
             "delegation_mode": bool(values.get("delegation_mode", False)),
-            "repository": str(Path(repository).resolve()),
-            "provider_policy": str(values.get("provider_policy", "mock")),
+            "repository": str(repository_path),
+            "provider_policy": selected_policy,
+            "is_demo": is_demo,
             "mock_scenario": str(values.get("mock_scenario", "repair")),
             "requires_manual_approval": bool(
                 values.get("requires_manual_approval", False)
@@ -495,6 +530,8 @@ class KeeperApplication:
                 "target_branch": "keeper/demo",
                 "included_paths": [".keeper-workflow/"],
                 "required_validations": ["task"],
+                "is_demo": True,
+                "provider_policy": "mock",
                 "mock_scenario": "repair",
             }
         )
@@ -601,6 +638,28 @@ def _writable(directory: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def _validated_task_paths(
+    repository: Path, values: object, label: str
+) -> list[str]:
+    if not isinstance(values, list):
+        raise ValueError(f"{label} paths must be a list")
+    normalized: list[str] = []
+    for raw in values:
+        value = str(raw).replace("\\", "/").strip()
+        path = PurePosixPath(value)
+        if not value or path.is_absolute() or ".." in path.parts:
+            raise PermissionError(f"{label} path contains traversal or is absolute")
+        candidate = repository.joinpath(*path.parts)
+        if candidate.is_symlink() or (
+            candidate.exists() and not candidate.resolve().is_relative_to(repository)
+        ):
+            raise PermissionError(f"{label} path escapes through a symbolic link")
+        normalized.append(path.as_posix().rstrip("/") + ("/" if value.endswith("/") else ""))
+    if label == "included" and not normalized:
+        raise ValueError("at least one included path is required")
+    return normalized
 
 
 def _now() -> str:

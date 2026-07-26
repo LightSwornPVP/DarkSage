@@ -37,6 +37,8 @@ def create_task(app: KeeperApplication, root: Path) -> str:
                 "baseline": head,
                 "target_branch": "keeper/recovery",
                 "included_paths": [".keeper-workflow/"],
+                "is_demo": True,
+                "provider_policy": "mock",
                 "mock_scenario": "no-repair",
             }
         )["id"]
