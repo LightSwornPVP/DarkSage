@@ -7,12 +7,17 @@ from pathlib import Path
 WINDOWS_SAFE_PATH_BUDGET = 240
 
 
+def windows_path_units(path: Path) -> int:
+    return len(str(path).encode("utf-16-le")) // 2
+
+
 def validate_path_budget(path: Path, *, purpose: str) -> Path:
     absolute = path.absolute()
-    if os.name == "nt" and len(str(absolute)) > WINDOWS_SAFE_PATH_BUDGET:
+    units = windows_path_units(absolute)
+    if os.name == "nt" and units > WINDOWS_SAFE_PATH_BUDGET:
         raise ValueError(
             f"{purpose} exceeds Keeper's supported Windows path budget "
-            f"({len(str(absolute))} > {WINDOWS_SAFE_PATH_BUDGET}); "
+            f"({units} UTF-16 code units > {WINDOWS_SAFE_PATH_BUDGET}); "
             "choose a shorter Keeper data directory or repository path"
         )
     return absolute

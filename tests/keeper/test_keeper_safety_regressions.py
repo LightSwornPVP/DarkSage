@@ -53,11 +53,10 @@ def test_task_rejects_empty_required_categories() -> None:
 def test_verifier_rejects_empty_and_missing_tool(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one"):
         Verifier().run(tmp_path, [])
-    results = Verifier().run(
-        tmp_path, [VerificationCommand(["keeper-tool-that-does-not-exist"])]
-    )
-    assert results[0].exit_code == 127
-    assert not Verifier.required_passed(results)
+    with pytest.raises(PermissionError, match="immutable registration"):
+        Verifier().run(
+            tmp_path, [VerificationCommand(["keeper-tool-that-does-not-exist"])]
+        )
 
 
 @pytest.mark.parametrize(

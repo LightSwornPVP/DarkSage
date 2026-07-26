@@ -1,0 +1,1 @@
+{"status": "completed", "files_changed": [], "findings": [], "dispositions": [{"finding_id": "PILOT-H-1", "status": "resolved", "justification": "Repaired content and diff were independently inspected."}]}

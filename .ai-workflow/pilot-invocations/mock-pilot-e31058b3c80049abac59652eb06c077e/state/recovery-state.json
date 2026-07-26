@@ -1,0 +1,9 @@
+{
+  "decisions": [
+    {
+      "action": "mark_interrupted",
+      "run_id": "recovery-probe",
+      "timestamp": "2026-07-26T22:00:33.678917+00:00"
+    }
+  ]
+}

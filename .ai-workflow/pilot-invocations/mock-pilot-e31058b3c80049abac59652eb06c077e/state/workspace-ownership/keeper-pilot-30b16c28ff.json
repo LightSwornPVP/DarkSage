@@ -1,0 +1,12 @@
+{
+  "active_attempt_id": "keeper-pilot-30b16c28ff-attempt-2",
+  "attempt_ids": [
+    "keeper-pilot-30b16c28ff-attempt-1",
+    "keeper-pilot-30b16c28ff-attempt-2"
+  ],
+  "branch": "keeper/keeper-pilot-30b16c28ff",
+  "created_at": "2026-07-26T22:00:31.571343+00:00",
+  "repository": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization",
+  "task_id": "keeper-pilot-30b16c28ff",
+  "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\652eb06c077e\\keeper-pilot-30b16c28ff"
+}

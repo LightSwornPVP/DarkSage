@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 
 from keeper.models.finding import Finding, Severity
@@ -30,9 +29,16 @@ def test_mock_agent_execution(tmp_path: Path) -> None:
 
 
 def test_verification_failure_stops_required_sequence(tmp_path: Path) -> None:
+    (tmp_path / "actual.txt").write_text("actual\n", encoding="utf-8")
     commands = [
-        VerificationCommand([sys.executable, "-c", "raise SystemExit(3)"]),
-        VerificationCommand([sys.executable, "-c", "raise SystemExit(0)"]),
+        VerificationCommand(
+            ["keeper:file-equals", "actual.txt", "expected\n"],
+            registration_id="keeper:file-equals",
+        ),
+        VerificationCommand(
+            ["keeper:file-equals", "actual.txt", "actual\n"],
+            registration_id="keeper:file-equals",
+        ),
     ]
     results = Verifier().run(tmp_path, commands)
     assert len(results) == 1
