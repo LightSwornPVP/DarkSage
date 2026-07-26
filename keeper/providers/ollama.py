@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -16,8 +17,13 @@ class OllamaClient(Protocol):
 
 
 class HttpOllamaClient:
+    MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
     @staticmethod
     def _request(url: str, timeout: int, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        parsed = urlparse(url)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise RuntimeError("Ollama endpoint must use unencrypted loopback HTTP")
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(
             url,
@@ -27,7 +33,10 @@ class HttpOllamaClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                value = json.loads(response.read().decode("utf-8"))
+                raw = response.read(HttpOllamaClient.MAX_RESPONSE_BYTES + 1)
+                if len(raw) > HttpOllamaClient.MAX_RESPONSE_BYTES:
+                    raise RuntimeError("Ollama response exceeded the configured size limit")
+                value = json.loads(raw.decode("utf-8"))
         except urllib.error.URLError as error:
             raise RuntimeError(f"unable to connect to local Ollama service at {url}: {error.reason}") from error
         except (TimeoutError, json.JSONDecodeError) as error:
