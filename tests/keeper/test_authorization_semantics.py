@@ -38,7 +38,8 @@ def repository(root: Path) -> Path:
 
 
 def commit_authorization(root: Path) -> dict[str, object]:
-    inspection = GitSafetyService().inspect(root)
+    service = GitSafetyService()
+    inspection = service.inspect(root)
     return {
         "id": "authorization-1",
         "capability": "commit",
@@ -49,6 +50,7 @@ def commit_authorization(root: Path) -> dict[str, object]:
         "branch": inspection.branch,
         "head": inspection.head,
         "staged_paths": inspection.staged,
+        "staged_digest": service.staged_digest(root),
         "approving_authority": "founder",
         "issued_at": datetime.now(UTC).isoformat(),
         "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
@@ -65,6 +67,7 @@ def commit_authorization(root: Path) -> dict[str, object]:
         ("branch", "wrong-branch"),
         ("head", "0" * 40),
         ("staged_paths", ["wrong.txt"]),
+        ("staged_digest", "0" * 64),
         ("worktree", "C:/wrong"),
     ],
 )
@@ -77,6 +80,27 @@ def test_commit_rejects_every_scope_mismatch(
     authorization = commit_authorization(root)
     authorization[field] = wrong
     with pytest.raises(PermissionError, match="mismatch"):
+        GitSafetyService().commit(
+            root,
+            "commit",
+            authorization,
+            task_id="task-1",
+            run_id="run-1",
+            worktree=root,
+            branch=git(root, "branch", "--show-current"),
+        )
+
+
+def test_commit_authorization_is_invalidated_by_same_path_content_change(
+    tmp_path: Path,
+) -> None:
+    root = repository(tmp_path / "repo")
+    (root / "file.txt").write_text("first\n", encoding="utf-8")
+    git(root, "add", "file.txt")
+    authorization = commit_authorization(root)
+    (root / "file.txt").write_text("second\n", encoding="utf-8")
+    git(root, "add", "file.txt")
+    with pytest.raises(PermissionError, match="staged_digest"):
         GitSafetyService().commit(
             root,
             "commit",

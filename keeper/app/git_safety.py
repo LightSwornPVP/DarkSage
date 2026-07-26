@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 from pathlib import Path
 
 from keeper.policies import enforce_path_scope
@@ -93,6 +94,18 @@ class GitSafetyService:
         ).stdout.splitlines()
         if any(line.startswith("-\t-\t") for line in binary):
             raise PermissionError("unexpected binary addition requires separate authorization")
+        inspection = self.inspect(root)
+        enforce_path_scope(inspection.staged, allowed, blocked)
+        if sorted(inspection.staged) != sorted(paths):
+            raise PermissionError(
+                "resulting staged path set differs from the authorized changes"
+            )
+
+    def staged_digest(self, worktree: Path) -> str:
+        patch = self._git(
+            worktree.resolve(), "diff", "--cached", "--binary", "--full-index"
+        ).stdout.encode("utf-8")
+        return hashlib.sha256(patch).hexdigest()
 
     def commit(
         self,
@@ -114,6 +127,7 @@ class GitSafetyService:
             "branch": branch,
             "head": inspection.head,
             "staged_paths": sorted(inspection.staged),
+            "staged_digest": self.staged_digest(worktree),
         }
         self._require_authorization("commit", repository, authorization, context)
         if inspection.root != str(worktree.resolve()) or inspection.branch != branch:

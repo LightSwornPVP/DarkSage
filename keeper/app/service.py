@@ -601,6 +601,7 @@ class KeeperApplication:
                 "branch": inspection.branch,
                 "head": inspection.head,
                 "staged_paths": sorted(inspection.staged),
+                "staged_digest": self.git.staged_digest(worktree),
             }
         if run.get("status") != "awaiting_push_authorization":
             raise PermissionError("push authorization requires a committed awaiting-push run")

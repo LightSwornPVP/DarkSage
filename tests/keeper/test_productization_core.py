@@ -156,6 +156,37 @@ def test_git_safety_inspects_and_stages_only_allowlisted_text(tmp_path: Path) ->
         service.stage_allowlisted(repository, ["readme.txt"], ["keeper/"], [])
 
 
+def test_staging_rejects_exclusions_malformed_paths_and_existing_out_of_scope_index(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "repo")
+    (repository / "keeper" / "excluded").mkdir(parents=True)
+    (repository / "keeper" / "allowed.txt").write_text("allowed\n", encoding="utf-8")
+    (repository / "keeper" / "excluded" / "blocked.txt").write_text(
+        "blocked\n", encoding="utf-8"
+    )
+    (repository / "outside.txt").write_text("outside\n", encoding="utf-8")
+    service = GitSafetyService()
+    with pytest.raises(PermissionError, match="blocked"):
+        service.stage_allowlisted(
+            repository,
+            ["keeper/excluded/blocked.txt"],
+            ["keeper/"],
+            ["keeper/excluded/"],
+        )
+    for unsafe in ("C:\\outside.txt", "keeper/file.txt:stream", "../outside.txt"):
+        with pytest.raises((PermissionError, ValueError)):
+            service.stage_allowlisted(repository, [unsafe], ["keeper/"], [])
+    _git(repository, "add", "outside.txt")
+    with pytest.raises(PermissionError, match="outside allowed"):
+        service.stage_allowlisted(
+            repository,
+            ["keeper/allowed.txt"],
+            ["keeper/"],
+            [],
+        )
+
+
 def test_git_commit_authorization_is_scoped_expiring_and_one_time(
     tmp_path: Path,
 ) -> None:
@@ -172,6 +203,7 @@ def test_git_commit_authorization_is_scoped_expiring_and_one_time(
         "branch": _git(repository, "branch", "--show-current"),
         "head": _git(repository, "rev-parse", "HEAD"),
         "staged_paths": ["readme.txt"],
+        "staged_digest": GitSafetyService().staged_digest(repository),
         "approving_authority": "founder",
         "issued_at": datetime.now(UTC).isoformat(),
         "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),

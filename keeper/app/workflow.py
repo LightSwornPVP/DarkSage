@@ -624,14 +624,25 @@ class WorkflowCoordinator:
         )
         self.store.upsert("runs", run_id, record)
         if bool(stored.get("commit_requested", False)):
+            staging_allowed = (
+                [".keeper-workflow/"]
+                if bool(stored.get("is_demo", False))
+                else [str(item) for item in stored.get("included_paths", [])]
+            )
+            staging_blocked = (
+                []
+                if bool(stored.get("is_demo", False))
+                else [str(item) for item in stored.get("excluded_paths", [])]
+            )
             git.stage_allowlisted(
                 workspace_path,
                 changed_paths,
-                [".keeper-workflow/"],
-                [],
+                staging_allowed,
+                staging_blocked,
             )
             record = self._run(run_id)
             record["staged_paths"] = git.inspect(workspace_path).staged
+            record["staged_digest"] = git.staged_digest(workspace_path)
             self.store.upsert("runs", run_id, record)
         semantic_records = self._persist_semantic_evidence(
             run_id, str(stored["id"]), state

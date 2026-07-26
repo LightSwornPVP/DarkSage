@@ -186,8 +186,45 @@ def filtered_environment(environment: dict[str, str]) -> dict[str, str]:
 
 
 def normalize_relative_path(value: str) -> str:
-    path = PurePosixPath(value.replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts:
+    normalized_input = value.replace("\\", "/")
+    path = PurePosixPath(normalized_input)
+    if (
+        not value
+        or "\x00" in value
+        or path.is_absolute()
+        or ".." in path.parts
+        or ":" in normalized_input
+        or normalized_input.startswith("//")
+        or any(
+            part.rstrip(" .").upper()
+            in {
+                "CON",
+                "PRN",
+                "AUX",
+                "NUL",
+                "COM1",
+                "COM2",
+                "COM3",
+                "COM4",
+                "COM5",
+                "COM6",
+                "COM7",
+                "COM8",
+                "COM9",
+                "LPT1",
+                "LPT2",
+                "LPT3",
+                "LPT4",
+                "LPT5",
+                "LPT6",
+                "LPT7",
+                "LPT8",
+                "LPT9",
+            }
+            or part != part.rstrip(" .")
+            for part in path.parts
+        )
+    ):
         raise ValueError(f"unsafe repository-relative path: {value}")
     normalized = path.as_posix()
     while normalized.startswith("./"):
