@@ -4,10 +4,11 @@
 
 - Exercised controlled command executables through the complete author, independent
   review, repair, post-repair review, semantic verification, and evidence workflow.
-- Added durable provider PID checkpoints, incremental redacted logs, restart-time
-  process-tree discovery, and attributable descendant termination.
+- Added durable provider ownership checkpoints, incremental redacted logs, and
+  retained-handle restart recovery that blocks ambiguous descendants.
 - Added same-run selected-stage retries with stage-attempt identities, explicit
-  authorization records, downstream invalidation, and irreversible-stage rejection.
+  authorization records, stable provider registration digests, truthful fresh
+  instance identities, downstream invalidation, and irreversible-stage rejection.
 - Added active waiver revocation and structured desktop evidence views for routing,
   provider identities, commands, verification, findings, logs, hashes, and Git results.
 - Added rendered Windows Tk validation that navigates the real notebook, invokes the

@@ -17,7 +17,10 @@ and exits cleanly.
 Controller tests exercise first-run navigation and real application-service actions
 without a display. Controlled command executables exercise complete workflows,
 selected-stage retries, timeout/cancellation recovery, live redacted logging, and
-restart-time descendant cleanup.
+restart-time retained-handle recovery. Adversarial coverage exercises post-validation
+PID reuse, exited retained objects, parent and ownership changes, ambiguous
+descendants, executable replacement, registration changes, truthful retry instance
+IDs, and exact one-use reroute authority.
 
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and

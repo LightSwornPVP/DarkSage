@@ -11,6 +11,9 @@ Keeper treats task definitions and process output as untrusted data.
 - Credential-like environment variables are filtered from child processes.
 - Prompts and logs must not contain secrets.
 - Dirty worktrees are never silently deleted.
+- Final evidence is indexed by path, byte count, and digest, then its
+  security-relevant report fields and provider-attempt identities are copied into
+  an immutable finalization record. Export revalidates both layers.
 
 Protected actions include force pushes, history rewrites, repository or backup
 branch deletion, secret publication, purchases, paid resources, production
@@ -21,6 +24,12 @@ explicit authorization.
 The environment-name filter is defense in depth, not a secret manager. Operators
 must use the repository's approved credential storage and inspect custom provider
 configuration before execution.
+
+Commit authorization and mutation are separate operating-system and Git
+operations. Keeper revalidates the authorized staged-content digest immediately
+before commit, but no cross-process transaction can make the final check and Git
+mutation atomic. Operators must prevent concurrent writers during an authorized
+commit.
 
 ## Local model assignment
 

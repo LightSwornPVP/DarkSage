@@ -12,8 +12,12 @@
 - Authenticated external command-provider task execution remains unverified. Controlled
   executables exercise the complete production adapter and workflow path without
   external credentials.
-- Startup recovery terminates attributable orphan process trees and requires an
-  explicit selected-stage retry. It resumes only from a durable verified checkpoint.
+- Startup recovery can terminate an exact owned Windows root through its retained
+  native handle. It blocks if descendants exist or cannot be enumerated because a
+  restarted process cannot safely recover the original job handle.
+- The last staged-content revalidation and the Git commit operation are not one
+  cross-process atomic transaction. Concurrent repository writers remain outside
+  Keeper's trust boundary.
 - Rendered Tk automation requires a Python runtime with matching Tcl/Tk libraries.
   The packaged diagnostic reports unavailable with exit 78 when that prerequisite is
   absent.

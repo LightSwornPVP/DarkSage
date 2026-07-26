@@ -40,8 +40,10 @@ worktree, branch, HEAD, and Git scope. A commit authorization does not grant pus
 authority.
 
 On Windows, Keeper validates generated evidence and worktree paths against a
-240-character safety budget before provider launch. Use a shorter Keeper data
-directory or repository path when the diagnostic reports an over-budget path.
+240 UTF-16 code-unit safety budget before provider launch. This matches the unit
+used by Windows path APIs, including supplementary characters that consume two
+code units. Use a shorter Keeper data directory or repository path when the
+diagnostic reports an over-budget path.
 
 ## Reasoning tiers
 
