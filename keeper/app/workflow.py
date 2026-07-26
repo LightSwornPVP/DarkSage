@@ -1,25 +1,27 @@
 from __future__ import annotations
 
+import ctypes
 import json
+import os
+import signal
+import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from keeper.agent_runner import AgentRunner
-from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.git_safety import GitSafetyService
+from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence
 from keeper.app.storage import KeeperStore
 from keeper.config import KeeperConfig
 from keeper.models.task import Task
 from keeper.orchestrator import Keeper
-from keeper.providers.mock import MockProvider
 from keeper.providers.base import AgentProvider
-from keeper.providers.routing import ProviderRouter
 from keeper.providers.adapters import (
     ClaudeCommandAdapter,
     CodexCommandAdapter,
@@ -28,9 +30,11 @@ from keeper.providers.adapters import (
     RoutingRequest,
     route_provider,
 )
+from keeper.providers.mock import MockProvider
 from keeper.providers.ollama import OllamaProvider
+from keeper.providers.routing import ProviderRouter
 from keeper.workspace import WorkspaceManager
-from keeper.recovery import process_exists
+from keeper.recovery import load_json, process_exists
 
 
 @dataclass(slots=True)
@@ -40,6 +44,7 @@ class ActiveRun:
     pause_requested: threading.Event
     approval_ready: threading.Event
     approval_decision: str | None = None
+    cancel_callbacks: list[Callable[[], None]] = field(default_factory=list)
 
 
 class WorkflowCoordinator:
@@ -57,7 +62,7 @@ class WorkflowCoordinator:
         self.notify = notify
         self._active: dict[str, ActiveRun] = {}
         self._lock = threading.Lock()
-        self.recover_interrupted_runs()
+        self.startup_recovery = self.recover_interrupted_runs()
 
     def start(
         self, task_id: str, metadata: dict[str, Any] | None = None
@@ -105,7 +110,13 @@ class WorkflowCoordinator:
                 continue
             stage = str(record.get("stage", ""))
             pid = record.get("process_id")
+            if not isinstance(pid, int):
+                pid = _active_provider_pid(record)
             running = isinstance(pid, int) and process_exists(pid)
+            terminated = False
+            if running and isinstance(pid, int):
+                terminated = _terminate_attributable_tree(pid)
+                running = not terminated
             if stage != RunStage.INTERRUPTED.value:
                 try:
                     self.lifecycle.transition(run_id, RunStage.INTERRUPTED)
@@ -118,6 +129,8 @@ class WorkflowCoordinator:
                     "recovery": {
                         "classification": "uncertain" if running else "recoverable",
                         "previous_process_running": running,
+                        "provider_process_id": pid,
+                        "attributable_tree_terminated": terminated,
                         "retry_safe": stage
                         not in {
                             RunStage.AUTHORIZED_COMMIT.value,
@@ -132,33 +145,43 @@ class WorkflowCoordinator:
             recovered.append(current)
         return recovered
 
-    def retry(self, run_id: str, reason: str) -> dict[str, Any]:
-        if not reason.strip():
-            raise ValueError("retry reason is required")
+    def retry(
+        self,
+        run_id: str,
+        reason: str,
+        stage: str | None = None,
+        authorizer: str = "local-user",
+    ) -> dict[str, Any]:
         previous = self._run(run_id)
-        recovery = previous.get("recovery")
-        if (
-            previous.get("status") not in {"blocked", "interrupted"}
-            or not isinstance(recovery, dict)
-            or not recovery.get("retry_safe")
-        ):
-            raise PermissionError("run is not eligible for persisted retry")
-        if recovery.get("previous_process_running"):
-            raise PermissionError("uncertain running provider must be resolved before retry")
-        current = self.start(
-            str(previous["task_id"]),
-            {
-                "retry_of": run_id,
-                "attempt": int(previous.get("attempt", 1)) + 1,
-                "retry_reason": reason,
-            },
+        expected = (
+            previous.get("interrupted_from")
+            if previous.get("stage") == RunStage.INTERRUPTED.value
+            else previous.get("stopped_from")
         )
-        previous["superseded_by"] = current["id"]
-        previous["retry_history"] = [
-            *list(previous.get("retry_history", [])),
-            {"run_id": current["id"], "reason": reason, "timestamp": _now()},
-        ]
-        self.store.upsert("runs", run_id, previous)
+        selected = stage or (str(expected) if expected else "")
+        if not selected:
+            raise PermissionError("failed stage could not be identified")
+        current = self.lifecycle.retry_stage(
+            run_id,
+            RunStage(selected),
+            reason=reason,
+            authorizer=authorizer,
+        )
+        cancel = threading.Event()
+        pause = threading.Event()
+        approval = threading.Event()
+        task = self._task(str(previous["task_id"]))
+        thread = threading.Thread(
+            target=self._execute_guarded,
+            args=(run_id, task, cancel, pause, approval, selected),
+            name=f"keeper-retry-{run_id}-{selected}",
+            daemon=True,
+        )
+        with self._lock:
+            if run_id in self._active:
+                raise RuntimeError("stage retry is already active")
+            self._active[run_id] = ActiveRun(thread, cancel, pause, approval)
+        thread.start()
         return current
 
     def execute(self, task_id: str) -> dict[str, Any]:
@@ -179,6 +202,8 @@ class WorkflowCoordinator:
             raise ValueError("run is not active")
         active.cancel_requested.set()
         active.approval_ready.set()
+        for callback in active.cancel_callbacks:
+            callback()
         self.lifecycle.transition(run_id, RunStage.CANCELLED)
         self.notify("run_cancelled", "Run cancelled", f"Run {run_id}")
 
@@ -230,9 +255,10 @@ class WorkflowCoordinator:
         cancel: threading.Event,
         pause: threading.Event,
         approval: threading.Event,
+        retry_stage: str | None = None,
     ) -> None:
         try:
-            self._execute(run_id, task, cancel, pause, approval)
+            self._execute(run_id, task, cancel, pause, approval, retry_stage)
         except Exception as error:
             record = self._run(run_id)
             if record.get("stage") not in {
@@ -243,6 +269,7 @@ class WorkflowCoordinator:
             record = self._run(run_id)
             record["failure_reason"] = str(error)
             record["ended_at"] = _now()
+            self._add_recovery(record)
             self.store.upsert("runs", run_id, record)
             self.notify("provider_failure", "Workflow blocked", f"Run {run_id}")
         finally:
@@ -256,30 +283,44 @@ class WorkflowCoordinator:
         cancel: threading.Event,
         pause: threading.Event,
         approval: threading.Event,
+        retry_stage: str | None = None,
     ) -> None:
         repository = Path(str(stored["repository"])).resolve()
-        self._advance(run_id, RunStage.SCOPE_VALIDATION)
-        _validate_task_scope(stored, repository)
-        self._advance(run_id, RunStage.RISK_CLASSIFICATION)
-        self._advance(run_id, RunStage.AUTHORIZATION_RESOLUTION)
-        self._advance(run_id, RunStage.PROVIDER_SELECTION)
+        if retry_stage is None:
+            self._advance(run_id, RunStage.SCOPE_VALIDATION)
+            _validate_task_scope(stored, repository)
+            self._advance(run_id, RunStage.RISK_CLASSIFICATION)
+            self._advance(run_id, RunStage.AUTHORIZATION_RESOLUTION)
+            self._advance(run_id, RunStage.PROVIDER_SELECTION)
         providers, routes, routing = _select_routes(
             stored,
             self.store.get("settings", "providers") or {},
         )
-        record = self._run(run_id)
-        record["providers"] = {
-            role: {
-                "provider_name": provider.provider_name,
-                "provider_instance_id": provider.instance_id,
+        with self._lock:
+            active = self._active.get(run_id)
+            if active is not None:
+                unique = {id(provider): provider for provider in providers.values()}
+                callbacks: list[Callable[[], None]] = []
+                for provider in unique.values():
+                    callback = getattr(provider, "cancel", None)
+                    if callable(callback):
+                        callbacks.append(callback)
+                active.cancel_callbacks = callbacks
+        if retry_stage is None:
+            record = self._run(run_id)
+            record["providers"] = {
+                role: {
+                    "provider_name": provider.provider_name,
+                    "provider_instance_id": provider.instance_id,
+                }
+                for role, provider in providers.items()
             }
-            for role, provider in providers.items()
-        }
-        record["routing_decisions"] = routing
-        self.store.upsert("runs", run_id, record)
+            record["routing_decisions"] = routing
+            self.store.upsert("runs", run_id, record)
         if cancel.is_set():
             return
-        self._advance(run_id, RunStage.WORKTREE_PREPARATION)
+        if retry_stage is None:
+            self._advance(run_id, RunStage.WORKTREE_PREPARATION)
         evidence = self.data_directory / "evidence" / run_id
         evidence.mkdir(parents=True, exist_ok=True)
         state = evidence / ".ai-workflow"
@@ -291,7 +332,12 @@ class WorkflowCoordinator:
             provider_routes=tuple(routes.items()),
             process_timeout_seconds=int(stored.get("timeout_seconds", 30)),
         )
-        domain_task = _domain_task(stored, run_id)
+        task_path = state / "tasks" / f"{stored['id']}.json"
+        domain_task = (
+            Task.from_dict(load_json(task_path, {}))
+            if retry_stage is not None and task_path.exists()
+            else _domain_task(stored, run_id)
+        )
         routed_providers: dict[str, AgentProvider] = dict(providers)
         router = ProviderRouter(routed_providers, routes)
         observer = _LifecycleObserver(
@@ -304,11 +350,22 @@ class WorkflowCoordinator:
             router,
             observer,
         )
-        result = engine.run_task(domain_task)
+        result = engine.run_task(
+            domain_task,
+            retry_stage=retry_stage,
+            stage_attempt_id=(
+                str(self._run(run_id).get("active_stage_attempt_id", ""))
+                if retry_stage is not None
+                else None
+            ),
+        )
         if cancel.is_set():
             return
         if result.status.value != "COMPLETED":
             self.lifecycle.transition(run_id, RunStage.BLOCKED)
+            blocked = self._run(run_id)
+            self._add_recovery(blocked)
+            self.store.upsert("runs", run_id, blocked)
             if result.status.value == "FAILED":
                 self.notify(
                     "verification_failed",
@@ -451,6 +508,21 @@ class WorkflowCoordinator:
         )
         self.store.upsert("runs", run_id, record)
         self.notify("run_completed", "Run completed", f"Run {run_id}")
+
+    @staticmethod
+    def _add_recovery(record: dict[str, Any]) -> None:
+        stopped = str(record.get("stopped_from") or "")
+        record["recovery"] = {
+            "classification": "recoverable",
+            "previous_process_running": False,
+            "retry_safe": stopped
+            not in {
+                RunStage.AUTHORIZED_COMMIT.value,
+                RunStage.AUTHORIZED_PUSH.value,
+                RunStage.EVIDENCE_FINALIZATION.value,
+            },
+            "detected_at": _now(),
+        }
 
     def _persist_semantic_evidence(
         self, run_id: str, task_id: str, state: Path
@@ -810,3 +882,145 @@ def _mock_routes(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _active_provider_pid(record: dict[str, Any]) -> int | None:
+    root = record.get("evidence_root")
+    if not isinstance(root, str):
+        return None
+    for path in sorted(
+        Path(root).glob(".ai-workflow/runs/*/run.json"),
+        key=lambda item: item.stat().st_mtime if item.exists() else 0,
+        reverse=True,
+    ):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        pid = value.get("process_id")
+        if value.get("status") == "running" and isinstance(pid, int):
+            return pid
+    return None
+
+
+def _terminate_attributable_tree(process_id: int) -> bool:
+    if os.name == "nt":
+        process_ids = _windows_process_tree(process_id)
+        result = subprocess.run(
+            ["taskkill.exe", "/PID", str(process_id), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0:
+            for pid in process_ids:
+                _windows_terminate_process(pid)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(
+            process_exists(pid) for pid in process_ids
+        ):
+            time.sleep(0.05)
+        return not any(process_exists(pid) for pid in process_ids)
+    try:
+        killpg = getattr(os, "killpg")
+        killpg(process_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            killpg(process_id, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    try:
+        killpg(process_id, getattr(signal, "SIGKILL"))
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            killpg(process_id, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _windows_process_tree(root_process_id: int) -> list[int]:
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_uint32),
+            ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.Process32FirstW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ProcessEntry),
+    )
+    kernel32.Process32FirstW.restype = ctypes.c_int
+    kernel32.Process32NextW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ProcessEntry),
+    )
+    kernel32.Process32NextW.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        return [root_process_id]
+    children: dict[int, list[int]] = {}
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        available = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
+        while available:
+            children.setdefault(int(entry.th32ParentProcessID), []).append(
+                int(entry.th32ProcessID)
+            )
+            available = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    ordered: list[int] = []
+
+    def visit(pid: int) -> None:
+        for child in children.get(pid, []):
+            visit(child)
+        ordered.append(pid)
+
+    visit(root_process_id)
+    return ordered
+
+
+def _windows_terminate_process(process_id: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(0x0001 | 0x00100000, False, process_id)
+    if not handle:
+        return not process_exists(process_id)
+    try:
+        if not kernel32.TerminateProcess(handle, 1):
+            return False
+        kernel32.WaitForSingleObject(handle, 5000)
+        return not process_exists(process_id)
+    finally:
+        kernel32.CloseHandle(handle)

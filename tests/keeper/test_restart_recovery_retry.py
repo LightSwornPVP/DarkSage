@@ -43,7 +43,7 @@ def create_task(app: KeeperApplication, root: Path) -> str:
     )
 
 
-def test_restart_classifies_interrupted_run_and_explicit_retry_completes(
+def test_restart_classifies_pre_provider_interruption_as_nonretryable(
     tmp_path: Path,
 ) -> None:
     data = tmp_path / "data"
@@ -61,11 +61,8 @@ def test_restart_classifies_interrupted_run_and_explicit_retry_completes(
     assert recovered is not None
     assert recovered["status"] == "interrupted"
     assert recovered["recovery"]["retry_safe"] is True
-    retried = restarted.retry_run("run-crashed", "provider process disappeared")
-    completed = restarted.wait_for_run(str(retried["id"]), 20)
-    assert completed["status"] == "COMPLETED"
-    assert completed["retry_of"] == "run-crashed"
-    assert completed["attempt"] == 2
+    with pytest.raises(PermissionError, match="not retryable"):
+        restarted.retry_run("run-crashed", "provider process disappeared")
 
 
 def test_retry_rejects_completed_and_irreversible_runs(tmp_path: Path) -> None:
@@ -92,3 +89,29 @@ def test_retry_rejects_completed_and_irreversible_runs(tmp_path: Path) -> None:
     app.store.upsert("runs", "push", record)
     with pytest.raises(PermissionError):
         app.retry_run("push", "never repeat push")
+
+
+def test_wrong_stage_retry_authorization_is_rejected(tmp_path: Path) -> None:
+    app = KeeperApplication(tmp_path / "data")
+    app.lifecycle.create("failed", "task")
+    record = app.store.get("runs", "failed")
+    assert record is not None
+    record.update(
+        {
+            "status": "blocked",
+            "stage": "blocked",
+            "stopped_from": "independent_audit",
+            "recovery": {
+                "retry_safe": True,
+                "previous_process_running": False,
+            },
+        }
+    )
+    app.store.upsert("runs", "failed", record)
+    with pytest.raises(PermissionError, match="does not match"):
+        app.retry_run(
+            "failed",
+            "wrong stage",
+            "author_execution",
+            "acceptance-operator",
+        )

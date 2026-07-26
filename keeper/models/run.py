@@ -40,3 +40,13 @@ class RunRecord:
         result = asdict(self)
         result["review_findings"] = [item.to_dict() for item in self.review_findings]
         return result
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> RunRecord:
+        data = dict(value)
+        data["review_findings"] = [
+            Finding.from_dict(item) if isinstance(item, dict) else item
+            for item in data.get("review_findings", [])
+        ]
+        fields = cls.__dataclass_fields__
+        return cls(**{key: item for key, item in data.items() if key in fields})

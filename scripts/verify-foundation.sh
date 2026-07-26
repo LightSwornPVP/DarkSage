@@ -137,6 +137,7 @@ EXCLUDE_PATHS=(
   "tests/keeper/test_productization_adapters.py"
   "keeper/app/workflow.py"
   "tests/keeper/test_real_provider_workflow_routing.py"
+  "tests/keeper/test_fake_command_provider_workflow.py"
   "docs/keeper/PROVIDERS.md"
   "docs/keeper/KNOWN_LIMITATIONS.md"
 )

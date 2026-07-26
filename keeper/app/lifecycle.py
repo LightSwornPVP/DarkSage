@@ -34,6 +34,17 @@ TERMINAL_STAGES = frozenset(
     {RunStage.CLOSED, RunStage.CANCELLED, RunStage.BLOCKED}
 )
 
+RETRYABLE_STAGES = frozenset(
+    {
+        RunStage.AUTHOR_EXECUTION,
+        RunStage.AUTHOR_SELF_VERIFICATION,
+        RunStage.INDEPENDENT_AUDIT,
+        RunStage.REPAIR_EXECUTION,
+        RunStage.POST_REPAIR_VERIFICATION,
+        RunStage.FINAL_VALIDATION,
+    }
+)
+
 _FORWARD: dict[RunStage, frozenset[RunStage]] = {
     RunStage.INTAKE: frozenset({RunStage.SCOPE_VALIDATION}),
     RunStage.SCOPE_VALIDATION: frozenset({RunStage.RISK_CLASSIFICATION}),
@@ -104,6 +115,7 @@ class RunLifecycle:
         elif target in {RunStage.CANCELLED, RunStage.BLOCKED}:
             if previous in TERMINAL_STAGES:
                 raise ValueError("terminal run cannot change state")
+            record["stopped_from"] = previous.value
         elif previous == RunStage.INTERRUPTED:
             if target.value != record.get("interrupted_from"):
                 raise ValueError("interrupted run may resume only at its recorded stage")
@@ -113,6 +125,14 @@ class RunLifecycle:
         sequence = int(record["sequence"]) + 1
         history = list(record.get("history", []))
         history.append({"sequence": sequence, "from": previous.value, "to": target.value})
+        if target in RETRYABLE_STAGES:
+            attempts = dict(record.get("stage_attempt_counts", {}))
+            count = int(attempts.get(target.value, 0)) + 1
+            attempts[target.value] = count
+            record["stage_attempt_counts"] = attempts
+            record["active_stage_attempt_id"] = (
+                f"{run_id}:{target.value}:{count}"
+            )
         record.update(
             {
                 "stage": target.value,
@@ -129,6 +149,80 @@ class RunLifecycle:
         )
         self.store.upsert("runs", run_id, record)
         return TransitionResult(run_id, previous, target, sequence)
+
+    def retry_stage(
+        self,
+        run_id: str,
+        target: RunStage,
+        *,
+        reason: str,
+        authorizer: str,
+    ) -> dict[str, Any]:
+        if target not in RETRYABLE_STAGES:
+            raise PermissionError("selected stage is not retryable")
+        if not reason.strip() or not authorizer.strip():
+            raise ValueError("retry reason and authorizer are required")
+        record = self._record(run_id)
+        previous = RunStage(str(record["stage"]))
+        if previous not in {
+            RunStage.INTERRUPTED,
+            RunStage.BLOCKED,
+            RunStage.CANCELLED,
+        }:
+            raise PermissionError("run is not stopped at a retryable stage")
+        expected = (
+            record.get("interrupted_from")
+            if previous == RunStage.INTERRUPTED
+            else record.get("stopped_from")
+        )
+        if expected != target.value:
+            raise PermissionError("retry authorization does not match the failed stage")
+        recovery = record.get("recovery")
+        if isinstance(recovery, dict):
+            if not recovery.get("retry_safe", False):
+                raise PermissionError("stage recovery is not safe to retry")
+            if recovery.get("previous_process_running", False):
+                raise PermissionError("provider process state is still uncertain")
+        attempts = dict(record.get("stage_attempt_counts", {}))
+        count = int(attempts.get(target.value, 1)) + 1
+        attempts[target.value] = count
+        stage_attempt_id = f"{run_id}:{target.value}:{count}"
+        prior_attempt = record.get("active_stage_attempt_id")
+        sequence = int(record["sequence"]) + 1
+        history = list(record.get("history", []))
+        history.append(
+            {
+                "sequence": sequence,
+                "from": previous.value,
+                "to": target.value,
+                "retry": True,
+                "stage_attempt_id": stage_attempt_id,
+            }
+        )
+        retry_history = list(record.get("retry_history", []))
+        retry_history.append(
+            {
+                "stage": target.value,
+                "reason": reason,
+                "authorizer": authorizer,
+                "prior_attempt_id": prior_attempt,
+                "stage_attempt_id": stage_attempt_id,
+            }
+        )
+        record.update(
+            {
+                "stage": target.value,
+                "sequence": sequence,
+                "status": "running",
+                "interrupted_from": None,
+                "stopped_from": None,
+                "stage_attempt_counts": attempts,
+                "active_stage_attempt_id": stage_attempt_id,
+                "retry_history": retry_history,
+            }
+        )
+        self.store.upsert("runs", run_id, record)
+        return record
 
     def _record(self, run_id: str) -> dict[str, Any]:
         record = self.store.get("runs", run_id)

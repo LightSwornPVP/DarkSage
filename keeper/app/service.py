@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -16,6 +18,7 @@ from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.app.workflow import WorkflowCoordinator
 from keeper.providers.adapters import ProviderDiscovery
+from keeper.recovery import atomic_write_json, load_json
 from keeper.version import VERSION
 
 
@@ -211,11 +214,151 @@ class KeeperApplication:
             "verification_waivers": waivers,
         }
 
+    def evidence_details(self, run_id: str, category: str) -> dict[str, Any]:
+        run = self.run_status(run_id)
+        root_value = run.get("evidence_root")
+        if not isinstance(root_value, str):
+            raise ValueError("run has no evidence root")
+        root = Path(root_value).resolve()
+        allowed = (self.data_directory / "evidence").resolve()
+        if not root.is_relative_to(allowed):
+            raise PermissionError("evidence path is outside Keeper storage")
+        provider_records: list[dict[str, Any]] = []
+        for path in sorted(root.glob(".ai-workflow/runs/*/run.json")):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                raise PermissionError("provider evidence escapes the run root")
+            try:
+                value = json.loads(resolved.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                provider_records.append(value)
+        authorizations = [
+            item
+            for item in self.store.list("authorizations")
+            if item.get("task_id") == run.get("task_id")
+            and item.get("run_id") in {None, run_id}
+        ]
+        findings = [
+            {
+                "provider_run_id": item.get("run_id"),
+                "role": item.get("role"),
+                "findings": item.get("review_findings", []),
+                "accepted": item.get("accepted_findings", []),
+                "rejected": item.get("rejected_findings", []),
+            }
+            for item in provider_records
+            if item.get("review_findings")
+            or item.get("accepted_findings")
+            or item.get("rejected_findings")
+        ]
+        logs: list[dict[str, Any]] = []
+        for path in sorted(root.glob(".ai-workflow/runs/*/*.log")):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                raise PermissionError("log evidence escapes the run root")
+            content = resolved.read_bytes()
+            logs.append(
+                {
+                    "path": resolved.relative_to(root).as_posix(),
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "recent_output": redact_text(
+                        content.decode("utf-8", errors="replace"), 20_000
+                    ),
+                }
+            )
+        index_path = root / "evidence-index.json"
+        hashes: list[dict[str, Any]] = []
+        if index_path.is_file():
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(index, dict) and isinstance(index.get("files"), list):
+                hashes = [
+                    item for item in index["files"] if isinstance(item, dict)
+                ]
+        categories: dict[str, Any] = {
+            "routing": {
+                "routing_rationale": run.get("routing_decisions", []),
+                "provider_identities": run.get("providers", {}),
+            },
+            "verification": {
+                "categories": run.get("verification_records", []),
+                "commands": [
+                    item
+                    for item in provider_records
+                    if item.get("verification_result") is not None
+                ],
+            },
+            "waivers": run.get("verification_waivers", []),
+            "authorizations": authorizations,
+            "findings": findings,
+            "logs": logs,
+            "hashes": hashes,
+            "git": run.get("git_result", {}),
+        }
+        if category not in categories:
+            raise ValueError("unsupported evidence detail category")
+        return {
+            "run_id": run_id,
+            "category": category,
+            "details": categories[category],
+        }
+
     def revoke_waiver(self, authorization_id: str) -> None:
         value = self.store.get("authorizations", authorization_id)
         if value is None or value.get("capability") != "verification_waiver":
             raise LookupError("verification waiver not found")
+        if value.get("revoked_at") is not None or value.get("consumed_at") is not None:
+            raise PermissionError("only an active waiver may be revoked")
+        try:
+            expires_at = datetime.fromisoformat(str(value["expires_at"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermissionError("waiver expiration is invalid") from error
+        if expires_at.tzinfo is None or expires_at <= datetime.now(UTC):
+            raise PermissionError("only an active waiver may be revoked")
         self.revoke_authorization(authorization_id)
+        revoked = self.store.get("authorizations", authorization_id)
+        if revoked is None:
+            raise RuntimeError("revoked waiver could not be reloaded")
+        task_id = str(revoked.get("task_id", ""))
+        task = self.store.get("tasks", task_id)
+        if task is not None:
+            task["verification_waivers"] = [
+                (
+                    {**item, "revoked_at": revoked["revoked_at"]}
+                    if isinstance(item, dict)
+                    and item.get("waiver_id") == authorization_id
+                    else item
+                )
+                for item in task.get("verification_waivers", [])
+            ]
+            self.store.upsert("tasks", task_id, task)
+        for run in self.store.list("runs"):
+            if run.get("task_id") != task_id or run.get("status") in {
+                "COMPLETED",
+                "REJECTED",
+            }:
+                continue
+            evidence = run.get("evidence_root")
+            if not isinstance(evidence, str):
+                continue
+            task_path = Path(evidence) / ".ai-workflow" / "tasks" / f"{task_id}.json"
+            if not task_path.is_file():
+                continue
+            domain_task = load_json(task_path, {})
+            if not isinstance(domain_task, dict):
+                continue
+            domain_task["verification_waivers"] = [
+                (
+                    {**item, "revoked_at": revoked["revoked_at"]}
+                    if isinstance(item, dict)
+                    and item.get("waiver_id") == authorization_id
+                    else item
+                )
+                for item in domain_task.get("verification_waivers", [])
+            ]
+            atomic_write_json(task_path, domain_task)
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         return self.workflow.start(task_id)
@@ -233,8 +376,14 @@ class KeeperApplication:
     def recover_runs(self) -> list[dict[str, Any]]:
         return self.workflow.recover_interrupted_runs()
 
-    def retry_run(self, run_id: str, reason: str) -> dict[str, Any]:
-        return self.workflow.retry(run_id, reason)
+    def retry_run(
+        self,
+        run_id: str,
+        reason: str,
+        stage: str | None = None,
+        authorizer: str = "local-user",
+    ) -> dict[str, Any]:
+        return self.workflow.retry(run_id, reason, stage, authorizer)
 
     def filtered_runs(
         self,

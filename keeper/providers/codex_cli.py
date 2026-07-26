@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import ctypes
 import os
+import re
+import signal
 import shutil
 import subprocess
+import threading
 import uuid
-import signal
-import ctypes
-from typing import Any
 from pathlib import Path
+from typing import Any, TextIO
 
 from keeper.policies import filtered_environment
 from keeper.providers.base import AgentProvider, AgentRequest, ProcessResult
@@ -58,13 +60,31 @@ class CliProvider(AgentProvider):
                 cwd=request.workspace,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
                 start_new_session=os.name != "nt",
             )
+            if process.stdout is None or process.stderr is None:
+                process.kill()
+                process.wait()
+                raise RuntimeError("provider output streams were not created")
+            pumps = [
+                threading.Thread(
+                    target=self._pump_stream,
+                    args=(process.stdout, stdout),
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=self._pump_stream,
+                    args=(process.stderr, stderr),
+                    daemon=True,
+                ),
+            ]
+            for pump in pumps:
+                pump.start()
             job: int | None = None
             if os.name == "nt":
                 kernel32: Any = ctypes.windll.kernel32
@@ -80,13 +100,20 @@ class CliProvider(AgentProvider):
                 self._active_job = job
             self._active_process = process
             try:
+                if request.on_process_started is not None:
+                    request.on_process_started(process.pid)
                 exit_code = process.wait(timeout=request.timeout_seconds)
                 self._terminate_remaining_group(process, job)
                 return ProcessResult(exit_code, request.stdout_path, request.stderr_path, process.pid)
             except subprocess.TimeoutExpired:
                 self._terminate_tree(process, job)
                 return ProcessResult(124, request.stdout_path, request.stderr_path, process.pid, True)
+            except BaseException:
+                self._terminate_tree(process, job)
+                raise
             finally:
+                for pump in pumps:
+                    pump.join(timeout=5)
                 self._active_process = None
                 if job and self._active_job == job:
                     ctypes.windll.kernel32.CloseHandle(job)
@@ -95,6 +122,19 @@ class CliProvider(AgentProvider):
     def cancel(self) -> None:
         if self._active_process and self._active_process.poll() is None:
             self._terminate_tree(self._active_process, self._active_job)
+
+    @staticmethod
+    def _pump_stream(source: TextIO, destination: TextIO) -> None:
+        for line in source:
+            destination.write(
+                re.sub(
+                    r"(?i)(token|secret|password|passwd|api[_-]?key|credential)"
+                    r"(\s*[:=]\s*)\S+",
+                    r"\1\2[REDACTED]",
+                    line,
+                )
+            )
+            destination.flush()
 
     @staticmethod
     def _terminate_remaining_group(

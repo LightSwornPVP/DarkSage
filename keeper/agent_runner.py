@@ -58,6 +58,11 @@ class AgentRunner:
         )
         record_path = directory / "run.json"
         atomic_write_json(record_path, record.to_dict())
+
+        def process_started(process_id: int) -> None:
+            record.process_id = process_id
+            atomic_write_json(record_path, record.to_dict())
+
         result = self.provider.run(
             AgentRequest(
                 role,
@@ -67,6 +72,7 @@ class AgentRunner:
                 stdout_path,
                 stderr_path,
                 reasoning_level,
+                process_started,
             )
         )
         for log_path in (stdout_path, stderr_path):

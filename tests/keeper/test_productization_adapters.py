@@ -40,8 +40,9 @@ def test_codex_adapter_uses_argument_array_and_output_schema(tmp_path: Path) -> 
 
 def test_claude_adapter_uses_argument_array_and_schema(tmp_path: Path) -> None:
     command = ClaudeCommandAdapter("claude.exe").build_command(_request(tmp_path))
-    assert command[0:2] == ["claude.exe", "-p"]
+    assert command[0] == "claude.exe"
     assert "--json-schema" in command
+    assert command[-2:] == ["-p", "safe prompt"]
 
 
 def test_discovery_always_includes_available_mock() -> None:

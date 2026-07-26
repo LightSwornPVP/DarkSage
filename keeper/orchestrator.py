@@ -16,6 +16,7 @@ from keeper.policies import filtered_environment
 import os
 from keeper.config import KeeperConfig
 from keeper.models.finding import Finding
+from keeper.models.run import RunRecord
 from keeper.models.task import Task, now_iso
 from keeper.policies import (
     enforce_path_scope,
@@ -328,21 +329,45 @@ class Keeper:
         if consumed:
             atomic_write_json(authorization_path, document)
 
-    def run_task(self, task: Task) -> Task:
-        if task.attempts >= task.maximum_attempts:
-            if task.status is TaskStatus.FAILED:
-                self.set_status(task, TaskStatus.BLOCKED)
-            return task
-        if task.status in {TaskStatus.BACKLOG, TaskStatus.FAILED}:
-            self.set_status(task, TaskStatus.READY)
-        task.attempts += 1
-        task.active_attempt_id = f"{task.id}-attempt-{task.attempts}"
+    def run_task(
+        self,
+        task: Task,
+        retry_stage: str | None = None,
+        stage_attempt_id: str | None = None,
+    ) -> Task:
+        stages = {
+            "author_execution": 0,
+            "author_self_verification": 1,
+            "independent_audit": 2,
+            "repair_execution": 3,
+            "post_repair_verification": 4,
+            "final_validation": 5,
+        }
+        if retry_stage is not None and retry_stage not in stages:
+            raise ValueError("unsupported retry stage")
+        start = stages[retry_stage or "author_execution"]
+        retrying = retry_stage is not None
+        if not retrying:
+            if task.attempts >= task.maximum_attempts:
+                if task.status is TaskStatus.FAILED:
+                    self.set_status(task, TaskStatus.BLOCKED)
+                return task
+            if task.status in {TaskStatus.BACKLOG, TaskStatus.FAILED}:
+                self.set_status(task, TaskStatus.READY)
+            task.attempts += 1
+            task.active_attempt_id = f"{task.id}-attempt-{task.attempts}"
+        else:
+            if task.status not in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                raise PermissionError("task is not stopped for stage retry")
+            if not stage_attempt_id:
+                raise ValueError("stage retry requires a stage-attempt ID")
+            task.active_attempt_id = stage_attempt_id
         self.save_task(task)
-        self.set_status(task, TaskStatus.BUILDING)
         try:
             if not task.verification_commands:
                 raise ValueError("executable task requires mandatory verification commands")
-            self._authorize_task(task)
+            if not retrying:
+                self._authorize_task(task)
             validate_provider_assignment(task.provider, task.risk, task.size, task.component)
             if self.router is None:
                 self.runner.provider.validate()
@@ -351,119 +376,208 @@ class Keeper:
         except (PermissionError, RuntimeError, ValueError):
             self.set_status(task, TaskStatus.BLOCKED)
             return task
-        workspace = self.workspace_manager.create(task.id, task.active_attempt_id)
-        task.workspace_path = str(workspace.path)
-        task.branch_name = workspace.branch
-        self._set_stage(task, "BUILDING")
-        run = self._run_agent(task, "builder", workspace, self._prompt(task, "builder"))
-        if run.process_exit_code:
-            self.set_status(task, TaskStatus.FAILED)
-            return task
-        changed = self.workspace_manager.changed_files(workspace.path)
-        enforce_path_scope(changed, task.allowed_paths, task.blocked_paths)
-        self.set_status(task, TaskStatus.SELF_VERIFYING)
-        self._set_stage(task, "SELF_VERIFYING")
-        passed, verification = self._verify(task, workspace, run.run_id, "self")
-        run.verification_result = verification
-        self._save_run(run)
-        if not passed:
-            self.set_status(task, TaskStatus.FAILED)
-            return task
-        self.set_status(task, TaskStatus.INDEPENDENT_AUDIT)
-        self._set_stage(task, "REVIEWING")
-        review = self._run_agent(task, "reviewer", workspace, self._prompt(task, "reviewer", self._diff(workspace.path)))
-        if review.process_exit_code:
-            self.set_status(task, TaskStatus.FAILED)
-            return task
-        if (
-            review.provider_instance_id == run.provider_instance_id
-            or (is_qwen_provider(run.provider_name) and review.provider_name == run.provider_name)
-            or (is_qwen_provider(run.provider_name) and is_high_risk_component(task.component) and is_qwen_provider(review.provider_name))
-        ):
-            review.failure_reason = "author and final reviewer are not sufficiently independent"
-            self.set_status(task, TaskStatus.BLOCKED)
-            return task
-        try:
-            output = json.loads(Path(review.stdout_log_path).read_text(encoding="utf-8"))
-            findings = parse_review_output(output)
-        except (json.JSONDecodeError, OSError, ValueError) as error:
-            review.failure_reason = f"invalid structured review output: {error}"
-            self.set_status(task, TaskStatus.FAILED)
-            return task
-        blockers = blocking_findings(findings)
-        review.review_findings = findings
-        review.accepted_findings = [item.to_dict() for item in blockers]
-        review.rejected_findings = [item.to_dict() for item in findings if item not in blockers]
-        review.review_tree_identity = self._workspace_identity(workspace.path)[1]
-        self._save_run(review)
-        record_cleanup(findings, self.config.state_root / "cleanup-register.json", task.id)
-        if blockers:
-            self.set_status(task, TaskStatus.REPAIRING)
-            self._set_stage(task, "REPAIRING")
-            pre_repair_identity = self._workspace_identity(workspace.path)
-            repair = self._run_agent(
-                task, "repairer", workspace, self._prompt(task, "repairer", self._diff(workspace.path), blockers)
+
+        if retrying:
+            if not task.workspace_path or not task.branch_name:
+                raise RuntimeError("stage retry has no durable workspace checkpoint")
+            workspace = Workspace(Path(task.workspace_path).resolve(), task.branch_name)
+            if not workspace.path.exists():
+                raise RuntimeError("stage retry workspace is missing")
+        else:
+            workspace = self.workspace_manager.create(task.id, task.active_attempt_id)
+            task.workspace_path = str(workspace.path)
+            task.branch_name = workspace.branch
+            self.save_task(task)
+
+        if start <= stages["author_execution"]:
+            self.set_status(task, TaskStatus.BUILDING)
+            self._set_stage(task, "BUILDING")
+            run = self._run_agent(
+                task, "builder", workspace, self._prompt(task, "builder")
             )
-            if repair.process_exit_code:
-                self.set_status(task, TaskStatus.BLOCKED)
-                return task
-            if self._workspace_identity(workspace.path) == pre_repair_identity:
-                repair.failure_reason = "repairer reported success without changing workspace state"
-                self._save_run(repair)
-                self.set_status(task, TaskStatus.BLOCKED)
-                return task
-            review.repair_history.append(repair.run_id)
-            self._save_run(review)
-            self._set_stage(task, "POST_REPAIR_REVIEWING")
-            post_review = self._run_agent(
-                task,
-                "post_repair_reviewer",
-                workspace,
-                self._prompt(
-                    task, "post_repair_reviewer", self._diff(workspace.path), blockers
-                ),
-            )
-            if post_review.process_exit_code:
+            if run.process_exit_code:
                 self.set_status(task, TaskStatus.FAILED)
                 return task
-            if post_review.provider_instance_id in {
-                run.provider_instance_id,
-                repair.provider_instance_id,
-            }:
+            changed = self.workspace_manager.changed_files(workspace.path)
+            enforce_path_scope(changed, task.allowed_paths, task.blocked_paths)
+        else:
+            run = self._latest_run(task.id, {"builder"})
+
+        if start <= stages["author_self_verification"]:
+            self.set_status(task, TaskStatus.SELF_VERIFYING)
+            self._set_stage(task, "SELF_VERIFYING")
+            passed, verification = self._verify(task, workspace, run.run_id, "self")
+            run.verification_result = verification
+            self._save_run(run)
+            if not passed:
+                self.set_status(task, TaskStatus.FAILED)
+                return task
+
+        if start <= stages["independent_audit"]:
+            self.set_status(task, TaskStatus.INDEPENDENT_AUDIT)
+            self._set_stage(task, "REVIEWING")
+            review = self._run_agent(
+                task,
+                "reviewer",
+                workspace,
+                self._prompt(task, "reviewer", self._diff(workspace.path)),
+            )
+            if review.process_exit_code:
+                self.set_status(task, TaskStatus.FAILED)
+                return task
+            if (
+                review.provider_instance_id == run.provider_instance_id
+                or (
+                    is_qwen_provider(run.provider_name)
+                    and review.provider_name == run.provider_name
+                )
+                or (
+                    is_qwen_provider(run.provider_name)
+                    and is_high_risk_component(task.component)
+                    and is_qwen_provider(review.provider_name)
+                )
+            ):
+                review.failure_reason = (
+                    "author and final reviewer are not sufficiently independent"
+                )
                 self.set_status(task, TaskStatus.BLOCKED)
                 return task
             try:
-                post_output = json.loads(
-                    Path(post_review.stdout_log_path).read_text(encoding="utf-8")
+                output = json.loads(
+                    Path(review.stdout_log_path).read_text(encoding="utf-8")
                 )
-                post_findings, dispositions = validate_post_repair_review(
-                    post_output, blockers
-                )
-            except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+                findings = parse_review_output(output)
+            except (json.JSONDecodeError, OSError, ValueError) as error:
+                review.failure_reason = f"invalid structured review output: {error}"
                 self.set_status(task, TaskStatus.FAILED)
                 return task
-            post_review.review_findings = post_findings
-            post_review.accepted_findings = list(dispositions)
-            post_review.rejected_findings = [
-                finding.to_dict() for finding in post_findings
+            blockers = blocking_findings(findings)
+            review.review_findings = findings
+            review.accepted_findings = [item.to_dict() for item in blockers]
+            review.rejected_findings = [
+                item.to_dict() for item in findings if item not in blockers
             ]
-            post_review.review_tree_identity = self._workspace_identity(workspace.path)[1]
-            self._save_run(post_review)
+            review.review_tree_identity = self._workspace_identity(workspace.path)[1]
+            self._save_run(review)
             record_cleanup(
-                post_findings,
-                self.config.state_root / "cleanup-register.json",
-                task.id,
+                findings, self.config.state_root / "cleanup-register.json", task.id
             )
-            review = post_review
+        else:
+            review = self._latest_run(task.id, {"reviewer"})
+            blockers = [
+                Finding.from_dict(item) for item in review.accepted_findings
+            ]
+
+        if blockers:
+            if start <= stages["repair_execution"]:
+                self.set_status(task, TaskStatus.REPAIRING)
+                self._set_stage(task, "REPAIRING")
+                pre_repair_identity = self._workspace_identity(workspace.path)
+                repair = self._run_agent(
+                    task,
+                    "repairer",
+                    workspace,
+                    self._prompt(
+                        task, "repairer", self._diff(workspace.path), blockers
+                    ),
+                )
+                if repair.process_exit_code:
+                    self.set_status(task, TaskStatus.BLOCKED)
+                    return task
+                if self._workspace_identity(workspace.path) == pre_repair_identity:
+                    repair.failure_reason = (
+                        "repairer reported success without changing workspace state"
+                    )
+                    self._save_run(repair)
+                    self.set_status(task, TaskStatus.BLOCKED)
+                    return task
+                review.repair_history.append(repair.run_id)
+                self._save_run(review)
+            else:
+                repair = self._latest_run(task.id, {"repairer"})
+            if start <= stages["post_repair_verification"]:
+                if start == stages["post_repair_verification"]:
+                    task.status = TaskStatus.REPAIRING
+                    self.save_task(task)
+                self._set_stage(task, "POST_REPAIR_REVIEWING")
+                post_review = self._run_agent(
+                    task,
+                    "post_repair_reviewer",
+                    workspace,
+                    self._prompt(
+                        task,
+                        "post_repair_reviewer",
+                        self._diff(workspace.path),
+                        blockers,
+                    ),
+                )
+                if post_review.process_exit_code:
+                    self.set_status(task, TaskStatus.FAILED)
+                    return task
+                if post_review.provider_instance_id in {
+                    run.provider_instance_id,
+                    repair.provider_instance_id,
+                }:
+                    self.set_status(task, TaskStatus.BLOCKED)
+                    return task
+                try:
+                    post_output = json.loads(
+                        Path(post_review.stdout_log_path).read_text(encoding="utf-8")
+                    )
+                    post_findings, dispositions = validate_post_repair_review(
+                        post_output, blockers
+                    )
+                except (
+                    json.JSONDecodeError,
+                    OSError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                ):
+                    self.set_status(task, TaskStatus.FAILED)
+                    return task
+                post_review.review_findings = post_findings
+                post_review.accepted_findings = list(dispositions)
+                post_review.rejected_findings = [
+                    finding.to_dict() for finding in post_findings
+                ]
+                post_review.review_tree_identity = self._workspace_identity(
+                    workspace.path
+                )[1]
+                self._save_run(post_review)
+                record_cleanup(
+                    post_findings,
+                    self.config.state_root / "cleanup-register.json",
+                    task.id,
+                )
+                review = post_review
+            else:
+                review = self._latest_run(task.id, {"post_repair_reviewer"})
+        elif start in {
+            stages["repair_execution"],
+            stages["post_repair_verification"],
+        }:
+            raise PermissionError("selected repair stage has no accepted blockers")
+        elif start > stages["independent_audit"]:
+            review = self._latest_run(
+                task.id, {"post_repair_reviewer", "reviewer"}
+            )
+
         self.set_status(task, TaskStatus.FINAL_VERIFY)
         self._set_stage(task, "FINAL_VERIFYING")
-        enforce_path_scope(self.workspace_manager.changed_files(workspace.path), task.allowed_paths, task.blocked_paths)
+        enforce_path_scope(
+            self.workspace_manager.changed_files(workspace.path),
+            task.allowed_paths,
+            task.blocked_paths,
+        )
         if review.review_tree_identity is not None and (
             self._workspace_identity(workspace.path)[1] != review.review_tree_identity
         ):
             self.set_status(task, TaskStatus.BLOCKED)
             return task
-        passed, final_verification = self._verify(task, workspace, review.run_id, "final")
+        passed, final_verification = self._verify(
+            task, workspace, review.run_id, "final"
+        )
         review.verification_result = final_verification
         self._save_run(review)
         if not passed:
@@ -476,6 +590,24 @@ class Keeper:
         task.active_run_stage = None
         self.save_task(task)
         return task
+
+    def _latest_run(self, task_id: str, roles: set[str]) -> RunRecord:
+        candidates: list[tuple[float, Path]] = []
+        for path in (self.config.state_root / "runs").glob("*/run.json"):
+            try:
+                value = load_json(path, {})
+            except (OSError, json.JSONDecodeError):
+                continue
+            if value.get("task_id") == task_id and value.get("role") in roles:
+                candidates.append((path.stat().st_mtime, path))
+        if not candidates:
+            raise RuntimeError(
+                f"durable checkpoint is missing for roles: {sorted(roles)}"
+            )
+        value = load_json(max(candidates, key=lambda item: item[0])[1], {})
+        if not isinstance(value, dict):
+            raise RuntimeError("durable provider checkpoint is malformed")
+        return RunRecord.from_dict(value)
 
     def run_next(self) -> Task | None:
         task = self.queue.next()
