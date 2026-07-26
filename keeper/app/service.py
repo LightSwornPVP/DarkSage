@@ -113,7 +113,7 @@ class KeeperApplication:
         repository = str(values.get("repository") or (active or {}).get("repository", ""))
         if not repository:
             raise ValueError("task requires an active repository")
-        task = {
+        task: dict[str, Any] = {
             "id": task_id,
             "title": str(values["title"]),
             "objective": str(values["objective"]),
@@ -125,6 +125,7 @@ class KeeperApplication:
             "allowed_actions": list(values.get("allowed_actions", [])),
             "prohibited_actions": list(values.get("prohibited_actions", [])),
             "required_validations": list(values.get("required_validations", [])),
+            "verification_waivers": list(values.get("verification_waivers", [])),
             "required_reviewers": list(values.get("required_reviewers", ["independent"])),
             "completion_criteria": list(values.get("completion_criteria", [])),
             "delegation_mode": bool(values.get("delegation_mode", False)),
@@ -143,6 +144,21 @@ class KeeperApplication:
             "created_at": _now(),
         }
         self.store.upsert("tasks", task_id, task)
+        for waiver in task["verification_waivers"]:
+            if isinstance(waiver, dict) and waiver.get("waiver_id"):
+                stored_waiver = {
+                    **waiver,
+                    "id": str(waiver["waiver_id"]),
+                    "capability": "verification_waiver",
+                    "task_id": task_id,
+                    "run_id": waiver.get("run_id"),
+                    "issued_at": str(waiver.get("issued_at") or _now()),
+                    "consumed_at": waiver.get("consumed_at"),
+                    "revoked_at": waiver.get("revoked_at"),
+                }
+                self.store.upsert(
+                    "authorizations", str(waiver["waiver_id"]), stored_waiver
+                )
         return task
 
     def tasks(self) -> list[dict[str, Any]]:

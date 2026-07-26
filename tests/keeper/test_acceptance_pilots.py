@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from keeper.app.reporting import verify_evidence
@@ -50,6 +51,14 @@ def test_success_repair_and_no_repair_pilots_preserve_evidence(tmp_path: Path) -
         root = Path(str(run["evidence_root"]))
         verify_evidence(root)
         assert app.evidence_path(str(run["id"]), "json").is_file()
+        records = [
+            item
+            for item in app.store.list("verification_records")
+            if item.get("run_id") == run["id"]
+        ]
+        assert records
+        assert all(item["result"] == "passed" for item in records)
+        assert all(Path(str(item["output_path"])).is_file() for item in records)
     assert "repair_execution" in [item["to"] for item in repair["history"]]
     assert "repair_execution" not in [item["to"] for item in no_repair["history"]]
 
@@ -59,7 +68,7 @@ def test_same_identity_reviewer_pilot_blocks_without_approval(tmp_path: Path) ->
     run = app.execute_task(task(app, tmp_path / "repo", "blocked-reviewer"))
     assert run["stage"] == "blocked"
     assert run.get("outcome") != "approved"
-    assert "evidence_root" not in run
+    assert not (Path(str(run["evidence_root"])) / "final-report.json").exists()
 
 
 def test_history_filters_use_persisted_authoritative_fields(tmp_path: Path) -> None:
@@ -73,3 +82,57 @@ def test_history_filters_use_persisted_authoritative_fields(tmp_path: Path) -> N
     )
     assert [item["id"] for item in matches] == [run["id"]]
     assert app.filtered_runs(repository="C:/not-this-repository") == []
+
+
+def test_scoped_waiver_is_persisted_executed_and_reported(tmp_path: Path) -> None:
+    app = KeeperApplication(tmp_path / "data")
+    repo, head = repository(tmp_path / "repo")
+    app.add_project(repo)
+    waiver = {
+        "waiver_id": "waiver-task",
+        "category": "task",
+        "task_id": "placeholder",
+        "approving_authority": "Founder",
+        "reason": "Acceptance waiver pilot",
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+    }
+    created = app.create_task(
+        {
+            "title": "Waived verification",
+            "objective": "Persist a scoped waiver",
+            "baseline": head,
+            "target_branch": "keeper/waiver",
+            "included_paths": [".keeper-workflow/"],
+            "verification_waivers": [waiver],
+            "mock_scenario": "no-repair",
+        }
+    )
+    # Task identity is assigned during creation, so update the scoped record before execution.
+    waiver["task_id"] = created["id"]
+    created["verification_waivers"] = [waiver]
+    app.store.upsert("tasks", str(created["id"]), created)
+    app.store.upsert(
+        "authorizations",
+        "waiver-task",
+        {
+            **waiver,
+            "id": "waiver-task",
+            "capability": "verification_waiver",
+            "run_id": None,
+            "issued_at": datetime.now(UTC).isoformat(),
+            "consumed_at": None,
+            "revoked_at": None,
+        },
+    )
+    run = app.execute_task(str(created["id"]))
+    records = [
+        item
+        for item in app.store.list("verification_records")
+        if item.get("run_id") == run["id"]
+    ]
+    assert run["status"] == "COMPLETED"
+    assert records and all(item["result"] == "waived" for item in records)
+    report = (Path(str(run["evidence_root"])) / "final-report.json").read_text(
+        encoding="utf-8"
+    )
+    assert "waiver-task" in report

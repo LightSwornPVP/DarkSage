@@ -67,6 +67,12 @@ class KeeperViewModel:
     def evidence(self, run_id: str, kind: str) -> Path:
         return self.application.open_evidence(run_id, kind)
 
+    def retry(self, run_id: str, reason: str) -> dict[str, Any]:
+        return self.application.retry_run(run_id, reason)
+
+    def revoke_authorization(self, authorization_id: str) -> None:
+        self.application.revoke_authorization(authorization_id)
+
 
 class FirstRunController:
     STEPS = ("boundaries", "storage", "repository", "providers", "diagnostics", "demo")
@@ -230,6 +236,7 @@ class KeeperDesktop:
             ("Cancel", lambda: self._run_control("cancel")),
             ("Approve", lambda: self._run_control("approve")),
             ("Reject", lambda: self._run_control("reject")),
+            ("Retry", lambda: self._run_control("retry")),
             ("Open logs", lambda: self._open_evidence("folder")),
             ("Open evidence", lambda: self._open_evidence("folder")),
             ("Open report", lambda: self._open_evidence("markdown")),
@@ -434,8 +441,17 @@ class KeeperDesktop:
             "reject": lambda: self.view_model.reject(
                 self.current_run_id or "", "Founder", "Rejected in Keeper desktop"
             ),
+            "retry": lambda: self._select_retried_run(
+                self.view_model.retry(
+                    self.current_run_id or "", "Explicit desktop retry"
+                )
+            ),
         }
         self._handle(operations[action], f"Run action completed: {action}")
+
+    def _select_retried_run(self, run: dict[str, Any]) -> None:
+        self.current_run_id = str(run["id"])
+        self.root.after(250, self._poll_run)
 
     def _open_evidence(self, kind: str) -> None:
         if self.current_run_id is None:
@@ -477,6 +493,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--data-dir", type=Path)
     result.add_argument("--diagnostics", action="store_true")
     result.add_argument("--mock-demo", action="store_true")
+    result.add_argument("--ui-smoke", action="store_true")
     return result
 
 
@@ -488,6 +505,33 @@ def main(arguments: list[str] | None = None) -> int:
         return 0
     if options.mock_demo:
         print(json.dumps(application.run_mock_demo(), indent=2))
+        return 0
+    if options.ui_smoke:
+        application.finish_setup()
+        try:
+            desktop = KeeperDesktop(application)
+        except Exception as error:
+            if error.__class__.__name__ == "TclError":
+                print(
+                    json.dumps(
+                        {
+                            "ui_smoke": "unavailable",
+                            "reason": str(error),
+                        }
+                    )
+                )
+                return 78
+            raise
+        desktop.root.update_idletasks()
+        desktop.root.update()
+        tabs = desktop.notebook.tabs()  # type: ignore[no-untyped-call]
+        if len(tabs) < 8:
+            desktop.root.destroy()
+            raise RuntimeError("Keeper desktop smoke did not render all workflow tabs")
+        desktop.notebook.select(tabs[-1])  # type: ignore[no-untyped-call]
+        desktop.root.update()
+        desktop.root.destroy()
+        print(json.dumps({"ui_smoke": "passed", "rendered_tabs": len(tabs)}))
         return 0
     KeeperDesktop(application).run()
     return 0

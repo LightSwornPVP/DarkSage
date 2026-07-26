@@ -308,6 +308,12 @@ class WorkflowCoordinator:
             return
         if result.status.value != "COMPLETED":
             self.lifecycle.transition(run_id, RunStage.BLOCKED)
+            if result.status.value == "FAILED":
+                self.notify(
+                    "verification_failed",
+                    "Verification failed",
+                    f"Run {run_id}",
+                )
             self.notify("workflow_blocked", "Workflow blocked", f"Run {run_id}")
             return
         observer.finish_validation()
@@ -608,6 +614,12 @@ def _validate_task_scope(task: dict[str, Any], repository: Path) -> None:
 def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
     scenario = str(stored.get("mock_scenario", "repair"))
     final = "repaired\n" if scenario == "repair" else "built\n"
+    waivers = [
+        item
+        for item in stored.get("verification_waivers", [])
+        if isinstance(item, dict)
+    ]
+    waiver_id = str(waivers[0]["waiver_id"]) if waivers else None
     return Task(
         str(stored["id"]),
         str(stored["title"]),
@@ -627,6 +639,7 @@ def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
                 "arguments": ["keeper:file-equals", ".keeper-workflow/result.txt", "built\n"],
                 "validator": "file-equals",
                 "required": True,
+                "waiver_id": waiver_id,
             }
         ],
         final_verification_specs=[
@@ -635,11 +648,13 @@ def _domain_task(stored: dict[str, Any], run_id: str) -> Task:
                 "arguments": ["keeper:file-equals", ".keeper-workflow/result.txt", final],
                 "validator": "file-equals",
                 "required": True,
+                "waiver_id": waiver_id,
             }
         ],
         allowed_paths=[".keeper-workflow/"],
         capabilities=["repository_write", "run_verification"],
         provider="mock",
+        verification_waivers=waivers,
     )
 
 
