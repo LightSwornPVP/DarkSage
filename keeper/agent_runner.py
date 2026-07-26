@@ -63,6 +63,19 @@ class AgentRunner:
             record.process_id = process_id
             atomic_write_json(record_path, record.to_dict())
 
+        def process_owned(ownership: dict[str, object]) -> None:
+            record.process_ownership = {
+                **ownership,
+                "task_id": task.id,
+                "provider_run_id": run_id,
+                "stage_id": task.active_run_stage,
+                "provider_name": self.provider.provider_name,
+                "provider_instance_id": self.provider.instance_id,
+                "role": role,
+                "evidence_path": str(directory.resolve()),
+            }
+            atomic_write_json(record_path, record.to_dict())
+
         result = self.provider.run(
             AgentRequest(
                 role,
@@ -73,6 +86,7 @@ class AgentRunner:
                 stderr_path,
                 reasoning_level,
                 process_started,
+                process_owned,
             )
         )
         for log_path in (stdout_path, stderr_path):

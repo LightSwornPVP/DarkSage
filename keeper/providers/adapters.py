@@ -92,6 +92,7 @@ class ClaudeCommandAdapter(CliProvider):
             request.stderr_path,
             request.reasoning_level,
             request.on_process_started,
+            request.on_process_owned,
         )
         result = super().run(raw_request)
         if result.exit_code:

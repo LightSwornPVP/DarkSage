@@ -36,7 +36,12 @@ from keeper.providers.mock import MockProvider
 from keeper.providers.ollama import OllamaProvider
 from keeper.providers.routing import ProviderRouter
 from keeper.workspace import WorkspaceManager
-from keeper.recovery import load_json, process_exists
+from keeper.recovery import (
+    load_json,
+    process_exists,
+    process_identity,
+    process_identity_matches,
+)
 
 
 @dataclass(slots=True)
@@ -111,14 +116,23 @@ class WorkflowCoordinator:
             if not run_id:
                 continue
             stage = str(record.get("stage", ""))
+            ownership = _active_provider_ownership(record)
             pid = record.get("process_id")
+            if not isinstance(pid, int) and isinstance(ownership, dict):
+                pid = ownership.get("pid")
             if not isinstance(pid, int):
                 pid = _active_provider_pid(record)
             running = isinstance(pid, int) and process_exists(pid)
             terminated = False
+            identity_verified = False
             if running and isinstance(pid, int):
-                terminated = _terminate_attributable_tree(pid)
-                running = not terminated
+                current_identity = process_identity(pid)
+                identity_verified = process_identity_matches(
+                    ownership, current_identity
+                )
+                if identity_verified:
+                    terminated = _terminate_attributable_tree(pid)
+                    running = not terminated
             if stage != RunStage.INTERRUPTED.value:
                 try:
                     self.lifecycle.transition(run_id, RunStage.INTERRUPTED)
@@ -129,11 +143,17 @@ class WorkflowCoordinator:
                 {
                     "status": "interrupted",
                     "recovery": {
-                        "classification": "uncertain" if running else "recoverable",
+                        "classification": (
+                            "uncertain"
+                            if running and not identity_verified
+                            else "recoverable"
+                        ),
                         "previous_process_running": running,
                         "provider_process_id": pid,
                         "attributable_tree_terminated": terminated,
-                        "retry_safe": stage
+                        "identity_verified": identity_verified,
+                        "recorded_ownership": ownership,
+                        "retry_safe": not running and stage
                         not in {
                             RunStage.AUTHORIZED_COMMIT.value,
                             RunStage.AUTHORIZED_PUSH.value,
@@ -1005,6 +1025,27 @@ def _active_provider_pid(record: dict[str, Any]) -> int | None:
         pid = value.get("process_id")
         if value.get("status") == "running" and isinstance(pid, int):
             return pid
+    return None
+
+
+def _active_provider_ownership(
+    record: dict[str, Any],
+) -> dict[str, object] | None:
+    root = record.get("evidence_root")
+    if not isinstance(root, str):
+        return None
+    for path in sorted(
+        Path(root).glob(".ai-workflow/runs/*/run.json"),
+        key=lambda item: item.stat().st_mtime if item.exists() else 0,
+        reverse=True,
+    ):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        ownership = value.get("process_ownership")
+        if value.get("status") == "running" and isinstance(ownership, dict):
+            return ownership
     return None
 
 

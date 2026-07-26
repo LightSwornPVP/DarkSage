@@ -20,6 +20,7 @@ class RunRecord:
     status: str = "running"
     process_exit_code: int | None = None
     process_id: int | None = None
+    process_ownership: dict[str, Any] | None = None
     workspace_path: str = ""
     branch_name: str = ""
     prompt_path: str = ""

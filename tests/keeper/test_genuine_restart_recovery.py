@@ -79,6 +79,7 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
     provider_record = provider_directory / "run.json"
     started = threading.Event()
     process_ids: list[int] = []
+    ownership_records: list[dict[str, object]] = []
     results: list[ProcessResult] = []
 
     def process_started(pid: int) -> None:
@@ -101,6 +102,21 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
         )
         started.set()
 
+    def process_owned(ownership: dict[str, object]) -> None:
+        ownership_records.append(
+            {
+                **ownership,
+                "task_id": "task-interrupted",
+                "provider_run_id": "provider-active",
+                "provider_name": "controlled-command",
+                "role": "builder",
+                "evidence_path": str(provider_directory.resolve()),
+            }
+        )
+        value = json.loads(provider_record.read_text(encoding="utf-8"))
+        value["process_ownership"] = ownership_records[-1]
+        provider_record.write_text(json.dumps(value), encoding="utf-8")
+
     provider = CliProvider((str(slow), "{prompt}"), "controlled-command")
     thread = threading.Thread(
         target=lambda: results.append(
@@ -113,6 +129,7 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
                     stdout,
                     stderr,
                     on_process_started=process_started,
+                    on_process_owned=process_owned,
                 )
             )
         ),
@@ -122,6 +139,10 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
     assert started.wait(5)
     pid = process_ids[0]
     assert process_exists(pid)
+    ownership_deadline = time.monotonic() + 5
+    while time.monotonic() < ownership_deadline and not ownership_records:
+        time.sleep(0.01)
+    assert ownership_records
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and (
         not stdout.exists() or "provider-progress" not in stdout.read_text(encoding="utf-8")
@@ -144,6 +165,7 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
     recovery = recovered["recovery"]
     assert recovery["provider_process_id"] == pid
     assert recovery["attributable_tree_terminated"] is True
+    assert recovery["identity_verified"] is True
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert results and results[0].exit_code != 0

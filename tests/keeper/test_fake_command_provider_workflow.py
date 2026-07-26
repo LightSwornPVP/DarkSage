@@ -91,6 +91,7 @@ def test_controlled_command_adapters_complete_full_repair_workflow(
             "target_branch": "keeper/controlled",
             "included_paths": [".keeper-workflow/"],
             "provider_policy": "automatic",
+            "is_demo": True,
         }
     )
     run = app.execute_task(str(task["id"]))
@@ -145,6 +146,7 @@ def test_selected_provider_stage_retry_does_not_repeat_verified_stages(
             "target_branch": f"keeper/retry-{failed_role}",
             "included_paths": [".keeper-workflow/"],
             "provider_policy": "automatic",
+            "is_demo": True,
         }
     )
     failed = app.execute_task(str(task["id"]))
@@ -233,6 +235,7 @@ def test_selected_verification_retry_does_not_repeat_provider_stages(
             "target_branch": f"keeper/retry-{verification_name}",
             "included_paths": [".keeper-workflow/"],
             "provider_policy": "automatic",
+            "is_demo": True,
         }
     )
     failed = app.execute_task(str(task["id"]))
@@ -284,6 +287,7 @@ def test_author_stage_retry_after_timeout_or_cancellation(
             "target_branch": f"keeper/retry-{stop_mode}",
             "included_paths": [".keeper-workflow/"],
             "provider_policy": "automatic",
+            "is_demo": True,
         }
     )
     task["timeout_seconds"] = 1 if stop_mode == "timeout" else 30

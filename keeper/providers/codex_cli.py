@@ -13,6 +13,7 @@ from typing import Any, TextIO
 
 from keeper.policies import filtered_environment
 from keeper.providers.base import AgentProvider, AgentRequest, ProcessResult
+from keeper.recovery import process_identity
 
 
 class CliProvider(AgentProvider):
@@ -102,6 +103,22 @@ class CliProvider(AgentProvider):
             try:
                 if request.on_process_started is not None:
                     request.on_process_started(process.pid)
+                if request.on_process_owned is not None:
+                    identity = process_identity(process.pid)
+                    if identity is None:
+                        raise RuntimeError("provider process ownership could not be established")
+                    request.on_process_owned(
+                        {
+                            **identity,
+                            "launch_nonce": uuid.uuid4().hex,
+                            "job_or_group_identity": (
+                                f"windows-job:{job}"
+                                if os.name == "nt"
+                                else f"process-group:{process.pid}"
+                            ),
+                            "started_at": identity.get("creation_time"),
+                        }
+                    )
                 exit_code = process.wait(timeout=request.timeout_seconds)
                 self._terminate_remaining_group(process, job)
                 return ProcessResult(exit_code, request.stdout_path, request.stderr_path, process.pid)

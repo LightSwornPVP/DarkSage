@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 import uuid
-from typing import Callable
+from typing import Any, Callable
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +17,7 @@ class AgentRequest:
     stderr_path: Path
     reasoning_level: str = "medium"
     on_process_started: Callable[[int], None] | None = None
+    on_process_owned: Callable[[dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
