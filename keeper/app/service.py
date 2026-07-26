@@ -134,6 +134,11 @@ class KeeperApplication:
             "requires_manual_approval": bool(
                 values.get("requires_manual_approval", False)
             ),
+            "commit_requested": bool(values.get("commit_requested", False)),
+            "push_requested": bool(values.get("push_requested", False)),
+            "commit_message": str(values.get("commit_message", values["title"])),
+            "push_remote": str(values.get("push_remote", "origin")),
+            "push_destination": str(values.get("push_destination", "")),
             "status": "INTAKE",
             "created_at": _now(),
         }
@@ -171,7 +176,30 @@ class KeeperApplication:
                     latest = redact_text(logs[-1].read_text(encoding="utf-8"), 20_000)
                 except OSError:
                     latest = ""
-        return {**run, "latest_log": latest}
+        verification = [
+            item
+            for item in self.store.list("verification_records")
+            if item.get("run_id") == run_id
+        ]
+        waivers = [
+            item
+            for item in self.store.list("authorizations")
+            if item.get("capability") == "verification_waiver"
+            and item.get("run_id") in {None, run_id}
+            and item.get("task_id") == run.get("task_id")
+        ]
+        return {
+            **run,
+            "latest_log": latest,
+            "verification_records": verification,
+            "verification_waivers": waivers,
+        }
+
+    def revoke_waiver(self, authorization_id: str) -> None:
+        value = self.store.get("authorizations", authorization_id)
+        if value is None or value.get("capability") != "verification_waiver":
+            raise LookupError("verification waiver not found")
+        self.revoke_authorization(authorization_id)
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         return self.workflow.start(task_id)

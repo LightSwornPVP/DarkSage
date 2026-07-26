@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from keeper.agent_runner import AgentRunner
 from keeper.app.lifecycle import RunLifecycle, RunStage
+from keeper.app.git_safety import GitSafetyService
 from keeper.app.reporting import finalize_evidence
 from keeper.app.storage import KeeperStore
 from keeper.config import KeeperConfig
@@ -310,6 +311,32 @@ class WorkflowCoordinator:
             self.notify("workflow_blocked", "Workflow blocked", f"Run {run_id}")
             return
         observer.finish_validation()
+        workspace_path = Path(str(result.workspace_path)).resolve()
+        git = GitSafetyService()
+        changed_paths = engine.workspace_manager.changed_files(workspace_path)
+        record = self._run(run_id)
+        record.update(
+            {
+                "worktree": str(workspace_path),
+                "worktree_branch": result.branch_name,
+                "worktree_head": git.inspect(workspace_path).head,
+                "changed_paths": changed_paths,
+            }
+        )
+        self.store.upsert("runs", run_id, record)
+        if bool(stored.get("commit_requested", False)):
+            git.stage_allowlisted(
+                workspace_path,
+                changed_paths,
+                [".keeper-workflow/"],
+                [],
+            )
+            record = self._run(run_id)
+            record["staged_paths"] = git.inspect(workspace_path).staged
+            self.store.upsert("runs", run_id, record)
+        semantic_records = self._persist_semantic_evidence(
+            run_id, str(stored["id"]), state
+        )
         if bool(stored.get("requires_manual_approval", False)):
             record = self._run(run_id)
             record["status"] = "awaiting_approval"
@@ -331,6 +358,58 @@ class WorkflowCoordinator:
                 self.notify("run_rejected", "Run rejected", f"Run {run_id}")
                 return
             self.notify("run_approved", "Run approved", f"Run {run_id}")
+        git_result: dict[str, Any] = {}
+        if bool(stored.get("commit_requested", False)):
+            self.lifecycle.transition(run_id, RunStage.AUTHORIZED_COMMIT)
+            authorization = self._authorization("commit", run_id, str(stored["id"]))
+            git.commit(
+                repository,
+                str(stored.get("commit_message", stored["title"])),
+                authorization,
+                task_id=str(stored["id"]),
+                run_id=run_id,
+                worktree=workspace_path,
+                branch=str(result.branch_name),
+            )
+            self.store.upsert(
+                "authorizations", str(authorization["id"]), authorization
+            )
+            commit_hash = git.inspect(workspace_path).head
+            git_result["commit_hash"] = commit_hash
+            if bool(stored.get("push_requested", False)):
+                record = self._run(run_id)
+                record.update(
+                    {
+                        "status": "awaiting_push_authorization",
+                        "commit_hash": commit_hash,
+                    }
+                )
+                self.store.upsert("runs", run_id, record)
+                authorization = self._wait_for_authorization(
+                    "push", run_id, str(stored["id"]), cancel
+                )
+                self.lifecycle.transition(run_id, RunStage.AUTHORIZED_PUSH)
+                remote = str(stored.get("push_remote", "origin"))
+                source = str(result.branch_name)
+                destination = str(
+                    stored.get("push_destination") or f"refs/heads/{source}"
+                )
+                push_result = git.push(
+                    repository,
+                    remote,
+                    source,
+                    destination,
+                    authorization,
+                    task_id=str(stored["id"]),
+                    run_id=run_id,
+                    worktree=workspace_path,
+                )
+                self.store.upsert(
+                    "authorizations", str(authorization["id"]), authorization
+                )
+                git_result.update(
+                    {"push_result": push_result, "remote_hash": commit_hash}
+                )
         report = {
             **self._run(run_id),
             "task": stored,
@@ -338,6 +417,15 @@ class WorkflowCoordinator:
             "terminal_status": "COMPLETED",
             "end_time": _now(),
             "evidence_paths": str(evidence),
+            "verification_records": semantic_records,
+            "verification_waivers": [
+                item
+                for item in self.store.list("authorizations")
+                if item.get("capability") == "verification_waiver"
+                and item.get("task_id") == stored["id"]
+                and item.get("run_id") in {None, run_id}
+            ],
+            "git_result": git_result,
         }
         finalize_evidence(evidence, report)
         self._advance(run_id, RunStage.EVIDENCE_FINALIZATION)
@@ -351,10 +439,82 @@ class WorkflowCoordinator:
                 "evidence_root": str(evidence),
                 "report_markdown": str(evidence / "final-report.md"),
                 "report_json": str(evidence / "final-report.json"),
+                "git_result": git_result,
             }
         )
         self.store.upsert("runs", run_id, record)
         self.notify("run_completed", "Run completed", f"Run {run_id}")
+
+    def _persist_semantic_evidence(
+        self, run_id: str, task_id: str, state: Path
+    ) -> list[dict[str, Any]]:
+        persisted: list[dict[str, Any]] = []
+        for path in sorted(state.glob("runs/*/run.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            verification = payload.get("verification_result")
+            if not isinstance(verification, dict):
+                continue
+            commands = verification.get("semantic_commands", [])
+            if not isinstance(commands, list):
+                continue
+            for item in commands:
+                if not isinstance(item, dict) or not item.get("command_id"):
+                    continue
+                record = {
+                    **item,
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "provider_run_id": payload.get("run_id"),
+                    "stage": verification.get("stage"),
+                }
+                identifier = str(item["command_id"])
+                self.store.upsert("verification_records", identifier, record)
+                self.store.upsert("commands", identifier, record)
+                persisted.append(record)
+        return persisted
+
+    def _authorization(
+        self, capability: str, run_id: str, task_id: str
+    ) -> dict[str, Any]:
+        matches = [
+            item
+            for item in self.store.list("authorizations")
+            if item.get("capability") == capability
+            and item.get("run_id") == run_id
+            and item.get("task_id") == task_id
+            and item.get("consumed_at") is None
+            and item.get("revoked_at") is None
+        ]
+        if len(matches) != 1:
+            raise PermissionError(
+                f"exactly one scoped {capability} authorization is required"
+            )
+        return matches[0]
+
+    def _wait_for_authorization(
+        self,
+        capability: str,
+        run_id: str,
+        task_id: str,
+        cancel: threading.Event,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + 60
+        self.notify(
+            "authorization_required",
+            f"{capability.title()} authorization required",
+            f"Run {run_id}",
+        )
+        while time.monotonic() < deadline:
+            if cancel.is_set():
+                raise RuntimeError("run cancellation requested")
+            try:
+                return self._authorization(capability, run_id, task_id)
+            except PermissionError:
+                time.sleep(0.1)
+        raise PermissionError(f"{capability} authorization was not provided")
 
     def _advance(self, run_id: str, stage: RunStage) -> None:
         self.lifecycle.transition(run_id, stage)
