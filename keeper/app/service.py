@@ -11,6 +11,7 @@ from keeper.app.demo import run_mock_demonstration
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence
+from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.providers.adapters import ProviderDiscovery
 
@@ -213,8 +214,8 @@ class KeeperApplication:
         value = {
             "id": identifier,
             "event": event,
-            "title": _redact(title),
-            "detail": _redact(detail),
+            "title": redact_text(title, 120),
+            "detail": redact_text(detail, 1000),
             "created_at": _now(),
             "read_at": None,
         }
@@ -282,16 +283,6 @@ def _writable(directory: Path) -> bool:
         return True
     except OSError:
         return False
-
-
-def _redact(value: str) -> str:
-    import re
-
-    return re.sub(
-        r"(?i)(token|secret|password|api[_-]?key)(\s*[:=]\s*)\S+",
-        r"\1\2[REDACTED]",
-        value,
-    )[:1000]
 
 
 def _now() -> str:
