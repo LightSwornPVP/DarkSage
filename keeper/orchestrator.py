@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from keeper.agent_runner import AgentRunner
+from keeper.app.verification_policy import VerificationSpec, validate_semantic_bindings
 from keeper.config import KeeperConfig
 from keeper.models.finding import Finding
 from keeper.models.task import Task, now_iso
@@ -151,13 +152,39 @@ class Keeper:
     ) -> tuple[bool, dict[str, object]]:
         if not task.verification_commands:
             raise ValueError("executable task requires mandatory verification commands")
-        specifications = (
-            task.final_verification_commands or task.verification_commands
+        raw_specs = (
+            (task.final_verification_specs or task.verification_specs)
             if stage == "final"
-            else task.verification_commands
+            else task.verification_specs
         )
-        commands = [VerificationCommand(arguments=item) for item in specifications]
-        if len(commands) < len(task.required_verification_categories):
+        if raw_specs:
+            semantic_specs = [
+                VerificationSpec(
+                    category=str(item["category"]),
+                    arguments=[str(value) for value in item["arguments"]],
+                    validator=str(item["validator"]),
+                    required=bool(item.get("required", True)),
+                    waiver_id=(
+                        str(item["waiver_id"]) if item.get("waiver_id") is not None else None
+                    ),
+                )
+                for item in raw_specs
+            ]
+            validate_semantic_bindings(
+                semantic_specs, task.required_verification_categories
+            )
+            commands = [
+                VerificationCommand(arguments=spec.arguments, required=spec.required)
+                for spec in semantic_specs
+            ]
+        else:
+            specifications = (
+                task.final_verification_commands or task.verification_commands
+                if stage == "final"
+                else task.verification_commands
+            )
+            commands = [VerificationCommand(arguments=item) for item in specifications]
+        if not raw_specs and len(commands) < len(task.required_verification_categories):
             raise ValueError("mandatory verification categories are incomplete")
         before = self._workspace_identity(workspace.path)
         results = self.verifier.run(workspace.path, commands)

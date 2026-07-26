@@ -26,6 +26,9 @@ class Task:
     acceptance_criteria: list[str] = field(default_factory=list)
     verification_commands: list[list[str]] = field(default_factory=list)
     final_verification_commands: list[list[str]] = field(default_factory=list)
+    verification_specs: list[dict[str, Any]] = field(default_factory=list)
+    final_verification_specs: list[dict[str, Any]] = field(default_factory=list)
+    verification_waivers: list[dict[str, Any]] = field(default_factory=list)
     required_verification_categories: list[str] = field(default_factory=lambda: ["task"])
     capabilities: list[str] = field(default_factory=list)
     allowed_paths: list[str] = field(default_factory=lambda: ["keeper/"])
@@ -56,6 +59,10 @@ class Task:
         final_commands = values.get("final_verification_commands", [])
         if not all(isinstance(command, list) and command for command in final_commands):
             raise ValueError("final_verification_commands must be non-empty argument arrays")
+        for field_name in ("verification_specs", "final_verification_specs"):
+            specs = values.get(field_name, [])
+            if not isinstance(specs, list) or not all(isinstance(spec, dict) for spec in specs):
+                raise ValueError(f"{field_name} must be an object array")
         categories = values.get("required_verification_categories", ["task"])
         if not isinstance(categories, list) or not categories or not all(
             isinstance(category, str) and category.strip() for category in categories
