@@ -165,9 +165,13 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
     assert "provider-progress" in live_output
     assert "super-secret" not in live_output
     assert "[REDACTED]" in live_output
-    while time.monotonic() < deadline and not child_pid_path.exists():
-        time.sleep(0.05)
-    child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+    child_pid: int | None = None
+    while time.monotonic() < deadline and child_pid is None:
+        try:
+            child_pid = int(child_pid_path.read_text(encoding="utf-8").strip())
+        except (FileNotFoundError, PermissionError, ValueError):
+            time.sleep(0.05)
+    assert child_pid is not None
     assert process_exists(child_pid)
 
     restarted = KeeperApplication(data)
