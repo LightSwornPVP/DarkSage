@@ -1332,7 +1332,47 @@ class WorkflowCoordinator:
         if event.get("event") == "started":
             if matches:
                 raise PermissionError("duplicate provider execution attempt")
-            executions.append({**event, "status": "EXECUTION_STARTED"})
+            route_attempts = record.get("routing_attempts", [])
+            latest_route = (
+                route_attempts[-1]
+                if isinstance(route_attempts, list) and route_attempts
+                else {}
+            )
+            decisions = (
+                latest_route.get("decisions", [])
+                if isinstance(latest_route, dict)
+                else []
+            )
+            matching_routes = [
+                item
+                for item in decisions
+                if isinstance(item, dict)
+                and item.get("role") == event.get("role")
+                and item.get("provider_instance_id")
+                == event.get("provider_instance_id")
+            ]
+            if len(matching_routes) != 1:
+                raise PermissionError(
+                    "provider execution has no unique selected routing identity"
+                )
+            route = matching_routes[0]
+            executions.append(
+                {
+                    **event,
+                    "attempt_number": latest_route.get("attempt_number"),
+                    "retry_parent": latest_route.get("retry_of"),
+                    "reroute_authorization_id": latest_route.get(
+                        "reroute_authorization_id"
+                    ),
+                    "stable_registration_digest": route.get(
+                        "stable_registration_digest"
+                    ),
+                    "stable_registration": route.get("stable_registration"),
+                    "executable": route.get("executable"),
+                    "executable_sha256": route.get("executable_sha256"),
+                    "status": "EXECUTION_STARTED",
+                }
+            )
         elif event.get("event") == "finished":
             if len(matches) != 1:
                 raise PermissionError("provider completion has no unique start record")
