@@ -198,6 +198,11 @@ class Keeper:
                         if item.get("expected_sha256") is not None
                         else None
                     ),
+                    expected_executable_sha256=(
+                        str(item["expected_executable_sha256"])
+                        if item.get("expected_executable_sha256") is not None
+                        else None
+                    ),
                 )
                 for item in raw_specs
             ]
@@ -222,6 +227,7 @@ class Keeper:
                 task.required_verification_categories,
                 waivers,
                 task.id,
+                trusted_root=self.config.repository_root,
             )
             executable_specs = [
                 spec for spec in semantic_specs if spec.waiver_id is None
@@ -233,6 +239,8 @@ class Keeper:
                     validator=spec.validator,
                     registration_id=spec.registration_id,
                     expected_sha256=spec.expected_sha256,
+                    expected_executable_sha256=spec.expected_executable_sha256,
+                    trusted_root=self.config.repository_root,
                 )
                 for spec in executable_specs
             ]

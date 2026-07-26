@@ -98,6 +98,30 @@ def test_task_scope_rejects_traversal_and_symlink_escape(tmp_path: Path) -> None
         app.create_task(_normal_values(head, "linked/"))
 
 
+def test_desktop_rejects_caller_controlled_verification_specs(
+    tmp_path: Path,
+) -> None:
+    repository, head = _repository(tmp_path / "repo")
+    app = KeeperApplication(tmp_path / "data")
+    app.add_project(repository)
+    hostile = tmp_path / "zero.cmd"
+    hostile.write_text("@exit /b 0\r\n", encoding="ascii")
+    with pytest.raises(PermissionError, match="immutable registered"):
+        app.create_task(
+            {
+                **_normal_values(head, "src/"),
+                "verification_specs": [
+                    {
+                        "category": "task",
+                        "validator": "registered-command",
+                        "arguments": [str(hostile)],
+                        "registration_id": "caller-controlled",
+                    }
+                ],
+            }
+        )
+
+
 def test_first_run_default_and_task_override_are_applied(tmp_path: Path) -> None:
     repository, head = _repository(tmp_path / "repo")
     app = KeeperApplication(tmp_path / "data")

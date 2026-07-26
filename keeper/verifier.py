@@ -9,6 +9,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from keeper.models.task import now_iso
+from keeper.app.verification_policy import trusted_bash_launcher
 
 from keeper.policies import filtered_environment
 from keeper.policies import resolve_within
@@ -22,6 +23,8 @@ class VerificationCommand:
     validator: str | None = None
     registration_id: str | None = None
     expected_sha256: str | None = None
+    expected_executable_sha256: str | None = None
+    trusted_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,13 +158,38 @@ class Verifier:
         ):
             validator = command.arguments[2]
         if validator in {"pytest", "mypy", "compileall"}:
+            registered_arguments = {
+                "pytest": ["{python}", "-m", "pytest", "-q"],
+                "mypy": [
+                    "{python}",
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "keeper",
+                    "tests/keeper",
+                ],
+                "compileall": [
+                    "{python}",
+                    "-m",
+                    "compileall",
+                    "-q",
+                    "keeper",
+                    "tests/keeper",
+                ],
+            }[validator]
+            registered_id = {
+                "pytest": "keeper:tests:v1",
+                "mypy": "keeper:typing:v1",
+                "compileall": "keeper:compilation:v1",
+            }[validator]
+            executable = Path(sys.executable).resolve()
+            executable_digest = hashlib.sha256(executable.read_bytes()).hexdigest()
             if (
-                len(command.arguments) < 3
-                or command.arguments[0] != "{python}"
-                or command.arguments[1:3] != ["-m", validator]
+                command.arguments != registered_arguments
+                or command.registration_id != registered_id
+                or command.expected_executable_sha256 != executable_digest
             ):
                 raise PermissionError("trusted Python validator command is not registered")
-            executable = Path(sys.executable).resolve()
             module_identity = Verifier._resolve_module_identity(
                 executable, validator, environment
             )
@@ -182,6 +210,7 @@ class Verifier:
                 "registration_id": command.registration_id or f"python-module:{validator}",
                 "validator": validator,
                 "canonical_executable": str(executable),
+                "executable_sha256": executable_digest,
                 "interpreter_version": sys.version,
                 "module": validator,
                 "module_origin": str(origin),
@@ -190,29 +219,60 @@ class Verifier:
                 "environment_policy": "isolated-no-user-site-no-pythonpath",
             }
             return (
-                [str(executable), "-I", "-m", validator, *command.arguments[3:]],
+                [str(executable), "-I", *command.arguments[1:]],
                 identity,
                 environment,
             )
         if validator == "foundation-script":
-            candidates = [
-                Path(value)
-                for value in command.arguments
-                if value.replace("\\", "/").endswith("scripts/verify-foundation.sh")
-            ]
-            if len(candidates) != 1 or command.expected_sha256 is None:
+            if (
+                len(command.arguments) != 2
+                or command.registration_id != "keeper:foundation:v1"
+                or command.expected_sha256 is None
+                or command.expected_executable_sha256 is None
+                or command.trusted_root is None
+            ):
                 raise PermissionError("foundation validator registration is incomplete")
-            script = candidates[0]
-            if not script.is_absolute() or script.is_symlink():
-                raise PermissionError("foundation validator must be an absolute regular file")
+            launcher = Path(command.arguments[0])
+            script = Path(command.arguments[1])
+            if (
+                not launcher.is_absolute()
+                or launcher.is_symlink()
+                or not launcher.is_file()
+                or not script.is_absolute()
+                or script.is_symlink()
+            ):
+                raise PermissionError(
+                    "foundation launcher and validator must be absolute regular files"
+                )
+            resolved_launcher = launcher.resolve(strict=True)
+            registered_launcher = trusted_bash_launcher()
+            if (
+                registered_launcher is None
+                or resolved_launcher != registered_launcher
+            ):
+                raise PermissionError(
+                    "foundation launcher does not match its immutable registration"
+                )
             resolved = script.resolve(strict=True)
+            expected_script = (
+                command.trusted_root.resolve()
+                / "scripts"
+                / "verify-foundation.sh"
+            ).resolve(strict=True)
+            if resolved != expected_script:
+                raise PermissionError("foundation script is outside its trusted root")
             digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
-            if digest != command.expected_sha256:
-                raise PermissionError("foundation validator changed after registration")
-            arguments = [
-                str(resolved) if Path(value) == script else value
-                for value in command.arguments
-            ]
+            launcher_digest = hashlib.sha256(
+                resolved_launcher.read_bytes()
+            ).hexdigest()
+            if (
+                digest != command.expected_sha256
+                or launcher_digest != command.expected_executable_sha256
+            ):
+                raise PermissionError(
+                    "foundation launcher or validator changed after registration"
+                )
+            arguments = [str(resolved_launcher), str(resolved)]
             return (
                 arguments,
                 {
@@ -221,26 +281,13 @@ class Verifier:
                     "validator": validator,
                     "resolved_script": str(resolved),
                     "script_sha256": digest,
+                    "canonical_executable": str(resolved_launcher),
+                    "executable_sha256": launcher_digest,
                     "environment_policy": "filtered",
                 },
                 environment,
             )
-        arguments = [
-            str(Path(sys.executable).resolve()) if item == "{python}" else item
-            for item in command.arguments
-        ]
-        return (
-            arguments,
-            {
-                "registration_id": command.registration_id or validator or "legacy",
-                "validator": validator or "legacy",
-                "canonical_executable": str(Path(arguments[0]).resolve())
-                if Path(arguments[0]).exists()
-                else arguments[0],
-                "environment_policy": "filtered",
-            },
-            environment,
-        )
+        raise PermissionError("verification command has no immutable registration")
 
     @staticmethod
     def _resolve_module_identity(

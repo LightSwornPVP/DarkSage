@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
+import os
 from pathlib import Path
+import sys
 from typing import Iterable
 
 
@@ -16,6 +18,7 @@ class VerificationSpec:
     waiver_id: str | None = None
     registration_id: str | None = None
     expected_sha256: str | None = None
+    expected_executable_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +37,7 @@ REGISTERED_CATEGORIES: dict[str, frozenset[str]] = {
     "typing": frozenset({"mypy"}),
     "compilation": frozenset({"compileall"}),
     "foundation": frozenset({"foundation-script"}),
-    "task": frozenset({"file-equals", "registered-command"}),
+    "task": frozenset({"file-equals"}),
     "security": frozenset({"security-scan"}),
     "packaging": frozenset({"package-smoke"}),
 }
@@ -46,6 +49,7 @@ def validate_semantic_bindings(
     waivers: Iterable[VerificationWaiver] = (),
     task_id: str | None = None,
     now: datetime | None = None,
+    trusted_root: Path | None = None,
 ) -> None:
     values = list(specs)
     if not values:
@@ -61,7 +65,7 @@ def validate_semantic_bindings(
             raise ValueError(
                 f"validator {spec.validator!r} cannot satisfy category {spec.category!r}"
             )
-        _validate_command_pattern(spec)
+        _validate_command_pattern(spec, trusted_root)
         fingerprint = tuple(spec.arguments)
         if fingerprint in seen_commands:
             raise ValueError("the same command cannot be counted more than once")
@@ -117,44 +121,94 @@ def environment_summary(environment: dict[str, str]) -> dict[str, object]:
     return {"available_keys": safe_keys, "secret_values_included": False}
 
 
-def _validate_command_pattern(spec: VerificationSpec) -> None:
+def trusted_bash_launcher() -> Path | None:
+    candidates = (
+        (
+            Path("C:/Program Files/Git/bin/bash.exe"),
+            Path("C:/Program Files/Git/usr/bin/bash.exe"),
+        )
+        if os.name == "nt"
+        else (Path("/bin/bash"), Path("/usr/bin/bash"))
+    )
+    for candidate in candidates:
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate.resolve()
+    return None
+
+
+def _validate_command_pattern(
+    spec: VerificationSpec, trusted_root: Path | None
+) -> None:
     args = [item.lower().replace("\\", "/") for item in spec.arguments]
-    if spec.validator == "pytest" and not _trusted_module_command(args, "pytest"):
-        raise ValueError("pytest category requires a Python pytest module command")
-    if spec.validator == "mypy" and not _trusted_module_command(args, "mypy"):
-        raise ValueError("typing category requires a Python mypy module command")
-    if spec.validator == "compileall" and not _trusted_module_command(args, "compileall"):
-        raise ValueError("compilation category requires Python compileall")
+    python_registrations = {
+        "pytest": (
+            "keeper:tests:v1",
+            ["{python}", "-m", "pytest", "-q"],
+        ),
+        "mypy": (
+            "keeper:typing:v1",
+            ["{python}", "-m", "mypy", "--strict", "keeper", "tests/keeper"],
+        ),
+        "compileall": (
+            "keeper:compilation:v1",
+            [
+                "{python}",
+                "-m",
+                "compileall",
+                "-q",
+                "keeper",
+                "tests/keeper",
+            ],
+        ),
+    }
+    if spec.validator in python_registrations:
+        registration_id, registered_arguments = python_registrations[spec.validator]
+        if (
+            spec.registration_id != registration_id
+            or spec.arguments != registered_arguments
+            or spec.expected_executable_sha256
+            != hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest()
+        ):
+            raise PermissionError(
+                f"{spec.validator} command does not match its immutable registration"
+            )
     if spec.validator == "foundation-script":
-        matches = [
-            Path(original)
-            for original, normalized in zip(spec.arguments, args, strict=True)
-            if normalized.endswith("scripts/verify-foundation.sh")
-        ]
-        if len(matches) != 1:
-            raise ValueError("foundation category requires the registered foundation script")
-        script = matches[0]
+        if (
+            spec.registration_id != "keeper:foundation:v1"
+            or len(spec.arguments) != 2
+            or trusted_root is None
+        ):
+            raise PermissionError("foundation registration is missing or malformed")
+        launcher = Path(spec.arguments[0])
+        script = Path(spec.arguments[1])
+        registered_launcher = trusted_bash_launcher()
+        expected_script = (
+            trusted_root.resolve() / "scripts" / "verify-foundation.sh"
+        )
         if (
             spec.expected_sha256 is None
+            or spec.expected_executable_sha256 is None
+            or not launcher.is_absolute()
+            or launcher.is_symlink()
+            or not launcher.is_file()
+            or registered_launcher is None
+            or launcher.resolve() != registered_launcher
             or not script.is_absolute()
             or script.is_symlink()
             or not script.is_file()
+            or script.resolve() != expected_script.resolve()
         ):
-            raise ValueError("foundation script requires an absolute pinned regular file")
-        actual = hashlib.sha256(script.read_bytes()).hexdigest()
-        if actual != spec.expected_sha256:
-            raise PermissionError("foundation script hash does not match its registration")
+            raise PermissionError(
+                "foundation launcher and script must match the immutable registration"
+            )
+        launcher_digest = hashlib.sha256(launcher.read_bytes()).hexdigest()
+        script_digest = hashlib.sha256(script.read_bytes()).hexdigest()
+        if (
+            launcher_digest != spec.expected_executable_sha256
+            or script_digest != spec.expected_sha256
+        ):
+            raise PermissionError("foundation launcher or script digest is stale")
     if spec.validator == "file-equals" and args[0] != "keeper:file-equals":
         raise ValueError("file-equals validator requires the Keeper registered command")
     if spec.validator == "registered-command":
-        executable = Path(spec.arguments[0]).name.lower()
-        if executable in {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "bash", "sh"}:
-            raise ValueError("generic shell commands cannot be registered verification commands")
-
-
-def _trusted_module_command(arguments: list[str], module: str) -> bool:
-    return (
-        len(arguments) >= 3
-        and arguments[0] == "{python}"
-        and arguments[1:3] == ["-m", module]
-    )
+        raise PermissionError("unknown registered commands are not trusted")

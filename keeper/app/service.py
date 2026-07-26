@@ -153,6 +153,10 @@ class KeeperApplication:
         is_demo = bool(values.get("is_demo", False))
         if selected_policy == "mock" and not is_demo:
             raise PermissionError("mock policy is restricted to explicit demonstration tasks")
+        if values.get("verification_specs") and not is_demo:
+            raise PermissionError(
+                "desktop tasks may select only immutable registered validation categories"
+            )
         validations = list(values.get("required_validations", ["tests"])) or ["tests"]
         task: dict[str, Any] = {
             "id": task_id,
@@ -166,7 +170,9 @@ class KeeperApplication:
             "allowed_actions": list(values.get("allowed_actions", [])),
             "prohibited_actions": list(values.get("prohibited_actions", [])),
             "required_validations": validations,
-            "verification_specs": list(values.get("verification_specs", [])),
+            "verification_specs": (
+                list(values.get("verification_specs", [])) if is_demo else []
+            ),
             "verification_waivers": list(values.get("verification_waivers", [])),
             "required_reviewers": list(values.get("required_reviewers", ["independent"])),
             "completion_criteria": list(values.get("completion_criteria", [])),

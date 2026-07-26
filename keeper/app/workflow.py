@@ -4,9 +4,9 @@ import ctypes
 import hashlib
 import json
 import os
-import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -20,6 +20,7 @@ from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence
 from keeper.app.path_safety import validate_path_budget
+from keeper.app.verification_policy import trusted_bash_launcher
 from keeper.app.storage import KeeperStore
 from keeper.config import KeeperConfig
 from keeper.models.task import Task
@@ -1138,11 +1139,9 @@ def _select_routes(
 def _registered_verification_specs(stored: dict[str, Any]) -> list[dict[str, Any]]:
     supplied = stored.get("verification_specs", [])
     if supplied:
-        if not isinstance(supplied, list) or not all(
-            isinstance(item, dict) for item in supplied
-        ):
-            raise ValueError("verification specifications must be object records")
-        return [dict(item) for item in supplied]
+        raise PermissionError(
+            "normal tasks cannot supply caller-controlled verification specifications"
+        )
     repository = Path(str(stored["repository"])).resolve()
     specifications: list[dict[str, Any]] = []
     for category_value in stored.get("required_validations", []):
@@ -1178,10 +1177,10 @@ def _registered_verification_specs(stored: dict[str, Any]) -> list[dict[str, Any
                 or not script.is_file()
             ):
                 raise PermissionError("foundation validator script is unavailable or unsafe")
-            bash = shutil.which("bash")
+            bash = trusted_bash_launcher()
             if bash is None:
                 raise RuntimeError("foundation validator requires Git Bash")
-            arguments = [bash, str(script)]
+            arguments = [str(bash), str(script)]
             validator = "foundation-script"
         else:
             raise ValueError(
@@ -1193,6 +1192,13 @@ def _registered_verification_specs(stored: dict[str, Any]) -> list[dict[str, Any
             "validator": validator,
             "registration_id": f"keeper:{category}:v1",
             "required": True,
+            "expected_executable_sha256": hashlib.sha256(
+                (
+                    Path(sys.executable).resolve()
+                    if validator in {"pytest", "mypy", "compileall"}
+                    else Path(arguments[0]).resolve()
+                ).read_bytes()
+            ).hexdigest(),
         }
         if validator == "foundation-script":
             specification["expected_sha256"] = hashlib.sha256(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -91,8 +93,15 @@ def test_lifecycle_rejects_skips_and_corrupt_state(tmp_path: Path) -> None:
 
 
 def test_semantic_binding_rejects_forgery_duplicates_and_missing() -> None:
-    python = "{python}"
-    valid = VerificationSpec("tests", [python, "-m", "pytest", "tests/keeper"], "pytest")
+    valid = VerificationSpec(
+        "tests",
+        ["{python}", "-m", "pytest", "-q"],
+        "pytest",
+        registration_id="keeper:tests:v1",
+        expected_executable_sha256=hashlib.sha256(
+            Path(sys.executable).resolve().read_bytes()
+        ).hexdigest(),
+    )
     validate_semantic_bindings([valid], ["tests"])
     with pytest.raises(ValueError, match="cannot satisfy"):
         validate_semantic_bindings(

@@ -24,7 +24,7 @@ def test_environment_summary_never_contains_secret_names_or_values() -> None:
 
 
 def test_generic_shell_cannot_be_a_registered_verification() -> None:
-    with pytest.raises(ValueError, match="generic shell"):
+    with pytest.raises(ValueError, match="cannot satisfy"):
         validate_semantic_bindings(
             [
                 VerificationSpec(
