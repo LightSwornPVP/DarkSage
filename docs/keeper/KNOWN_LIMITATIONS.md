@@ -14,5 +14,6 @@
   external credentials.
 - Startup recovery terminates attributable orphan process trees and requires an
   explicit selected-stage retry. It resumes only from a durable verified checkpoint.
-- Rendered Tk automation is unavailable in the current Python runtime because Tcl/Tk
-  is not installed. The packaged diagnostic reports this as unavailable with exit 78.
+- Rendered Tk automation requires a Python runtime with matching Tcl/Tk libraries.
+  The packaged diagnostic reports unavailable with exit 78 when that prerequisite is
+  absent.

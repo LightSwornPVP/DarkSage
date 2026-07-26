@@ -1,0 +1,113 @@
+{
+  "acceptance_criteria": [],
+  "active_attempt_id": "keeper-pilot-9fb90babc0-attempt-2",
+  "active_run_stage": null,
+  "allowed_paths": [
+    ".keeper-pilot/"
+  ],
+  "attempts": 2,
+  "blocked_paths": [],
+  "branch_name": "keeper/keeper-pilot-9fb90babc0",
+  "capabilities": [
+    "repository_write",
+    "run_verification"
+  ],
+  "component": "keeper",
+  "created_timestamp": "2026-07-26T19:48:47.319582+00:00",
+  "dependencies": [],
+  "description": "Exercise retry, review, repair, verification, recovery, and persistence.",
+  "final_verification_commands": [
+    [
+      "keeper:file-equals",
+      ".keeper-pilot/result.txt",
+      "repaired\n"
+    ]
+  ],
+  "final_verification_specs": [],
+  "id": "keeper-pilot-9fb90babc0",
+  "maximum_attempts": 2,
+  "phase": "pilot",
+  "priority": 100,
+  "provider": "primary",
+  "required_verification_categories": [
+    "task"
+  ],
+  "risk": "low",
+  "sequence": 1,
+  "size": "small",
+  "status": "COMPLETED",
+  "title": "Invocation-scoped Keeper pilot",
+  "transition_history": [
+    {
+      "from": "BACKLOG",
+      "timestamp": "2026-07-26T19:48:47.323846+00:00",
+      "to": "READY"
+    },
+    {
+      "from": "READY",
+      "timestamp": "2026-07-26T19:48:47.624704+00:00",
+      "to": "BUILDING"
+    },
+    {
+      "from": "BUILDING",
+      "timestamp": "2026-07-26T19:48:47.736640+00:00",
+      "to": "SELF_VERIFYING"
+    },
+    {
+      "from": "SELF_VERIFYING",
+      "timestamp": "2026-07-26T19:48:48.173057+00:00",
+      "to": "FAILED"
+    },
+    {
+      "from": "FAILED",
+      "timestamp": "2026-07-26T19:48:48.175627+00:00",
+      "to": "READY"
+    },
+    {
+      "from": "READY",
+      "timestamp": "2026-07-26T19:48:48.224610+00:00",
+      "to": "BUILDING"
+    },
+    {
+      "from": "BUILDING",
+      "timestamp": "2026-07-26T19:48:48.268905+00:00",
+      "to": "SELF_VERIFYING"
+    },
+    {
+      "from": "SELF_VERIFYING",
+      "timestamp": "2026-07-26T19:48:48.522176+00:00",
+      "to": "INDEPENDENT_AUDIT"
+    },
+    {
+      "from": "INDEPENDENT_AUDIT",
+      "timestamp": "2026-07-26T19:48:48.702417+00:00",
+      "to": "REPAIRING"
+    },
+    {
+      "from": "REPAIRING",
+      "timestamp": "2026-07-26T19:48:49.185310+00:00",
+      "to": "FINAL_VERIFY"
+    },
+    {
+      "from": "FINAL_VERIFY",
+      "timestamp": "2026-07-26T19:48:49.597342+00:00",
+      "to": "APPROVED"
+    },
+    {
+      "from": "APPROVED",
+      "timestamp": "2026-07-26T19:48:49.602658+00:00",
+      "to": "COMPLETED"
+    }
+  ],
+  "updated_timestamp": "2026-07-26T19:48:49.605224+00:00",
+  "verification_commands": [
+    [
+      "keeper:file-equals",
+      ".keeper-pilot/result.txt",
+      "built\n"
+    ]
+  ],
+  "verification_specs": [],
+  "verification_waivers": [],
+  "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\da8bbbe5023a\\keeper-pilot-9fb90babc0"
+}

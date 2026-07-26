@@ -1,0 +1,55 @@
+{
+  "accepted_findings": [],
+  "branch_name": "keeper/keeper-pilot-9fb90babc0",
+  "end_time": "2026-07-26T19:48:48.236049+00:00",
+  "failure_reason": null,
+  "files_changed": [
+    ".keeper-pilot/result.txt"
+  ],
+  "final_approval_authority": null,
+  "process_exit_code": 0,
+  "process_id": null,
+  "prompt_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-292d5cffc1a041df8779da8bbbe5023a\\state\\runs\\keeper-pilot-9fb90babc0-builder-45699694edfa\\prompt.md",
+  "provider_instance_id": "4e73f4d5a56c46bd9f1e3e2a1ee9f294",
+  "provider_name": "mock-builder",
+  "reasoning_level": "high",
+  "rejected_findings": [],
+  "repair_history": [],
+  "retry_count": 0,
+  "review_findings": [],
+  "review_tree_identity": null,
+  "role": "builder",
+  "run_id": "keeper-pilot-9fb90babc0-builder-45699694edfa",
+  "start_time": "2026-07-26T19:48:48.230815+00:00",
+  "status": "completed",
+  "stderr_log_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-292d5cffc1a041df8779da8bbbe5023a\\state\\runs\\keeper-pilot-9fb90babc0-builder-45699694edfa\\stderr.log",
+  "stdout_log_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-292d5cffc1a041df8779da8bbbe5023a\\state\\runs\\keeper-pilot-9fb90babc0-builder-45699694edfa\\stdout.log",
+  "task_id": "keeper-pilot-9fb90babc0",
+  "verification_result": {
+    "attempt_id": "keeper-pilot-9fb90babc0-attempt-2",
+    "branch": "keeper/keeper-pilot-9fb90babc0",
+    "commands": [
+      {
+        "arguments": [
+          "keeper:file-equals",
+          ".keeper-pilot/result.txt",
+          "built\n"
+        ],
+        "exit_code": 0,
+        "required": true,
+        "stderr": "",
+        "stdout": "file content matched\n",
+        "timed_out": false
+      }
+    ],
+    "head": "bf51ffd9a21ce0f8411fb2c708b77d0d6397bf03",
+    "passed": true,
+    "run_id": "keeper-pilot-9fb90babc0-builder-45699694edfa",
+    "stage": "self",
+    "task_id": "keeper-pilot-9fb90babc0",
+    "timestamp": "2026-07-26T19:48:48.518653+00:00",
+    "tree_identity": "f10c333dd4b3d2fd71b9c253187de7b02d9fc74bce4f5852cb5db422dd192559",
+    "workspace": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\da8bbbe5023a\\keeper-pilot-9fb90babc0"
+  },
+  "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\da8bbbe5023a\\keeper-pilot-9fb90babc0"
+}

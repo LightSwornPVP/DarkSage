@@ -10,8 +10,9 @@
   authorization records, downstream invalidation, and irreversible-stage rejection.
 - Added active waiver revocation and structured desktop evidence views for routing,
   provider identities, commands, verification, findings, logs, hashes, and Git results.
-- Retained explicit unavailable reporting for rendered Tk validation when the selected
-  Windows Python runtime has no usable Tcl/Tk installation.
+- Added rendered Windows Tk validation that navigates the real notebook, invokes the
+  dashboard Refresh callback, verifies its status update, and records structured
+  smoke evidence.
 
 ## 0.4.0
 

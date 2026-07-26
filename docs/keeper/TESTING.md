@@ -20,6 +20,7 @@ selected-stage retries, timeout/cancellation recovery, live redacted logging, an
 restart-time descendant cleanup.
 
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
-events when Tcl/Tk is available. Exit code 78 with a JSON `unavailable` result means
-the Python runtime lacks a usable Tcl/Tk installation; it is a skipped gate, not a
-pass.
+events, invokes the dashboard Refresh button, verifies the visible status update, and
+writes structured evidence beneath the selected data directory when Tcl/Tk is
+available. Exit code 78 with a JSON `unavailable` result means the Python runtime
+lacks a usable Tcl/Tk installation; it is a skipped gate, not a pass.

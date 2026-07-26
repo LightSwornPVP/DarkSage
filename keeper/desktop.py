@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import threading
 from functools import partial
 from pathlib import Path
@@ -198,7 +199,10 @@ class KeeperDesktop:
         self.dashboard_text.pack(fill="both", expand=True, padx=8, pady=8)
         buttons = self.ttk.Frame(frame)
         buttons.pack(fill="x", padx=8, pady=8)
-        self.ttk.Button(buttons, text="Refresh", command=self.refresh).pack(side="left")
+        self.refresh_button = self.ttk.Button(
+            buttons, text="Refresh", command=self._refresh_from_ui
+        )
+        self.refresh_button.pack(side="left")
         self.ttk.Button(buttons, text="Run safe mock demonstration", command=self._run_demo).pack(side="left", padx=8)
 
     def _build_projects(self) -> None:
@@ -338,6 +342,10 @@ class KeeperDesktop:
         self._set_text(self.history_text, json.dumps(self.application.store.list("runs"), indent=2))
         self._set_text(self.authorization_text, json.dumps(self.application.store.list("authorizations"), indent=2))
         self._set_text(self.findings_text, json.dumps(self.application.store.list("findings"), indent=2))
+
+    def _refresh_from_ui(self) -> None:
+        self.refresh()
+        self.status.set("Dashboard refreshed")
 
     def _first_run(self) -> None:
         diagnostics = self.application.diagnostics()
@@ -590,10 +598,30 @@ def main(arguments: list[str] | None = None) -> int:
         if len(tabs) < 9:
             desktop.root.destroy()
             raise RuntimeError("Keeper desktop smoke did not render all workflow tabs")
-        desktop.notebook.select(tabs[-1])  # type: ignore[no-untyped-call]
+        desktop.notebook.select(tabs[3])  # type: ignore[no-untyped-call]
         desktop.root.update()
+        selected_tab = str(desktop.notebook.select())  # type: ignore[no-untyped-call]
+        desktop.refresh_button.invoke()
+        desktop.root.update_idletasks()
+        desktop.root.update()
+        if desktop.status.get() != "Dashboard refreshed":
+            desktop.root.destroy()
+            raise RuntimeError("Keeper desktop smoke button callback did not update status")
+        evidence = {
+            "ui_smoke": "passed",
+            "executable": sys.executable,
+            "rendered_tabs": len(tabs),
+            "selected_tab": selected_tab,
+            "button_callback": "Refresh",
+            "status_update": desktop.status.get(),
+            "root_viewable": bool(desktop.root.winfo_viewable()),
+        }
+        evidence_path = application.data_directory / "ui-smoke-evidence.json"
+        evidence_path.write_text(
+            json.dumps(evidence, indent=2), encoding="utf-8"
+        )
         desktop.root.destroy()
-        print(json.dumps({"ui_smoke": "passed", "rendered_tabs": len(tabs)}))
+        print(json.dumps({**evidence, "evidence_path": str(evidence_path)}))
         return 0
     KeeperDesktop(application).run()
     return 0

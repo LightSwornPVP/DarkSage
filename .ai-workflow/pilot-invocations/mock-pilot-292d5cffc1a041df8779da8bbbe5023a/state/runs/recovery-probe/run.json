@@ -1,0 +1,8 @@
+{
+  "end_time": "2026-07-26T19:48:49.648939+00:00",
+  "failure_reason": "process was not running during recovery",
+  "process_id": 99999999,
+  "run_id": "recovery-probe",
+  "status": "interrupted",
+  "task_id": "keeper-pilot-9fb90babc0-recovery"
+}
