@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Connected desktop tasks to the production orchestrator and durable lifecycle.
+- Added approval/rejection, pause/resume, cancellation, live status polling,
+  evidence actions, interactive setup, and lifecycle notifications.
+- Added semantic command evidence, scoped waivers, and exact Git authorization.
+- Added unified acceptance pilots and adversarial authorization coverage.
+
 ## 0.2.0
 
 - Added versioned SQLite storage, migrations, backup/export, and legacy evidence import.

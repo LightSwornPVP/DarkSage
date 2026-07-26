@@ -13,3 +13,7 @@ Run:
 Desktop behavior is tested through `KeeperViewModel` so tests remain headless.
 Packaging smoke initializes fresh data, runs diagnostics and a complete mock pilot,
 and exits cleanly.
+
+Controller tests exercise first-run navigation and real application-service actions
+without a display. Rendered Tk automation is unavailable in the current headless
+environment and is not claimed.
