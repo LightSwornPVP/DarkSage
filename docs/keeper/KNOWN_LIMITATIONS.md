@@ -7,10 +7,12 @@
 - OS toast delivery is best-effort; every notification is retained in-app.
 - Discord remains a future notification-only adapter.
 - Keeper does not automatically delete retained logs or evidence.
-- The desktop uses textual evidence views rather than an embedded diff renderer.
-- Authenticated command-provider task execution remains unverified; controlled
-  adapter routing tests exercise selection without external credentials.
-- Startup recovery classifies orphaned provider work and requires an explicit new
-  immutable retry attempt; it does not continue inside a partially executed command.
+- The desktop provides structured textual evidence drill-down rather than an embedded
+  side-by-side diff renderer.
+- Authenticated external command-provider task execution remains unverified. Controlled
+  executables exercise the complete production adapter and workflow path without
+  external credentials.
+- Startup recovery terminates attributable orphan process trees and requires an
+  explicit selected-stage retry. It resumes only from a durable verified checkpoint.
 - Rendered Tk automation is unavailable in the current Python runtime because Tcl/Tk
   is not installed. The packaged diagnostic reports this as unavailable with exit 78.

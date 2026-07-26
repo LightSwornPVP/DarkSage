@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -72,6 +73,12 @@ class KeeperViewModel:
 
     def revoke_authorization(self, authorization_id: str) -> None:
         self.application.revoke_authorization(authorization_id)
+
+    def revoke_waiver(self, waiver_id: str) -> None:
+        self.application.revoke_waiver(waiver_id)
+
+    def evidence_details(self, run_id: str, category: str) -> dict[str, Any]:
+        return self.application.evidence_details(run_id, category)
 
 
 class FirstRunController:
@@ -152,6 +159,7 @@ class KeeperDesktop:
         self._build_findings()
         self._build_authorizations()
         self._build_history()
+        self._build_evidence_details()
         self._build_settings()
         ttk.Label(self.root, textvariable=self.status, anchor="w").pack(
             fill="x", padx=12, pady=(0, 8)
@@ -271,6 +279,14 @@ class KeeperDesktop:
         self.ttk.Button(
             form, text="Grant scoped one-time authorization", command=self._authorize
         ).pack(anchor="w", pady=8)
+        self.ttk.Label(form, text="Waiver ID to revoke").pack(anchor="w")
+        self.waiver_id = self.tk.StringVar()
+        self.ttk.Entry(form, textvariable=self.waiver_id).pack(fill="x")
+        self.ttk.Button(
+            form,
+            text="Revoke active verification waiver",
+            command=self._revoke_waiver,
+        ).pack(anchor="w", pady=8)
         self.authorization_text = self._readonly_text(frame)
         self._set_text(self.authorization_text, "No pending authorization.")
 
@@ -278,6 +294,31 @@ class KeeperDesktop:
         frame = self._tab("History & Evidence")
         self.history_text = self._readonly_text(frame)
         self._set_text(self.history_text, "Run history is empty.")
+
+    def _build_evidence_details(self) -> None:
+        frame = self._tab("Evidence Details")
+        controls = self.ttk.Frame(frame)
+        controls.pack(fill="x", padx=8, pady=8)
+        for category in (
+            "routing",
+            "verification",
+            "waivers",
+            "authorizations",
+            "findings",
+            "logs",
+            "hashes",
+            "git",
+        ):
+            self.ttk.Button(
+                controls,
+                text=category.replace("_", " ").title(),
+                command=partial(self._show_evidence_details, category),
+            ).pack(side="left", padx=2)
+        self.evidence_details_text = self._readonly_text(frame)
+        self._set_text(
+            self.evidence_details_text,
+            "Select a run and an evidence category.",
+        )
 
     def _build_settings(self) -> None:
         frame = self._tab("Settings")
@@ -387,6 +428,27 @@ class KeeperDesktop:
             lambda: self.view_model.create_authorization(values),
             "Scoped authorization recorded",
         )
+
+    def _revoke_waiver(self) -> None:
+        self._handle(
+            lambda: self.view_model.revoke_waiver(self.waiver_id.get()),
+            "Verification waiver revoked",
+        )
+
+    def _show_evidence_details(self, category: str) -> None:
+        if self.current_run_id is None:
+            self._show_error("No selected run")
+            return
+        try:
+            detail = self.view_model.evidence_details(
+                self.current_run_id, category
+            )
+            self._set_text(
+                self.evidence_details_text, json.dumps(detail, indent=2)
+            )
+            self.status.set(f"Showing {category} evidence")
+        except Exception as error:
+            self._show_error(str(error))
 
     def _run_demo(self) -> None:
         self.status.set("Running deterministic mock workflow…")
@@ -525,7 +587,7 @@ def main(arguments: list[str] | None = None) -> int:
         desktop.root.update_idletasks()
         desktop.root.update()
         tabs = desktop.notebook.tabs()  # type: ignore[no-untyped-call]
-        if len(tabs) < 8:
+        if len(tabs) < 9:
             desktop.root.destroy()
             raise RuntimeError("Keeper desktop smoke did not render all workflow tabs")
         desktop.notebook.select(tabs[-1])  # type: ignore[no-untyped-call]

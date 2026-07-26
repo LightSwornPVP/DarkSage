@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+- Exercised controlled command executables through the complete author, independent
+  review, repair, post-repair review, semantic verification, and evidence workflow.
+- Added durable provider PID checkpoints, incremental redacted logs, restart-time
+  process-tree discovery, and attributable descendant termination.
+- Added same-run selected-stage retries with stage-attempt identities, explicit
+  authorization records, downstream invalidation, and irreversible-stage rejection.
+- Added active waiver revocation and structured desktop evidence views for routing,
+  provider identities, commands, verification, findings, logs, hashes, and Git results.
+- Retained explicit unavailable reporting for rendered Tk validation when the selected
+  Windows Python runtime has no usable Tcl/Tk installation.
+
 ## 0.4.0
 
 - Routed automatic and provider-specific desktop policies through discovered command

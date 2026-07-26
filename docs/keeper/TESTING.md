@@ -15,8 +15,9 @@ Packaging smoke initializes fresh data, runs diagnostics and a complete mock pil
 and exits cleanly.
 
 Controller tests exercise first-run navigation and real application-service actions
-without a display. Rendered Tk automation is unavailable in the current headless
-environment and is not claimed.
+without a display. Controlled command executables exercise complete workflows,
+selected-stage retries, timeout/cancellation recovery, live redacted logging, and
+restart-time descendant cleanup.
 
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events when Tcl/Tk is available. Exit code 78 with a JSON `unavailable` result means
