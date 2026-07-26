@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 from ctypes import wintypes
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -35,9 +37,22 @@ def load_json(path: Path, default: Any) -> Any:
         return json.load(handle)
 
 
-def process_exists(pid: int | None) -> bool:
+class ProcessState(str, Enum):
+    CONFIRMED_ABSENT = "confirmed_absent"
+    CONFIRMED_PRESENT = "confirmed_present"
+    INDETERMINATE = "indeterminate"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessProbe:
+    state: ProcessState
+    diagnostic: str
+    os_error: int | None = None
+
+
+def probe_process(pid: int | None) -> ProcessProbe:
     if not pid or pid <= 0:
-        return False
+        return ProcessProbe(ProcessState.CONFIRMED_ABSENT, "invalid or missing pid")
     if os.name == "nt":
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
@@ -51,19 +66,54 @@ def process_exists(pid: int | None) -> bool:
         kernel32.CloseHandle.restype = ctypes.c_int
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
-            return False
+            error = ctypes.get_last_error()
+            if error == 87:
+                return ProcessProbe(
+                    ProcessState.CONFIRMED_ABSENT,
+                    "operating system confirmed that the pid does not exist",
+                    error,
+                )
+            diagnostic = (
+                "process query access denied"
+                if error == 5
+                else "process state could not be established"
+            )
+            return ProcessProbe(ProcessState.INDETERMINATE, diagnostic, error)
         try:
             exit_code = ctypes.c_uint32()
-            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and (
-                exit_code.value == 259
-            )
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return ProcessProbe(
+                    ProcessState.INDETERMINATE,
+                    "process exit state query failed",
+                    ctypes.get_last_error(),
+                )
+            if exit_code.value == 259:
+                return ProcessProbe(ProcessState.CONFIRMED_PRESENT, "process is active")
+            return ProcessProbe(ProcessState.CONFIRMED_ABSENT, "process has exited")
         finally:
             kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
-    except (OSError, PermissionError):
-        return False
-    return True
+    except ProcessLookupError as error:
+        return ProcessProbe(
+            ProcessState.CONFIRMED_ABSENT, "operating system confirmed absence", error.errno
+        )
+    except PermissionError as error:
+        return ProcessProbe(
+            ProcessState.INDETERMINATE, "process query access denied", error.errno
+        )
+    except OSError as error:
+        return ProcessProbe(
+            ProcessState.INDETERMINATE,
+            "process state could not be established",
+            error.errno,
+        )
+    return ProcessProbe(ProcessState.CONFIRMED_PRESENT, "process is active")
+
+
+def process_exists(pid: int | None) -> bool:
+    """Compatibility predicate. Security decisions must use ``probe_process``."""
+    return probe_process(pid).state is ProcessState.CONFIRMED_PRESENT
 
 
 class RetainedProcessHandle(Protocol):
@@ -73,6 +123,8 @@ class RetainedProcessHandle(Protocol):
     def pid(self) -> int: ...
 
     def identity(self) -> dict[str, object] | None: ...
+
+    def is_exited(self) -> bool: ...
 
     def terminate_exact(self, exit_code: int = 1) -> bool: ...
 
@@ -93,6 +145,14 @@ class _WindowsRetainedProcessHandle:
         if self._closed:
             return None
         return _windows_identity_from_handle(self._handle, self._pid)
+
+    def is_exited(self) -> bool:
+        if self._closed:
+            return False
+        kernel32 = _windows_kernel32()
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        return int(kernel32.WaitForSingleObject(self._handle, 0)) == 0
 
     def terminate_exact(self, exit_code: int = 1) -> bool:
         if self._closed or self.identity() is None:
@@ -263,7 +323,7 @@ def _windows_identity_from_handle(
 
 
 def process_identity(pid: int) -> dict[str, object] | None:
-    if pid <= 0 or not process_exists(pid):
+    if pid <= 0 or probe_process(pid).state is not ProcessState.CONFIRMED_PRESENT:
         return None
     if os.name == "nt":
         kernel32 = _windows_kernel32()

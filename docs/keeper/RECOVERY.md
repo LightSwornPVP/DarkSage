@@ -24,6 +24,12 @@ protected ownership record and provider evidence, rechecks the full live identit
 through that same handle, and terminates only that exact process object through the
 retained handle. Every path closes the handle.
 
+Process discovery is tri-state. Only an operating-system-confirmed missing PID or
+a signaled retained process object is treated as absent/exited. Access denial,
+insufficient privilege, and unexpected query failures remain indeterminate,
+blocked, and non-retry-safe. Protected ownership is never bypassed after an
+indeterminate query.
+
 Recovery never uses a PID-only tree kill after validation. Descendants cannot be
 rebound to the original job after a restart, so a detected or unenumerable
 descendant tree is classified as uncertain and left untouched. An inaccessible

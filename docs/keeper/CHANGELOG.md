@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+- Made recovery process discovery tri-state and fail closed on access denial and
+  other indeterminate operating-system results.
+- Bound command launch to mandatory immutable registration using retained
+  deny-write/delete handles on Windows and post-launch image verification.
+- Separated routing dispositions from actual provider execution attempts and
+  reconciled reports against provider run evidence.
+- Added atomic SQLite reroute consumption and destination-attempt reservation.
+
 ## 0.5.0
 
 - Exercised controlled command executables through the complete author, independent

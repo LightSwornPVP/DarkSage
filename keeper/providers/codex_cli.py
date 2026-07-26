@@ -26,10 +26,33 @@ class CliProvider(AgentProvider):
         provider_name: str = "primary",
         *,
         expected_executable_sha256: str | None = None,
+        expected_executable_size: int | None = None,
+        registration_id: str | None = None,
+        registration_version: str | None = None,
+        configuration_digest: str | None = None,
     ) -> None:
+        self.command_script: Path | None = None
+        if (
+            os.name == "nt"
+            and command_template
+            and Path(command_template[0]).suffix.casefold() in {".cmd", ".bat"}
+        ):
+            self.command_script = Path(command_template[0]).resolve(strict=True)
+            launcher = Path(os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe"))
+            script_digest = hashlib.sha256(self.command_script.read_bytes()).hexdigest()
+            command_template = (str(launcher), *command_template[1:])
+            expected_executable_sha256 = hashlib.sha256(launcher.read_bytes()).hexdigest()
+            expected_executable_size = launcher.stat().st_size
+            configuration_digest = hashlib.sha256(
+                f"{configuration_digest or ''}:{script_digest}".encode("utf-8")
+            ).hexdigest()
         self.command_template = command_template
         self.provider_name = provider_name
         self.expected_executable_sha256 = expected_executable_sha256
+        self.expected_executable_size = expected_executable_size
+        self.registration_id = registration_id
+        self.registration_version = registration_version
+        self.configuration_digest = configuration_digest
         self.instance_id = uuid.uuid4().hex
         self._active_process: subprocess.Popen[str] | None = None
         self._active_job: int | None = None
@@ -44,6 +67,9 @@ class CliProvider(AgentProvider):
         return [substitutions.get(part, part) for part in self.command_template]
 
     def validate(self) -> None:
+        self._validated_executable()
+
+    def _validated_executable(self) -> tuple[Path, bytes]:
         if not self.command_template:
             raise RuntimeError(
                 "agent provider command is not configured; set provider_command "
@@ -52,27 +78,107 @@ class CliProvider(AgentProvider):
         executable = self.command_template[0]
         if not Path(executable).exists() and shutil.which(executable) is None:
             raise RuntimeError(f"configured agent provider executable was not found: {executable}")
-        if self.expected_executable_sha256 is not None:
-            resolved = Path(executable).resolve(strict=True)
-            actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
-            if actual != self.expected_executable_sha256:
-                raise PermissionError(
-                    "provider executable content changed after registration"
-                )
+        if (
+            self.expected_executable_sha256 is None
+            or self.expected_executable_size is None
+            or not self.registration_id
+            or not self.registration_version
+            or not self.configuration_digest
+        ):
+            raise PermissionError("immutable provider executable registration is incomplete")
+        resolved = Path(executable).resolve(strict=True)
+        content = resolved.read_bytes()
+        actual = hashlib.sha256(content).hexdigest()
+        if (
+            actual != self.expected_executable_sha256
+            or len(content) != self.expected_executable_size
+        ):
+            raise PermissionError(
+                "provider executable content changed after registration"
+            )
         if "{prompt}" not in self.command_template:
             raise RuntimeError("provider_command must include the {prompt} argument placeholder")
+        return resolved, content
 
     def run(self, request: AgentRequest) -> ProcessResult:
-        self.validate()
+        registered_path, registered_content = self._validated_executable()
         request.stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        retained_executable_handle: int | None = None
+        protected_path = registered_path
+        if os.name == "nt":
+            kernel32: Any = ctypes.windll.kernel32
+            kernel32.CreateFileW.restype = ctypes.c_void_p
+            handle = kernel32.CreateFileW(
+                str(registered_path),
+                0x80000000,
+                0x00000001,
+                None,
+                3,
+                0x00000080,
+                None,
+            )
+            if not handle or int(handle) == -1:
+                raise PermissionError(
+                    "registered executable could not be retained against replacement"
+                )
+            retained_executable_handle = int(handle)
+            if hashlib.sha256(registered_path.read_bytes()).hexdigest() != (
+                self.expected_executable_sha256
+            ):
+                kernel32.CloseHandle(retained_executable_handle)
+                raise PermissionError(
+                    "retained provider executable failed identity verification"
+                )
+        else:
+            protected_directory = request.stdout_path.parent / ".protected-executables"
+            protected_directory.mkdir(parents=True, exist_ok=True)
+            suffix = registered_path.suffix
+            protected_path = (
+                protected_directory
+                / f"{str(self.expected_executable_sha256)[:16]}-{uuid.uuid4().hex[:8]}{suffix}"
+            )
+            descriptor = os.open(
+                protected_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o500
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as protected:
+                    protected.write(registered_content)
+                    protected.flush()
+                    os.fsync(protected.fileno())
+            except BaseException:
+                protected_path.unlink(missing_ok=True)
+                raise
+            os.chmod(protected_path, 0o500)
+            if hashlib.sha256(protected_path.read_bytes()).hexdigest() != (
+                self.expected_executable_sha256
+            ):
+                raise PermissionError(
+                    "protected provider executable failed identity verification"
+                )
         environment = filtered_environment(dict(os.environ))
         environment["KEEPER_PROVIDER_ROLE"] = request.role
+        environment["PATH"] = (
+            str(registered_path.parent)
+            + os.pathsep
+            + environment.get("PATH", "")
+        )
         with (
             request.stdout_path.open("w", encoding="utf-8") as stdout,
             request.stderr_path.open("w", encoding="utf-8") as stderr,
         ):
+            command = self.build_command(request)
+            if self.command_script is not None:
+                command = [
+                    str(protected_path),
+                    "/d",
+                    "/c",
+                    str(self.command_script),
+                    *command[1:],
+                ]
+            else:
+                command[0] = str(protected_path)
             process = subprocess.Popen(
-                self.build_command(request),
+                command,
                 cwd=request.workspace,
                 env=environment,
                 stdin=subprocess.DEVNULL,
@@ -103,13 +209,13 @@ class CliProvider(AgentProvider):
                 pump.start()
             job: int | None = None
             if os.name == "nt":
-                kernel32: Any = ctypes.windll.kernel32
-                job = int(kernel32.CreateJobObjectW(None, None))
-                if not job or not kernel32.AssignProcessToJobObject(
+                job_kernel32: Any = ctypes.windll.kernel32
+                job = int(job_kernel32.CreateJobObjectW(None, None))
+                if not job or not job_kernel32.AssignProcessToJobObject(
                     job, int(process._handle)  # type: ignore[attr-defined]
                 ):
                     if job:
-                        kernel32.CloseHandle(job)
+                        job_kernel32.CloseHandle(job)
                     process.kill()
                     process.wait()
                     raise RuntimeError("unable to place provider in an isolated Windows Job Object")
@@ -122,9 +228,20 @@ class CliProvider(AgentProvider):
                     identity = process_identity(process.pid)
                     if identity is None:
                         raise RuntimeError("provider process ownership could not be established")
+                    if Path(str(identity["executable"])).resolve() != protected_path.resolve():
+                        raise PermissionError(
+                            "launched provider image did not match retained registration"
+                        )
                     request.on_process_owned(
                         {
                             **identity,
+                            "registered_executable": str(registered_path),
+                            "launched_executable": str(protected_path),
+                            "launched_executable_sha256": self.expected_executable_sha256,
+                            "launched_executable_size": self.expected_executable_size,
+                            "registration_id": self.registration_id,
+                            "registration_version": self.registration_version,
+                            "configuration_digest": self.configuration_digest,
                             "launch_nonce": uuid.uuid4().hex,
                             "ownership_token": uuid.uuid4().hex,
                             "job_or_group_identity": (
@@ -151,6 +268,8 @@ class CliProvider(AgentProvider):
                 if job and self._active_job == job:
                     ctypes.windll.kernel32.CloseHandle(job)
                     self._active_job = None
+                if retained_executable_handle is not None:
+                    ctypes.windll.kernel32.CloseHandle(retained_executable_handle)
 
     def cancel(self) -> None:
         if self._active_process and self._active_process.poll() is None:

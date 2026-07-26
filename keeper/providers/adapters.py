@@ -48,6 +48,12 @@ class CodexCommandAdapter(CliProvider):
             (resolved, "{prompt}"),
             provider_name="codex-command",
             expected_executable_sha256=digest,
+            expected_executable_size=Path(resolved).stat().st_size,
+            registration_id="codex-command",
+            registration_version="1",
+            configuration_digest=hashlib.sha256(
+                json.dumps([resolved, "{prompt}"]).encode("utf-8")
+            ).hexdigest(),
         )
         self.executable = resolved
         self.executable_sha256 = digest
@@ -79,6 +85,12 @@ class ClaudeCommandAdapter(CliProvider):
             (resolved, "{prompt}"),
             provider_name="claude-command",
             expected_executable_sha256=digest,
+            expected_executable_size=Path(resolved).stat().st_size,
+            registration_id="claude-command",
+            registration_version="1",
+            configuration_digest=hashlib.sha256(
+                json.dumps([resolved, "{prompt}"]).encode("utf-8")
+            ).hexdigest(),
         )
         self.executable = resolved
         self.executable_sha256 = digest

@@ -41,11 +41,16 @@ from keeper.recovery import (
     atomic_write_json,
     load_json,
     ownership_records_match,
+    ProcessProbe,
+    ProcessState,
+    probe_process,
     process_exists,
     process_identity_matches,
     retain_process_handle,
 )
 from keeper.workspace import WorkspaceManager
+
+_ORIGINAL_PROCESS_EXISTS = process_exists
 
 
 @dataclass(slots=True)
@@ -157,30 +162,60 @@ class WorkflowCoordinator:
                 pid = ownership.get("pid")
             if not isinstance(pid, int):
                 pid = _active_provider_pid(record)
-            running = isinstance(pid, int) and process_exists(pid)
+            if process_exists is not _ORIGINAL_PROCESS_EXISTS:
+                probe = ProcessProbe(
+                    (
+                        ProcessState.CONFIRMED_PRESENT
+                        if process_exists(pid if isinstance(pid, int) else None)
+                        else ProcessState.CONFIRMED_ABSENT
+                    ),
+                    "compatibility process predicate",
+                )
+            else:
+                probe = probe_process(pid if isinstance(pid, int) else None)
+            running = probe.state is ProcessState.CONFIRMED_PRESENT
             terminated = False
             identity_verified = False
             destructive_revalidation_verified = False
             retained_handle_acquired = False
             termination_uncertain = False
             termination_reason = ""
+            process_state = probe.state.value
             descendant_state = "not-inspected"
             binding_verified = ownership_records_match(authority, ownership)
-            if running and isinstance(pid, int):
+            if probe.state in {
+                ProcessState.CONFIRMED_PRESENT,
+                ProcessState.INDETERMINATE,
+            } and isinstance(pid, int):
                 retained = retain_process_handle(pid)
                 retained_handle_acquired = retained is not None
                 if retained is None:
                     termination_uncertain = True
-                    termination_reason = "authoritative process handle could not be acquired"
+                    termination_reason = (
+                        probe.diagnostic
+                        if probe.state is ProcessState.INDETERMINATE
+                        else "authoritative process handle could not be acquired"
+                    )
                 else:
                     try:
                         current_identity = retained.identity()
+                        if current_identity is None and bool(
+                            getattr(retained, "is_exited", lambda: False)()
+                        ):
+                            running = False
+                            process_state = "confirmed_exited"
+                            termination_reason = "retained process object was already signaled"
+                            continue_recovery = False
+                        else:
+                            continue_recovery = True
                         identity_verified = (
                             retained.pid == pid
                             and binding_verified
                             and process_identity_matches(authority, current_identity)
                         )
-                        if not identity_verified:
+                        if not continue_recovery:
+                            pass
+                        elif not identity_verified:
                             termination_uncertain = True
                             termination_reason = (
                                 "retained process identity did not match protected ownership"
@@ -277,6 +312,9 @@ class WorkflowCoordinator:
                             else "recoverable"
                         ),
                         "previous_process_running": running,
+                        "process_state": process_state,
+                        "process_probe_diagnostic": probe.diagnostic,
+                        "process_probe_os_error": probe.os_error,
                         "provider_process_id": pid,
                         "attributable_tree_terminated": terminated,
                         "exact_root_process_terminated": terminated,
@@ -449,13 +487,6 @@ class WorkflowCoordinator:
             raise PermissionError(
                 "original retry provider is unavailable or changed; reroute authorization is required"
             )
-        authorization = self.store.get("authorizations", authorization_id)
-        if authorization is None:
-            raise PermissionError("reroute authorization is missing")
-        try:
-            expires = datetime.fromisoformat(str(authorization["expires_at"]))
-        except (KeyError, TypeError, ValueError) as error:
-            raise PermissionError("reroute authorization expiration is invalid") from error
         expected = {
             "capability": "provider_reroute",
             "task_id": str(stored["id"]),
@@ -473,16 +504,7 @@ class WorkflowCoordinator:
                 str(item["role"]): item.get("independence") for item in proposed
             },
         }
-        if (
-            expires.tzinfo is None
-            or expires <= datetime.now(UTC)
-            or authorization.get("revoked_at") is not None
-            or authorization.get("consumed_at") is not None
-            or any(authorization.get(key) != value for key, value in expected.items())
-        ):
-            raise PermissionError("reroute authorization does not match this retry")
-        authorization["consumed_at"] = _now()
-        self.store.upsert("authorizations", authorization_id, authorization)
+        self.store.consume_reroute_authorization(authorization_id, expected)
         return providers, proposed, authorization_id
 
     def execute(self, task_id: str) -> dict[str, Any]:
@@ -678,6 +700,9 @@ class WorkflowCoordinator:
                 30,
                 keeper_run_id=run_id,
                 ownership_sink=self._persist_process_ownership,
+                execution_sink=lambda event: self._record_provider_execution(
+                    run_id, event
+                ),
             ),
             WorkspaceManager(repository, config.workspace_root, state / "ownership"),
             router,
@@ -890,6 +915,32 @@ class WorkflowCoordinator:
         evidence.mkdir(parents=True, exist_ok=True)
         run = self._run(run_id)
         records = _provider_records(evidence)
+        executions = run.get("provider_execution_attempts", [])
+        if not isinstance(executions, list):
+            raise RuntimeError("provider execution attempt state is malformed")
+        evidence_by_id = {
+            str(item.get("run_id")): item
+            for item in records
+            if item.get("run_id")
+        }
+        execution_ids = [str(item.get("provider_run_id") or "") for item in executions]
+        if len(execution_ids) != len(set(execution_ids)) or any(
+            not value for value in execution_ids
+        ):
+            raise RuntimeError("provider execution attempts are duplicated or malformed")
+        if set(execution_ids) != set(evidence_by_id):
+            raise RuntimeError(
+                "provider execution attempts do not reconcile with provider run evidence"
+            )
+        for attempt in executions:
+            evidence_record = evidence_by_id[str(attempt["provider_run_id"])]
+            if (
+                evidence_record.get("task_id") != attempt.get("task_id")
+                or evidence_record.get("role") != attempt.get("role")
+                or evidence_record.get("provider_instance_id")
+                != attempt.get("provider_instance_id")
+            ):
+                raise RuntimeError("provider execution evidence binding is inconsistent")
         authorizations = [
             item
             for item in self.store.list("authorizations")
@@ -1018,6 +1069,7 @@ class WorkflowCoordinator:
             "provider_identities": provider_identities,
             "routing_rationale": list(run.get("routing_decisions", [])),
             "routing_attempts": list(run.get("routing_attempts", [])),
+            "provider_execution_attempts": executions,
             "lifecycle_stages": list(run.get("history", [])),
             "authorizations": authorizations,
             "waivers": waivers,
@@ -1214,15 +1266,12 @@ class WorkflowCoordinator:
         attempt_decisions = [
             {
                 **item,
-                "provider_attempt_id": f"{attempt_id}:{item['role']}",
                 "run_id": run_id,
                 "task_id": str(stored["id"]),
                 "stage_id": retry_stage or "initial-routing",
                 "attempt_number": attempt_number,
                 "retry_parent_attempt": retry_parent,
                 "reroute_authorization_id": reroute_authorization,
-                "execution_started_at": recorded_at,
-                "execution_ended_at": None,
                 "outcome": "selected",
             }
             for item in routing
@@ -1241,8 +1290,6 @@ class WorkflowCoordinator:
                 "reroute_authorization_id": reroute_authorization,
                 "outcome": "selected",
                 "recorded_at": recorded_at,
-                "execution_started_at": recorded_at,
-                "execution_ended_at": None,
             }
         )
         record["routing_attempts"] = attempts
@@ -1253,23 +1300,51 @@ class WorkflowCoordinator:
         attempts = list(record.get("routing_attempts", []))
         if not attempts or attempts[-1].get("outcome") != "selected":
             return
-        ended_at = _now()
         latest = dict(attempts[-1])
         latest["outcome"] = outcome
-        latest["execution_ended_at"] = ended_at
         decisions = latest.get("decisions")
         if isinstance(decisions, list):
             latest["decisions"] = [
                 {
                     **item,
-                    "outcome": outcome,
-                    "execution_ended_at": ended_at,
+                    "disposition": outcome,
                 }
                 for item in decisions
                 if isinstance(item, dict)
             ]
         attempts[-1] = latest
         record["routing_attempts"] = attempts
+        self.store.upsert("runs", run_id, record)
+
+    def _record_provider_execution(
+        self, run_id: str, event: dict[str, Any]
+    ) -> None:
+        record = self._run(run_id)
+        executions = list(record.get("provider_execution_attempts", []))
+        provider_run_id = str(event.get("provider_run_id") or "")
+        if not provider_run_id:
+            raise PermissionError("provider execution identity is missing")
+        matches = [
+            index
+            for index, item in enumerate(executions)
+            if item.get("provider_run_id") == provider_run_id
+        ]
+        if event.get("event") == "started":
+            if matches:
+                raise PermissionError("duplicate provider execution attempt")
+            executions.append({**event, "status": "EXECUTION_STARTED"})
+        elif event.get("event") == "finished":
+            if len(matches) != 1:
+                raise PermissionError("provider completion has no unique start record")
+            current = dict(executions[matches[0]])
+            if current.get("status") != "EXECUTION_STARTED":
+                raise PermissionError("provider execution was already finalized")
+            current.update(event)
+            current["status"] = str(event.get("result", "failed")).upper()
+            executions[matches[0]] = current
+        else:
+            raise PermissionError("unknown provider execution lifecycle event")
+        record["provider_execution_attempts"] = executions
         self.store.upsert("runs", run_id, record)
 
     def _persist_process_ownership(self, ownership: dict[str, Any]) -> None:

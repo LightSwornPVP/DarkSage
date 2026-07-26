@@ -129,7 +129,15 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
             },
         )
 
-    provider = CliProvider((str(slow), "{prompt}"), "controlled-command")
+    provider = CliProvider(
+        (str(slow), "{prompt}"),
+        "controlled-command",
+        expected_executable_sha256=hashlib.sha256(slow.read_bytes()).hexdigest(),
+        expected_executable_size=slow.stat().st_size,
+        registration_id="controlled-command",
+        registration_version="1",
+        configuration_digest="c" * 64,
+    )
     thread = threading.Thread(
         target=lambda: results.append(
             provider.run(

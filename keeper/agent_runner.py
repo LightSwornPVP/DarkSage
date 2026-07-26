@@ -23,6 +23,7 @@ class AgentRunner:
         maximum_output_bytes: int = 1_048_576,
         keeper_run_id: str | None = None,
         ownership_sink: Callable[[dict[str, Any]], None] | None = None,
+        execution_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.provider = provider
         self.runs_directory = runs_directory
@@ -30,6 +31,7 @@ class AgentRunner:
         self.maximum_output_bytes = maximum_output_bytes
         self.keeper_run_id = keeper_run_id
         self.ownership_sink = ownership_sink
+        self.execution_sink = execution_sink
 
     def run(
         self,
@@ -71,6 +73,21 @@ class AgentRunner:
         )
         record_path = directory / "run.json"
         atomic_write_json(record_path, record.to_dict())
+        if self.execution_sink is not None:
+            self.execution_sink(
+                {
+                    "event": "started",
+                    "provider_run_id": run_id,
+                    "task_id": task.id,
+                    "stage_id": task.active_run_stage,
+                    "role": role,
+                    "retry_count": retry,
+                    "provider_name": self.provider.provider_name,
+                    "provider_instance_id": self.provider.instance_id,
+                    "start_time": record.start_time,
+                    "evidence_path": str(record_path.resolve()),
+                }
+            )
 
         def process_started(process_id: int) -> None:
             record.process_id = process_id
@@ -139,4 +156,19 @@ class AgentRunner:
                 record.process_exit_code = 65
                 record.failure_reason = f"invalid structured provider output: {error}"
         atomic_write_json(record_path, record.to_dict())
+        if self.execution_sink is not None:
+            self.execution_sink(
+                {
+                    "event": "finished",
+                    "provider_run_id": run_id,
+                    "task_id": task.id,
+                    "stage_id": task.active_run_stage,
+                    "role": role,
+                    "provider_name": self.provider.provider_name,
+                    "provider_instance_id": self.provider.instance_id,
+                    "finish_time": record.end_time,
+                    "result": record.status,
+                    "evidence_path": str(record_path.resolve()),
+                }
+            )
         return record

@@ -27,7 +27,7 @@ from keeper.policies import (
     validate_capabilities,
 )
 from keeper.providers.routing import ProviderRouter
-from keeper.recovery import atomic_write_json, load_json, process_exists
+from keeper.recovery import ProcessState, atomic_write_json, load_json, probe_process
 from keeper.reviewer import (
     blocking_findings,
     parse_review_output,
@@ -74,6 +74,7 @@ class Keeper:
                 self.runner.maximum_output_bytes,
                 self.runner.keeper_run_id,
                 self.runner.ownership_sink,
+                self.runner.execution_sink,
             )
         reasoning = select_reasoning_level(
             important_file_count=len(task.allowed_paths),
@@ -665,7 +666,26 @@ class Keeper:
             record = load_json(record_path, {})
             if record.get("status") != "running":
                 continue
-            alive = process_exists(record.get("process_id"))
+            probe = probe_process(record.get("process_id"))
+            alive = probe.state is ProcessState.CONFIRMED_PRESENT
+            if probe.state is ProcessState.INDETERMINATE:
+                record.update(
+                    {
+                        "status": "blocked",
+                        "retry_safe": False,
+                        "recovery_process_state": probe.state.value,
+                        "recovery_diagnostic": probe.diagnostic,
+                    }
+                )
+                atomic_write_json(record_path, record)
+                decisions.append(
+                    {
+                        "run_id": record.get("run_id"),
+                        "action": "blocked_indeterminate",
+                        "diagnostic": probe.diagnostic,
+                    }
+                )
+                continue
             action = "leave_running" if alive else "mark_interrupted"
             if not alive:
                 record["status"] = "interrupted"

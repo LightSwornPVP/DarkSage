@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +74,90 @@ class KeeperStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (1, _now()),
                 )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS reroute_reservations ("
+                "authorization_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, "
+                "task_id TEXT NOT NULL, stage_id TEXT NOT NULL, "
+                "source_attempt_id TEXT NOT NULL, destination_attempt INTEGER NOT NULL, "
+                "routing_from TEXT NOT NULL, routing_to TEXT NOT NULL, "
+                "consumer_id TEXT NOT NULL, state TEXT NOT NULL, reserved_at TEXT NOT NULL, "
+                "UNIQUE(run_id, destination_attempt))"
+            )
+
+    def consume_reroute_authorization(
+        self,
+        authorization_id: str,
+        expected: dict[str, Any],
+        *,
+        consumer_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically consume an authorization and reserve its destination attempt."""
+        consumer = consumer_id or uuid.uuid4().hex
+        timestamp = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                'SELECT payload, payload_hash FROM "authorizations" WHERE id=?',
+                (authorization_id,),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("reroute authorization is missing")
+            serialized = str(row["payload"])
+            if _sha256(serialized.encode("utf-8")) != row["payload_hash"]:
+                raise RuntimeError("stored authorization failed integrity validation")
+            authorization = json.loads(serialized)
+            if not isinstance(authorization, dict):
+                raise PermissionError("reroute authorization is malformed")
+            try:
+                expires = datetime.fromisoformat(str(authorization["expires_at"]))
+            except (KeyError, TypeError, ValueError) as error:
+                raise PermissionError("reroute authorization expiration is invalid") from error
+            if (
+                expires.tzinfo is None
+                or expires <= datetime.now(UTC)
+                or authorization.get("revoked_at") is not None
+                or authorization.get("consumed_at") is not None
+                or any(authorization.get(key) != value for key, value in expected.items())
+            ):
+                raise PermissionError("reroute authorization does not match this retry")
+            authorization.update(
+                {
+                    "consumed_at": timestamp,
+                    "consumer_id": consumer,
+                    "consumption_state": "RESERVED",
+                }
+            )
+            updated = json.dumps(authorization, sort_keys=True, separators=(",", ":"))
+            digest = _sha256(updated.encode("utf-8"))
+            cursor = connection.execute(
+                'UPDATE "authorizations" SET updated_at=?, payload=?, payload_hash=? '
+                "WHERE id=? AND payload_hash=?",
+                (timestamp, updated, digest, authorization_id, row["payload_hash"]),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("reroute authorization was already consumed")
+            try:
+                connection.execute(
+                    "INSERT INTO reroute_reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        authorization_id,
+                        expected["run_id"],
+                        expected["task_id"],
+                        expected["retry_stage"],
+                        expected["source_attempt_id"],
+                        expected["destination_attempt_number"],
+                        expected["from_routing_digest"],
+                        expected["to_routing_digest"],
+                        consumer,
+                        "RESERVED",
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise PermissionError(
+                    "reroute authorization or destination transition is already reserved"
+                ) from error
+        return authorization
 
     def upsert(self, table: str, identifier: str, payload: dict[str, Any]) -> None:
         _require_table(table)

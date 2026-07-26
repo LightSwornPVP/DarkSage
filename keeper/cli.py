@@ -19,25 +19,35 @@ from keeper.workspace import WorkspaceManager
 
 def build_keeper(root: Path, mock: bool = False) -> Keeper:
     config = KeeperConfig.load(root)
+    registration = config.provider_registration or {}
+    def command_provider() -> CliProvider:
+        return CliProvider(
+            config.provider_command,
+            expected_executable_sha256=registration.get("executable_sha256"),
+            expected_executable_size=registration.get("executable_size"),
+            registration_id=registration.get("id"),
+            registration_version=registration.get("version"),
+            configuration_digest=registration.get("configuration_digest"),
+        )
     provider = (
         MockProvider(output={"status": "completed", "files_changed": [], "findings": []})
         if mock
-        else CliProvider(config.provider_command)
+        else command_provider()
     )
     reviewer_provider = (
         MockProvider(output={"status": "completed", "files_changed": [], "findings": []})
         if mock
-        else CliProvider(config.provider_command)
+        else command_provider()
     )
     repairer_provider = (
         MockProvider(output={"status": "completed", "files_changed": [], "findings": []})
         if mock
-        else CliProvider(config.provider_command)
+        else command_provider()
     )
     post_repair_reviewer = (
         MockProvider(output={"status": "completed", "files_changed": [], "findings": [], "dispositions": []})
         if mock
-        else CliProvider(config.provider_command)
+        else command_provider()
     )
     ollama = (
         MockProvider(

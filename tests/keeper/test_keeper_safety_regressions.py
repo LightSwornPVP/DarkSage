@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import time
@@ -338,7 +339,15 @@ def test_timeout_terminates_child_before_it_can_write(tmp_path: Path) -> None:
         "import subprocess,sys,time;"
         f"subprocess.Popen([sys.executable,'-c',{child_code!r}]);time.sleep(30)"
     )
-    provider = CliProvider((sys.executable, "-c", parent_code, "{prompt}"))
+    executable = Path(sys.executable)
+    provider = CliProvider(
+        (sys.executable, "-c", parent_code, "{prompt}"),
+        expected_executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        expected_executable_size=executable.stat().st_size,
+        registration_id="python-timeout-test",
+        registration_version="1",
+        configuration_digest="c" * 64,
+    )
     prompt = tmp_path / "prompt.md"
     prompt.write_text("safe", encoding="utf-8")
     result = provider.run(
@@ -367,7 +376,15 @@ def test_successful_parent_exit_terminates_delayed_child(tmp_path: Path) -> None
         "import subprocess,sys;"
         f"subprocess.Popen([sys.executable,'-c',{child_code!r}])"
     )
-    provider = CliProvider((sys.executable, "-c", parent_code, "{prompt}"))
+    executable = Path(sys.executable)
+    provider = CliProvider(
+        (sys.executable, "-c", parent_code, "{prompt}"),
+        expected_executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        expected_executable_size=executable.stat().st_size,
+        registration_id="python-success-test",
+        registration_version="1",
+        configuration_digest="c" * 64,
+    )
     prompt = tmp_path / "prompt.md"
     prompt.write_text("safe", encoding="utf-8")
     result = provider.run(

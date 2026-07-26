@@ -172,6 +172,10 @@ def test_provider_executable_replacement_in_place_is_detected(
     provider = CliProvider(
         (str(executable), "{prompt}"),
         expected_executable_sha256=digest,
+        expected_executable_size=executable.stat().st_size,
+        registration_id="replacement-test",
+        registration_version="1",
+        configuration_digest="c" * 64,
     )
     provider.validate()
     executable.write_bytes(b"replacement")
@@ -311,7 +315,8 @@ def test_attempt_record_and_report_use_actual_instance_and_executable_digest(
     assert latest["retry_of"]
     assert latest["outcome"] == "selected"
     builder = latest["decisions"][0]
-    assert builder["provider_attempt_id"]
+    assert "provider_attempt_id" not in builder
+    assert "execution_started_at" not in builder
     assert builder["run_id"] == run_id
     assert builder["task_id"] == "task-routing"
     assert builder["stage_id"] == "author_execution"
@@ -321,8 +326,8 @@ def test_attempt_record_and_report_use_actual_instance_and_executable_digest(
     assert builder["stable_registration_digest"]
     assert "executable_sha256" in builder
     assert builder["stable_registration"]["configuration_digest"]
-    assert builder["execution_started_at"]
-    assert builder["execution_ended_at"] is None
+    assert "execution_started_at" not in builder
+    assert "execution_ended_at" not in builder
     app.workflow._complete_routing_attempt(run_id, "COMPLETED")
     app.workflow._finalize_report(run_id, task, None, "BLOCKED")
     report = json.loads(
@@ -335,5 +340,6 @@ def test_attempt_record_and_report_use_actual_instance_and_executable_digest(
     assert reported["stable_registration_digest"] == (
         builder["stable_registration_digest"]
     )
-    assert reported["outcome"] == "COMPLETED"
-    assert reported["execution_ended_at"]
+    assert reported["outcome"] == "selected"
+    assert reported["disposition"] == "COMPLETED"
+    assert "execution_ended_at" not in reported
