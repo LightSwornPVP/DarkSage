@@ -495,6 +495,10 @@ class KeeperApplication:
     ) -> dict[str, Any]:
         if minutes < 1 or minutes > 1440:
             raise ValueError("authorization duration must be between 1 and 1440 minutes")
+        if capability not in {"commit", "push", "network", "verification_waiver"}:
+            raise ValueError("authorization capability is unsupported")
+        if not approving_authority.strip():
+            raise ValueError("approving authority is required")
         identifier = f"authorization-{uuid.uuid4().hex}"
         authorization = {
             "id": identifier,
@@ -511,6 +515,75 @@ class KeeperApplication:
         }
         self.store.upsert("authorizations", identifier, authorization)
         return authorization
+
+    def authorization_preview(
+        self, capability: str, run_id: str
+    ) -> dict[str, Any]:
+        if capability not in {"commit", "push"}:
+            raise ValueError("run-aware authorization supports commit or push")
+        run = self.run_status(run_id)
+        task = self.store.get("tasks", str(run["task_id"]))
+        if task is None:
+            raise LookupError("authorization task is unavailable")
+        worktree_value = run.get("worktree")
+        if not isinstance(worktree_value, str):
+            raise ValueError("run has no authoritative worktree")
+        worktree = Path(worktree_value).resolve()
+        inspection = self.git.inspect(worktree)
+        if capability == "commit":
+            if run.get("status") != "awaiting_approval":
+                raise PermissionError("commit authorization requires an approval-ready run")
+            if not inspection.staged:
+                raise PermissionError("commit authorization requires exact staged paths")
+            return {
+                "task_id": str(task["id"]),
+                "run_id": run_id,
+                "repository": str(Path(str(task["repository"])).resolve()),
+                "worktree": str(worktree),
+                "branch": inspection.branch,
+                "head": inspection.head,
+                "staged_paths": sorted(inspection.staged),
+            }
+        if run.get("status") != "awaiting_push_authorization":
+            raise PermissionError("push authorization requires a committed awaiting-push run")
+        remote = str(task.get("push_remote", "origin"))
+        remote_url = self.git.remote_url(worktree, remote)
+        source_ref = inspection.branch
+        destination_ref = str(
+            task.get("push_destination") or f"refs/heads/{source_ref}"
+        )
+        return {
+            "task_id": str(task["id"]),
+            "run_id": run_id,
+            "repository": str(Path(str(task["repository"])).resolve()),
+            "worktree": str(worktree),
+            "branch": inspection.branch,
+            "head": inspection.head,
+            "remote": remote,
+            "remote_url": remote_url,
+            "source_ref": source_ref,
+            "destination_ref": destination_ref,
+            "expected_commit": inspection.head,
+            "force": False,
+        }
+
+    def create_run_authorization(
+        self,
+        capability: str,
+        run_id: str,
+        approving_authority: str,
+        minutes: int,
+    ) -> dict[str, Any]:
+        scope = self.authorization_preview(capability, run_id)
+        return self.create_authorization(
+            capability,
+            str(scope["task_id"]),
+            str(scope["repository"]),
+            approving_authority,
+            minutes,
+            reusable=False,
+            scope=scope,
+        )
 
     def revoke_authorization(self, identifier: str) -> None:
         value = self.store.get("authorizations", identifier)

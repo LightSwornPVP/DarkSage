@@ -7,6 +7,7 @@ from pathlib import Path
 
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.service import KeeperApplication
+from keeper.desktop import KeeperViewModel
 
 
 def git(root: Path, *args: str) -> str:
@@ -39,6 +40,7 @@ def test_authorized_commit_and_push_are_lifecycle_stages(tmp_path: Path) -> None
     git(repo, "remote", "add", "local", str(remote))
 
     app = KeeperApplication(tmp_path / "data")
+    model = KeeperViewModel(app)
     project = app.add_project(repo)
     task = app.create_task(
         {
@@ -60,45 +62,28 @@ def test_authorized_commit_and_push_are_lifecycle_stages(tmp_path: Path) -> None
     ready = wait(app, run_id, "awaiting_approval")
     worktree = Path(str(ready["worktree"]))
     inspection = GitSafetyService().inspect(worktree)
-    expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-    app.create_authorization(
-        "commit",
-        str(task["id"]),
-        str(repo),
-        "Founder",
-        5,
-        scope={
+    commit_authorization = model.create_authorization(
+        {
+            "capability": "commit",
             "run_id": run_id,
-            "worktree": str(worktree),
-            "branch": inspection.branch,
-            "head": inspection.head,
-            "staged_paths": inspection.staged,
-            "expires_at": expires,
-        },
+            "approving_authority": "Founder",
+            "minutes": 5,
+        }
     )
+    assert commit_authorization["staged_paths"] == inspection.staged
     app.approve_run(run_id, "Founder")
     pushed = wait(app, run_id, "awaiting_push_authorization")
     commit_hash = str(pushed["commit_hash"])
-    app.create_authorization(
-        "push",
-        str(task["id"]),
-        str(repo),
-        "Founder",
-        5,
-        scope={
+    push_authorization = model.create_authorization(
+        {
+            "capability": "push",
             "run_id": run_id,
-            "worktree": str(worktree),
-            "branch": inspection.branch,
-            "head": commit_hash,
-            "remote": "local",
-            "remote_url": str(remote),
-            "source_ref": inspection.branch,
-            "destination_ref": f"refs/heads/{inspection.branch}",
-            "expected_commit": commit_hash,
-            "force": False,
-            "expires_at": expires,
-        },
+            "approving_authority": "Founder",
+            "minutes": 5,
+        }
     )
+    assert push_authorization["expected_commit"] == commit_hash
+    assert push_authorization["remote_url"] == str(remote)
     completed = app.wait_for_run(run_id, 30)
     assert completed["status"] == "COMPLETED"
     transitions = [item["to"] for item in completed["history"]]

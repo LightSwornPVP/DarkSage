@@ -36,14 +36,15 @@ class KeeperViewModel:
         )
 
     def create_authorization(self, values: dict[str, Any]) -> dict[str, Any]:
-        return self.application.create_authorization(
+        return self.application.create_run_authorization(
             str(values["capability"]),
-            str(values["task_id"]),
-            str(values["repository"]),
+            str(values["run_id"]),
             str(values["approving_authority"]),
             int(values["minutes"]),
-            bool(values.get("reusable", False)),
         )
+
+    def authorization_preview(self, capability: str, run_id: str) -> dict[str, Any]:
+        return self.application.authorization_preview(capability, run_id)
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         return self.application.start_task(task_id)
@@ -307,9 +308,7 @@ class KeeperDesktop:
         form.pack(fill="x", padx=8, pady=8)
         self.authorization_fields: dict[str, Any] = {}
         for label, key, default in (
-            ("Action (commit/push/network)", "capability", "commit"),
-            ("Task ID", "task_id", ""),
-            ("Exact repository", "repository", ""),
+            ("Action (commit/push)", "capability", "commit"),
             ("Approving user", "approving_authority", ""),
             ("Expires in minutes", "minutes", "15"),
         ):
@@ -318,8 +317,11 @@ class KeeperDesktop:
             self.authorization_fields[key] = variable
             self.ttk.Entry(form, textvariable=variable).pack(fill="x")
         self.ttk.Button(
+            form, text="Preview exact current scope", command=self._preview_authorization
+        ).pack(anchor="w", pady=4)
+        self.ttk.Button(
             form, text="Grant scoped one-time authorization", command=self._authorize
-        ).pack(anchor="w", pady=8)
+        ).pack(anchor="w", pady=4)
         self.ttk.Label(form, text="Waiver ID to revoke").pack(anchor="w")
         self.waiver_id = self.tk.StringVar()
         self.ttk.Entry(form, textvariable=self.waiver_id).pack(fill="x")
@@ -486,11 +488,33 @@ class KeeperDesktop:
         self._handle(lambda: self.view_model.create_task(values), "Task saved")
 
     def _authorize(self) -> None:
+        if self.current_run_id is None:
+            self._show_error("Select an active run before authorizing Git")
+            return
         values = {key: variable.get() for key, variable in self.authorization_fields.items()}
+        values["run_id"] = self.current_run_id
         self._handle(
             lambda: self.view_model.create_authorization(values),
             "Scoped authorization recorded",
         )
+
+    def _preview_authorization(self) -> None:
+        if self.current_run_id is None:
+            self._show_error("Select an active run before previewing authorization")
+            return
+        capability = str(self.authorization_fields["capability"].get())
+        try:
+            preview = self.view_model.authorization_preview(
+                capability, self.current_run_id
+            )
+            self._set_text(
+                self.authorization_text,
+                "Exact derived authorization scope:\n"
+                + json.dumps(preview, indent=2),
+            )
+            self.status.set("Authorization scope previewed")
+        except Exception as error:
+            self._show_error(str(error))
 
     def _revoke_waiver(self) -> None:
         self._handle(

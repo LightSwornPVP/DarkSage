@@ -164,6 +164,7 @@ def test_git_commit_authorization_is_scoped_expiring_and_one_time(
         "head": _git(repository, "rev-parse", "HEAD"),
         "staged_paths": ["readme.txt"],
         "approving_authority": "founder",
+        "issued_at": datetime.now(UTC).isoformat(),
         "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         "consumed_at": None,
         "revoked_at": None,

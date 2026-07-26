@@ -38,16 +38,7 @@ def test_view_model_first_run_project_task_authorization_and_demo(tmp_path: Path
             "target_branch": "test/desktop",
         }
     )
-    authorization = model.create_authorization(
-        {
-            "capability": "commit",
-            "task_id": task["id"],
-            "repository": project["repository"],
-            "approving_authority": "founder",
-            "minutes": 5,
-        }
-    )
-    assert authorization["consumed_at"] is None
+    assert task["provider_policy"] == "automatic"
     run = model.run_demo()
     assert run["status"] == "COMPLETED"
     routing = model.evidence_details(str(run["id"]), "routing")

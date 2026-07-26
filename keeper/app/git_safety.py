@@ -106,6 +106,7 @@ class GitSafetyService:
         branch: str,
     ) -> str:
         inspection = self.inspect(worktree)
+        self._require_registered_worktree(repository, worktree, branch)
         context: dict[str, object] = {
             "task_id": task_id,
             "run_id": run_id,
@@ -140,10 +141,11 @@ class GitSafetyService:
             or not source_ref
             or not destination_ref
             or any(value.startswith("-") for value in (remote, source_ref, destination_ref))
-            or "+" in destination_ref
+            or any(marker in source_ref or marker in destination_ref for marker in ("+", ":"))
         ):
             raise ValueError("push target is invalid")
         inspection = self.inspect(worktree)
+        self._require_registered_worktree(repository, worktree, inspection.branch)
         remote_url = self._git(
             worktree.resolve(), "remote", "get-url", remote
         ).stdout.strip()
@@ -170,6 +172,13 @@ class GitSafetyService:
         )
         authorization["consumed_at"] = datetime.now(UTC).isoformat()
         return result.stderr.strip() or result.stdout.strip()
+
+    def remote_url(self, worktree: Path, remote: str) -> str:
+        if not remote or remote.startswith("-"):
+            raise ValueError("remote name is invalid")
+        return self._git(
+            worktree.resolve(), "remote", "get-url", remote
+        ).stdout.strip()
 
     @staticmethod
     def reject_action(action: str) -> None:
@@ -218,12 +227,20 @@ class GitSafetyService:
         context: dict[str, object] | None = None,
     ) -> None:
         expires_at = authorization.get("expires_at")
+        issued_at = authorization.get("issued_at")
         try:
             expires = datetime.fromisoformat(str(expires_at))
+            issued = datetime.fromisoformat(str(issued_at))
         except (TypeError, ValueError) as error:
-            raise PermissionError("authorization expiration is malformed") from error
-        if expires.tzinfo is None or expires.utcoffset() is None:
-            raise PermissionError("authorization expiration must be timezone-aware")
+            raise PermissionError("authorization timestamps are malformed") from error
+        if (
+            expires.tzinfo is None
+            or expires.utcoffset() is None
+            or issued.tzinfo is None
+            or issued.utcoffset() is None
+        ):
+            raise PermissionError("authorization timestamps must be timezone-aware")
+        now = datetime.now(UTC)
         if (
             not authorization.get("id")
             or
@@ -232,7 +249,9 @@ class GitSafetyService:
             or authorization.get("consumed_at") is not None
             or authorization.get("revoked_at") is not None
             or not authorization.get("approving_authority")
-            or expires <= datetime.now(UTC)
+            or authorization.get("reusable") not in {None, False}
+            or issued > now
+            or expires <= now
         ):
             raise PermissionError(f"explicit scoped {capability} authorization is required")
         for key, actual in (context or {}).items():
@@ -241,3 +260,23 @@ class GitSafetyService:
                 expected = sorted(str(item) for item in expected) if isinstance(expected, list) else expected
             if expected != actual:
                 raise PermissionError(f"authorization scope mismatch: {key}")
+
+    def _require_registered_worktree(
+        self, repository: Path, worktree: Path, branch: str
+    ) -> None:
+        repository_root = repository.resolve()
+        worktree_root = worktree.resolve()
+        if worktree_root == repository_root:
+            return
+        registered = self._parse_worktrees(
+            self._git(
+                repository_root, "worktree", "list", "--porcelain"
+            ).stdout
+        )
+        expected_ref = f"refs/heads/{branch}"
+        if not any(
+            Path(item.get("worktree", "")).resolve() == worktree_root
+            and item.get("branch") == expected_ref
+            for item in registered
+        ):
+            raise PermissionError("worktree is not registered to the authorized repository")
