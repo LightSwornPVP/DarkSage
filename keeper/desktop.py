@@ -43,6 +43,75 @@ class KeeperViewModel:
             bool(values.get("reusable", False)),
         )
 
+    def start_task(self, task_id: str) -> dict[str, Any]:
+        return self.application.start_task(task_id)
+
+    def run_status(self, run_id: str) -> dict[str, Any]:
+        return self.application.run_status(run_id)
+
+    def pause(self, run_id: str) -> None:
+        self.application.pause_run(run_id)
+
+    def resume(self, run_id: str) -> None:
+        self.application.resume_run(run_id)
+
+    def cancel(self, run_id: str) -> None:
+        self.application.cancel_run(run_id)
+
+    def approve(self, run_id: str, authority: str) -> None:
+        self.application.approve_run(run_id, authority)
+
+    def reject(self, run_id: str, authority: str, reason: str) -> None:
+        self.application.reject_run(run_id, authority, reason)
+
+    def evidence(self, run_id: str, kind: str) -> Path:
+        return self.application.open_evidence(run_id, kind)
+
+
+class FirstRunController:
+    STEPS = ("boundaries", "storage", "repository", "providers", "diagnostics", "demo")
+
+    def __init__(self, application: KeeperApplication) -> None:
+        self.application = application
+        self.index = 0
+        self.evidence_directory = str(application.data_directory / "evidence")
+        self.repository = ""
+        self.provider_policy = "mock"
+
+    @property
+    def step(self) -> str:
+        return self.STEPS[self.index]
+
+    def back(self) -> str:
+        self.index = max(0, self.index - 1)
+        return self.step
+
+    def next(self) -> str:
+        self._validate()
+        self.index = min(len(self.STEPS) - 1, self.index + 1)
+        return self.step
+
+    def finish(self) -> None:
+        if self.index != len(self.STEPS) - 1:
+            raise ValueError("complete every setup step before finishing")
+        self._validate()
+        if self.repository:
+            self.application.add_project(Path(self.repository))
+        self.application.store.upsert(
+            "settings", "routing", {"default_provider_policy": self.provider_policy}
+        )
+        self.application.finish_setup(Path(self.evidence_directory))
+
+    def _validate(self) -> None:
+        if self.step == "storage":
+            target = Path(self.evidence_directory).resolve()
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".keeper-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        if self.step == "repository" and self.repository:
+            self.application.git.inspect(Path(self.repository))
+
 
 class KeeperDesktop:
     COLORS = {
@@ -67,6 +136,7 @@ class KeeperDesktop:
         self.root.minsize(900, 600)
         self._configure_style()
         self.status = tk.StringVar(value="Ready")
+        self.current_run_id: str | None = None
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=12, pady=12)
         self._build_dashboard()
@@ -151,6 +221,22 @@ class KeeperDesktop:
 
     def _build_workflow(self) -> None:
         frame = self._tab("Workflow")
+        controls = self.ttk.Frame(frame)
+        controls.pack(fill="x", padx=8, pady=8)
+        for label, command in (
+            ("Start", self._start_task),
+            ("Pause", lambda: self._run_control("pause")),
+            ("Resume", lambda: self._run_control("resume")),
+            ("Cancel", lambda: self._run_control("cancel")),
+            ("Approve", lambda: self._run_control("approve")),
+            ("Reject", lambda: self._run_control("reject")),
+            ("Open logs", lambda: self._open_evidence("folder")),
+            ("Open evidence", lambda: self._open_evidence("folder")),
+            ("Open report", lambda: self._open_evidence("markdown")),
+        ):
+            self.ttk.Button(controls, text=label, command=command).pack(
+                side="left", padx=2
+            )
         self.workflow_text = self._readonly_text(frame)
         self._set_text(self.workflow_text, "No workflow is running.\nPause, resume, cancel, logs, retries, stages and artifacts appear here.")
 
@@ -207,6 +293,7 @@ class KeeperDesktop:
 
     def _first_run(self) -> None:
         diagnostics = self.application.diagnostics()
+        controller = FirstRunController(self.application)
         wizard = self.tk.Toplevel(self.root)
         wizard.title("Keeper first-run setup")
         wizard.geometry("680x520")
@@ -221,38 +308,60 @@ class KeeperDesktop:
             f"{'available' if item['available'] else 'optional / unavailable'}"
             for item in diagnostics["providers"]
         )
-        body.insert(
-            "1.0",
-            "Welcome to Keeper\n\n"
-            "Keeper coordinates controlled local development workflows. It cannot "
-            "merge, force-push, deploy, trade, spend money, or delete repositories, "
-            "branches, or worktrees.\n\n"
-            f"Git: {'available' if diagnostics['git_available'] else 'missing'}\n"
-            f"Python: {diagnostics['python']}\n"
-            f"Writable data directory: {diagnostics['data_directory_writable']}\n\n"
-            f"Providers\n{provider_lines}\n\n"
-            "The deterministic mock provider is always available. After setup, add "
-            "the first repository in Projects and optionally run the safe demonstration.",
-        )
-        body.configure(state="disabled")
+        evidence = self.tk.StringVar(value=controller.evidence_directory)
+        repository = self.tk.StringVar()
+
+        def render() -> None:
+            controller.evidence_directory = evidence.get()
+            controller.repository = repository.get()
+            descriptions = {
+                "boundaries": "Keeper cannot merge, force-push, deploy, trade, spend, or delete repositories.",
+                "storage": f"Confirm evidence directory:\n{evidence.get()}",
+                "repository": f"Optional first Git repository:\n{repository.get() or '(none yet)'}",
+                "providers": f"Detected providers:\n{provider_lines}",
+                "diagnostics": json.dumps(diagnostics, indent=2),
+                "demo": "Finish setup, then use Home to run the unified mock demonstration.",
+            }
+            self._set_text(body, f"Step: {controller.step}\n\n{descriptions[controller.step]}")
+
+        entries = self.ttk.Frame(wizard)
+        entries.pack(fill="x", padx=12)
+        self.ttk.Label(entries, text="Evidence directory").pack(anchor="w")
+        self.ttk.Entry(entries, textvariable=evidence).pack(fill="x")
+        self.ttk.Label(entries, text="First repository (optional)").pack(anchor="w")
+        self.ttk.Entry(entries, textvariable=repository).pack(fill="x")
 
         def finish() -> None:
-            self.application.finish_setup()
+            controller.evidence_directory = evidence.get()
+            controller.repository = repository.get()
+            controller.finish()
             wizard.destroy()
             self.status.set(
                 "First-run setup completed. Add a repository or run the mock demonstration."
             )
             self.refresh()
 
-        self.ttk.Button(wizard, text="Complete safe setup", command=finish).pack(
-            pady=(0, 12)
-        )
+        navigation = self.ttk.Frame(wizard)
+        navigation.pack(pady=12)
+
+        def move(direction: str) -> None:
+            try:
+                controller.back() if direction == "back" else controller.next()
+                render()
+            except Exception as error:
+                self._show_error(str(error))
+
+        self.ttk.Button(navigation, text="Back", command=lambda: move("back")).pack(side="left")
+        self.ttk.Button(navigation, text="Next", command=lambda: move("next")).pack(side="left", padx=8)
+        self.ttk.Button(navigation, text="Finish", command=finish).pack(side="left")
+        render()
 
     def _add_project(self) -> None:
         self._handle(lambda: self.view_model.add_project(self.project_path.get()), "Repository added")
 
     def _create_task(self) -> None:
         values = {key: variable.get() for key, variable in self.task_fields.items()}
+        values["requires_manual_approval"] = True
         for key in (
             "included_paths",
             "excluded_paths",
@@ -283,6 +392,59 @@ class KeeperDesktop:
                 self.root.after(0, lambda: self._show_error(str(error)))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _start_task(self) -> None:
+        tasks = self.application.tasks()
+        if not tasks:
+            self._show_error("Create a task first")
+            return
+        try:
+            run = self.view_model.start_task(str(tasks[0]["id"]))
+            self.current_run_id = str(run["id"])
+            self.status.set(f"Run started: {self.current_run_id}")
+            self.root.after(250, self._poll_run)
+        except Exception as error:
+            self._show_error(str(error))
+
+    def _poll_run(self) -> None:
+        if self.current_run_id is None:
+            return
+        try:
+            run = self.view_model.run_status(self.current_run_id)
+            self._set_text(self.workflow_text, json.dumps(run, indent=2))
+            if str(run.get("status", "")).lower() in {
+                "completed", "blocked", "cancelled", "rejected"
+            }:
+                self.refresh()
+                return
+        except Exception as error:
+            self.status.set(str(error))
+            return
+        self.root.after(500, self._poll_run)
+
+    def _run_control(self, action: str) -> None:
+        if self.current_run_id is None:
+            self._show_error("No active run")
+            return
+        operations: dict[str, Callable[[], Any]] = {
+            "pause": lambda: self.view_model.pause(self.current_run_id or ""),
+            "resume": lambda: self.view_model.resume(self.current_run_id or ""),
+            "cancel": lambda: self.view_model.cancel(self.current_run_id or ""),
+            "approve": lambda: self.view_model.approve(self.current_run_id or "", "Founder"),
+            "reject": lambda: self.view_model.reject(
+                self.current_run_id or "", "Founder", "Rejected in Keeper desktop"
+            ),
+        }
+        self._handle(operations[action], f"Run action completed: {action}")
+
+    def _open_evidence(self, kind: str) -> None:
+        if self.current_run_id is None:
+            self._show_error("No selected run")
+            return
+        self._handle(
+            lambda: self.view_model.evidence(self.current_run_id or "", kind),
+            f"Opened {kind}",
+        )
 
     def _handle(self, operation: Callable[[], Any], success: str) -> None:
         try:

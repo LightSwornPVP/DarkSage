@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +26,9 @@ from keeper.workspace import WorkspaceManager
 class ActiveRun:
     thread: threading.Thread
     cancel_requested: threading.Event
+    pause_requested: threading.Event
+    approval_ready: threading.Event
+    approval_decision: str | None = None
 
 
 class WorkflowCoordinator:
@@ -60,14 +64,16 @@ class WorkflowCoordinator:
         )
         self.store.upsert("runs", run_id, run)
         cancel = threading.Event()
+        pause = threading.Event()
+        approval = threading.Event()
         thread = threading.Thread(
             target=self._execute_guarded,
-            args=(run_id, task, cancel),
+            args=(run_id, task, cancel, pause, approval),
             name=f"keeper-{run_id}",
             daemon=True,
         )
         with self._lock:
-            self._active[run_id] = ActiveRun(thread, cancel)
+            self._active[run_id] = ActiveRun(thread, cancel, pause, approval)
         thread.start()
         return self._run(run_id)
 
@@ -88,14 +94,61 @@ class WorkflowCoordinator:
         if active is None or not active.thread.is_alive():
             raise ValueError("run is not active")
         active.cancel_requested.set()
+        active.approval_ready.set()
         self.lifecycle.transition(run_id, RunStage.CANCELLED)
         self.notify("run_cancelled", "Run cancelled", f"Run {run_id}")
 
+    def pause(self, run_id: str) -> None:
+        active = self._active_run(run_id)
+        if not active.pause_requested.is_set():
+            active.pause_requested.set()
+            self.lifecycle.transition(run_id, RunStage.INTERRUPTED)
+            self.notify("workflow_blocked", "Workflow paused", f"Run {run_id}")
+
+    def resume(self, run_id: str) -> None:
+        active = self._active_run(run_id)
+        record = self._run(run_id)
+        interrupted = record.get("interrupted_from")
+        if not interrupted:
+            raise ValueError("run is not paused")
+        self.lifecycle.transition(run_id, RunStage(str(interrupted)))
+        active.pause_requested.clear()
+
+    def approve(self, run_id: str, authority: str) -> None:
+        self._decide(run_id, authority, "approved", "")
+
+    def reject(self, run_id: str, authority: str, reason: str) -> None:
+        self._decide(run_id, authority, "rejected", reason)
+
+    def _decide(
+        self, run_id: str, authority: str, decision: str, reason: str
+    ) -> None:
+        if not authority.strip() or (decision == "rejected" and not reason.strip()):
+            raise ValueError("approval identity and rejection reason are required")
+        active = self._active_run(run_id)
+        record = self._run(run_id)
+        if record.get("stage") != RunStage.APPROVAL_DECISION.value:
+            raise ValueError("run is not awaiting approval")
+        active.approval_decision = decision
+        record["approval"] = {
+            "decision": decision,
+            "approving_authority": authority,
+            "reason": reason,
+            "timestamp": _now(),
+        }
+        self.store.upsert("runs", run_id, record)
+        active.approval_ready.set()
+
     def _execute_guarded(
-        self, run_id: str, task: dict[str, Any], cancel: threading.Event
+        self,
+        run_id: str,
+        task: dict[str, Any],
+        cancel: threading.Event,
+        pause: threading.Event,
+        approval: threading.Event,
     ) -> None:
         try:
-            self._execute(run_id, task, cancel)
+            self._execute(run_id, task, cancel, pause, approval)
         except Exception as error:
             record = self._run(run_id)
             if record.get("stage") not in {
@@ -113,7 +166,12 @@ class WorkflowCoordinator:
                 self._active.pop(run_id, None)
 
     def _execute(
-        self, run_id: str, stored: dict[str, Any], cancel: threading.Event
+        self,
+        run_id: str,
+        stored: dict[str, Any],
+        cancel: threading.Event,
+        pause: threading.Event,
+        approval: threading.Event,
     ) -> None:
         repository = Path(str(stored["repository"])).resolve()
         self._advance(run_id, RunStage.SCOPE_VALIDATION)
@@ -148,7 +206,9 @@ class WorkflowCoordinator:
         domain_task = _domain_task(stored, run_id)
         routed_providers: dict[str, AgentProvider] = dict(providers)
         router = ProviderRouter(routed_providers, routes)
-        observer = _LifecycleObserver(self.lifecycle, run_id, cancel)
+        observer = _LifecycleObserver(
+            self.lifecycle, run_id, cancel, pause, self.notify
+        )
         engine = Keeper(
             config,
             AgentRunner(providers["builder"], state / "runs", 30),
@@ -164,6 +224,27 @@ class WorkflowCoordinator:
             self.notify("workflow_blocked", "Workflow blocked", f"Run {run_id}")
             return
         observer.finish_validation()
+        if bool(stored.get("requires_manual_approval", False)):
+            record = self._run(run_id)
+            record["status"] = "awaiting_approval"
+            self.store.upsert("runs", run_id, record)
+            self.notify("authorization_required", "Approval required", f"Run {run_id}")
+            while not approval.wait(0.1):
+                if cancel.is_set():
+                    return
+            if cancel.is_set():
+                return
+            active = self._active_run(run_id)
+            if active.approval_decision != "approved":
+                self.lifecycle.transition(run_id, RunStage.BLOCKED)
+                record = self._run(run_id)
+                record.update(
+                    {"status": "REJECTED", "outcome": "rejected", "ended_at": _now()}
+                )
+                self.store.upsert("runs", run_id, record)
+                self.notify("run_rejected", "Run rejected", f"Run {run_id}")
+                return
+            self.notify("run_approved", "Run approved", f"Run {run_id}")
         report = {
             **self._run(run_id),
             "task": stored,
@@ -204,18 +285,36 @@ class WorkflowCoordinator:
             raise LookupError("run not found")
         return run
 
+    def _active_run(self, run_id: str) -> ActiveRun:
+        with self._lock:
+            active = self._active.get(run_id)
+        if active is None:
+            raise ValueError("run is not active")
+        return active
+
 
 class _LifecycleObserver:
     def __init__(
-        self, lifecycle: RunLifecycle, run_id: str, cancel: threading.Event
+        self,
+        lifecycle: RunLifecycle,
+        run_id: str,
+        cancel: threading.Event,
+        pause: threading.Event,
+        notify: Callable[[str, str, str], dict[str, Any]],
     ) -> None:
         self.lifecycle = lifecycle
         self.run_id = run_id
         self.cancel = cancel
+        self.pause = pause
+        self.notify = notify
 
     def __call__(self, value: str) -> None:
         if self.cancel.is_set():
             raise RuntimeError("run cancellation requested")
+        while self.pause.is_set():
+            if self.cancel.is_set():
+                raise RuntimeError("run cancellation requested")
+            time.sleep(0.05)
         mapping = {
             "BUILDING": RunStage.AUTHOR_EXECUTION,
             "SELF_VERIFYING": RunStage.AUTHOR_SELF_VERIFICATION,
@@ -227,6 +326,12 @@ class _LifecycleObserver:
         target = mapping.get(value)
         if target is None:
             return
+        if target == RunStage.REPAIR_EXECUTION:
+            self.notify(
+                "blocking_finding", "Critical/High finding", f"Run {self.run_id}"
+            )
+        if target == RunStage.POST_REPAIR_VERIFICATION:
+            self.notify("repair_completed", "Repair completed", f"Run {self.run_id}")
         current = RunStage(str(self.lifecycle.store.get("runs", self.run_id)["stage"]))  # type: ignore[index]
         if target == RunStage.FINAL_VALIDATION and current == RunStage.POST_REPAIR_VERIFICATION:
             self.lifecycle.transition(self.run_id, RunStage.INDEPENDENT_AUDIT)

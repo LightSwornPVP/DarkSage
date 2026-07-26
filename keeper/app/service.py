@@ -10,6 +10,7 @@ from typing import Any
 
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
+from keeper.app.notifications import deliver_local_notification
 from keeper.app.reporting import finalize_evidence
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
@@ -130,6 +131,9 @@ class KeeperApplication:
             "repository": str(Path(repository).resolve()),
             "provider_policy": str(values.get("provider_policy", "mock")),
             "mock_scenario": str(values.get("mock_scenario", "repair")),
+            "requires_manual_approval": bool(
+                values.get("requires_manual_approval", False)
+            ),
             "status": "INTAKE",
             "created_at": _now(),
         }
@@ -140,17 +144,34 @@ class KeeperApplication:
         return self.store.list("tasks")
 
     def pause_run(self, run_id: str) -> None:
-        self.lifecycle.transition(run_id, RunStage.INTERRUPTED)
-        self.notify("workflow_blocked", "Workflow paused", f"Run {run_id} is recoverable")
+        self.workflow.pause(run_id)
 
     def resume_run(self, run_id: str) -> None:
-        run = self.store.get("runs", run_id)
-        if run is None or not run.get("interrupted_from"):
-            raise ValueError("run has no recoverable interrupted stage")
-        self.lifecycle.transition(run_id, RunStage(str(run["interrupted_from"])))
+        self.workflow.resume(run_id)
 
     def cancel_run(self, run_id: str) -> None:
         self.workflow.cancel(run_id)
+
+    def approve_run(self, run_id: str, authority: str) -> None:
+        self.workflow.approve(run_id, authority)
+
+    def reject_run(self, run_id: str, authority: str, reason: str) -> None:
+        self.workflow.reject(run_id, authority, reason)
+
+    def run_status(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get("runs", run_id)
+        if run is None:
+            raise LookupError("run not found")
+        evidence = run.get("evidence_root")
+        latest = ""
+        if isinstance(evidence, str):
+            logs = sorted(Path(evidence).glob(".ai-workflow/runs/*/*.log"))
+            if logs:
+                try:
+                    latest = redact_text(logs[-1].read_text(encoding="utf-8"), 20_000)
+                except OSError:
+                    latest = ""
+        return {**run, "latest_log": latest}
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         return self.workflow.start(task_id)
@@ -172,6 +193,9 @@ class KeeperApplication:
         branch: str = "",
         provider: str = "",
         outcome: str = "",
+        task_id: str = "",
+        date_from: str = "",
+        date_to: str = "",
     ) -> list[dict[str, Any]]:
         values = self.store.list("runs")
         filters = {
@@ -179,6 +203,7 @@ class KeeperApplication:
             "branch": branch,
             "provider": provider,
             "status": outcome,
+            "task_id": task_id,
         }
         return [
             item
@@ -187,7 +212,39 @@ class KeeperApplication:
                 not expected or str(item.get(key, "")) == expected
                 for key, expected in filters.items()
             )
+            and (not date_from or str(item.get("started_at", "")) >= date_from)
+            and (not date_to or str(item.get("started_at", "")) <= date_to)
         ]
+
+    def evidence_path(self, run_id: str, kind: str = "folder") -> Path:
+        run = self.store.get("runs", run_id)
+        if run is None:
+            raise LookupError("run not found")
+        root_value = run.get("evidence_root")
+        if not isinstance(root_value, str):
+            raise ValueError("run has no finalized evidence")
+        root = Path(root_value).resolve()
+        allowed_root = (self.data_directory / "evidence").resolve()
+        if not root.is_relative_to(allowed_root):
+            raise PermissionError("evidence path is outside Keeper storage")
+        choices = {
+            "folder": root,
+            "markdown": root / "final-report.md",
+            "json": root / "final-report.json",
+        }
+        if kind not in choices or not choices[kind].exists():
+            raise ValueError("requested evidence target is unavailable")
+        return choices[kind]
+
+    def open_evidence(self, run_id: str, kind: str = "folder") -> Path:
+        target = self.evidence_path(run_id, kind)
+        subprocess.Popen(
+            ["explorer.exe", str(target)],
+            cwd=self.data_directory,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return target
 
     def save_template(self, name: str, task: dict[str, Any]) -> None:
         self.store.upsert("policies", f"template:{name}", {"name": name, "task": task})
@@ -246,7 +303,7 @@ class KeeperApplication:
 
     def notify(self, event: str, title: str, detail: str) -> dict[str, Any]:
         identifier = f"notification-{uuid.uuid4().hex}"
-        value = {
+        value: dict[str, Any] = {
             "id": identifier,
             "event": event,
             "title": redact_text(title, 120),
@@ -255,6 +312,15 @@ class KeeperApplication:
             "read_at": None,
         }
         self.store.upsert("notifications", identifier, value)
+        settings = self.store.get("settings", "application") or {}
+        if bool(settings.get("os_notifications", False)):
+            delivery = deliver_local_notification(event, value["title"], value["detail"])
+            value["delivery"] = {
+                "delivered": delivery.delivered,
+                "channel": delivery.channel,
+                "detail": delivery.detail,
+            }
+            self.store.upsert("notifications", identifier, value)
         return value
 
     def dashboard(self) -> dict[str, Any]:

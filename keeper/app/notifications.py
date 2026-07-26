@@ -15,6 +15,8 @@ SUPPORTED_EVENTS = frozenset(
         "verification_failed",
         "run_approved",
         "run_completed",
+        "run_rejected",
+        "run_cancelled",
     }
 )
 
