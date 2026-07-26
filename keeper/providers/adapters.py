@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -41,8 +42,15 @@ class ProviderDiagnostic:
 
 class CodexCommandAdapter(CliProvider):
     def __init__(self, executable: str) -> None:
-        super().__init__((executable, "{prompt}"), provider_name="codex-command")
-        self.executable = executable
+        resolved = str(Path(executable).resolve(strict=True))
+        digest = hashlib.sha256(Path(resolved).read_bytes()).hexdigest()
+        super().__init__(
+            (resolved, "{prompt}"),
+            provider_name="codex-command",
+            expected_executable_sha256=digest,
+        )
+        self.executable = resolved
+        self.executable_sha256 = digest
         self.instance_id = uuid.uuid4().hex
 
     def build_command(self, request: AgentRequest) -> list[str]:
@@ -65,8 +73,15 @@ class ClaudeCommandAdapter(CliProvider):
     """Claude CLI adapter. Implemented against documented flags; locally unverified."""
 
     def __init__(self, executable: str) -> None:
-        super().__init__((executable, "{prompt}"), provider_name="claude-command")
-        self.executable = executable
+        resolved = str(Path(executable).resolve(strict=True))
+        digest = hashlib.sha256(Path(resolved).read_bytes()).hexdigest()
+        super().__init__(
+            (resolved, "{prompt}"),
+            provider_name="claude-command",
+            expected_executable_sha256=digest,
+        )
+        self.executable = resolved
+        self.executable_sha256 = digest
         self.instance_id = uuid.uuid4().hex
 
     def build_command(self, request: AgentRequest) -> list[str]:

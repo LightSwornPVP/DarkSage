@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
 import re
 import signal
@@ -19,9 +20,16 @@ from keeper.recovery import process_identity
 class CliProvider(AgentProvider):
     """Runs a configurable local development-agent command."""
 
-    def __init__(self, command_template: tuple[str, ...], provider_name: str = "primary") -> None:
+    def __init__(
+        self,
+        command_template: tuple[str, ...],
+        provider_name: str = "primary",
+        *,
+        expected_executable_sha256: str | None = None,
+    ) -> None:
         self.command_template = command_template
         self.provider_name = provider_name
+        self.expected_executable_sha256 = expected_executable_sha256
         self.instance_id = uuid.uuid4().hex
         self._active_process: subprocess.Popen[str] | None = None
         self._active_job: int | None = None
@@ -44,6 +52,13 @@ class CliProvider(AgentProvider):
         executable = self.command_template[0]
         if not Path(executable).exists() and shutil.which(executable) is None:
             raise RuntimeError(f"configured agent provider executable was not found: {executable}")
+        if self.expected_executable_sha256 is not None:
+            resolved = Path(executable).resolve(strict=True)
+            actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if actual != self.expected_executable_sha256:
+                raise PermissionError(
+                    "provider executable content changed after registration"
+                )
         if "{prompt}" not in self.command_template:
             raise RuntimeError("provider_command must include the {prompt} argument placeholder")
 

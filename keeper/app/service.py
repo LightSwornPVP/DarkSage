@@ -467,6 +467,16 @@ class KeeperApplication:
                 "provider_policy": preview["provider_policy"],
                 "from_routing_digest": preview["from_routing_digest"],
                 "to_routing_digest": preview["to_routing_digest"],
+                "source_attempt_id": preview["source_attempt_id"],
+                "destination_attempt_number": preview[
+                    "destination_attempt_number"
+                ],
+                "capability_requirements": preview[
+                    "capability_requirements"
+                ],
+                "independence_requirements": preview[
+                    "independence_requirements"
+                ],
                 "previous_decisions": preview["previous_decisions"],
                 "proposed_decisions": preview["proposed_decisions"],
             },

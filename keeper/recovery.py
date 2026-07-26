@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import ctypes
+import hashlib
 import json
 import os
-import hashlib
 import tempfile
-import ctypes
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -66,12 +66,207 @@ def process_exists(pid: int | None) -> bool:
     return True
 
 
+class RetainedProcessHandle(Protocol):
+    """A live OS process object retained across validation and termination."""
+
+    @property
+    def pid(self) -> int: ...
+
+    def identity(self) -> dict[str, object] | None: ...
+
+    def terminate_exact(self, exit_code: int = 1) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+class _WindowsRetainedProcessHandle:
+    def __init__(self, pid: int, handle: int) -> None:
+        self._pid = pid
+        self._handle = handle
+        self._closed = False
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    def identity(self) -> dict[str, object] | None:
+        if self._closed:
+            return None
+        return _windows_identity_from_handle(self._handle, self._pid)
+
+    def terminate_exact(self, exit_code: int = 1) -> bool:
+        if self._closed or self.identity() is None:
+            return False
+        kernel32 = _windows_kernel32()
+        kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        if not kernel32.TerminateProcess(self._handle, exit_code):
+            return False
+        wait_result = int(kernel32.WaitForSingleObject(self._handle, 5000))
+        return wait_result == 0 and self.identity() is None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        kernel32 = _windows_kernel32()
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(self._handle)
+        self._closed = True
+
+
+def retain_process_handle(pid: int) -> RetainedProcessHandle | None:
+    """Acquire one authoritative Windows process object for a destructive boundary."""
+    if os.name != "nt" or pid <= 0:
+        return None
+    kernel32 = _windows_kernel32()
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    access = 0x0001 | 0x1000 | 0x00100000
+    handle = kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        return None
+    retained = _WindowsRetainedProcessHandle(pid, int(handle))
+    if retained.identity() is None:
+        retained.close()
+        return None
+    return retained
+
+
+def _windows_kernel32() -> Any:
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _windows_identity_from_handle(
+    handle: int, expected_pid: int
+) -> dict[str, object] | None:
+    kernel32 = _windows_kernel32()
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    kernel32.GetProcessId.argtypes = (wintypes.HANDLE,)
+    kernel32.GetProcessId.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    ntdll.NtQueryInformationProcess.argtypes = (
+        wintypes.HANDLE,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    )
+    ntdll.NtQueryInformationProcess.restype = wintypes.LONG
+    if int(kernel32.GetProcessId(handle)) != expected_pid:
+        return None
+    exit_code = wintypes.DWORD()
+    if (
+        not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        or exit_code.value != 259
+    ):
+        return None
+    image_buffer = ctypes.create_unicode_buffer(32768)
+    image_size = wintypes.DWORD(len(image_buffer))
+    if not kernel32.QueryFullProcessImageNameW(
+        handle, 0, image_buffer, ctypes.byref(image_size)
+    ):
+        return None
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel_time = wintypes.FILETIME()
+    user_time = wintypes.FILETIME()
+    if not kernel32.GetProcessTimes(
+        handle,
+        ctypes.byref(creation),
+        ctypes.byref(exit_time),
+        ctypes.byref(kernel_time),
+        ctypes.byref(user_time),
+    ):
+        return None
+
+    class ProcessBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ("Reserved1", wintypes.LPVOID),
+            ("PebBaseAddress", wintypes.LPVOID),
+            ("Reserved2_0", wintypes.LPVOID),
+            ("Reserved2_1", wintypes.LPVOID),
+            ("UniqueProcessId", ctypes.c_size_t),
+            ("InheritedFromUniqueProcessId", ctypes.c_size_t),
+        ]
+
+    basic = ProcessBasicInformation()
+    returned = wintypes.ULONG()
+    if ntdll.NtQueryInformationProcess(
+        handle,
+        0,
+        ctypes.byref(basic),
+        ctypes.sizeof(basic),
+        ctypes.byref(returned),
+    ) != 0:
+        return None
+    required = wintypes.ULONG()
+    status = ntdll.NtQueryInformationProcess(
+        handle, 60, None, 0, ctypes.byref(required)
+    )
+    if status not in {-1073741820, -1073741789} or required.value <= 2:
+        return None
+    command_buffer = ctypes.create_string_buffer(required.value)
+    if ntdll.NtQueryInformationProcess(
+        handle,
+        60,
+        command_buffer,
+        required.value,
+        ctypes.byref(returned),
+    ) != 0:
+        return None
+    command_length = ctypes.cast(
+        command_buffer, ctypes.POINTER(wintypes.USHORT)
+    ).contents.value
+    pointer_offset = 8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 4
+    command_pointer = ctypes.c_void_p.from_buffer(
+        command_buffer, pointer_offset
+    ).value
+    if not command_pointer or not command_length:
+        return None
+    command_line = ctypes.wstring_at(command_pointer, command_length // 2)
+    creation_ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+    return {
+        "pid": expected_pid,
+        "creation_time": str(creation_ticks),
+        "executable": str(Path(image_buffer.value).resolve()),
+        "command_line_hash": hashlib.sha256(
+            command_line.strip().casefold().encode("utf-8")
+        ).hexdigest(),
+        "parent_pid": int(basic.InheritedFromUniqueProcessId),
+    }
+
+
 def process_identity(pid: int) -> dict[str, object] | None:
     if pid <= 0 or not process_exists(pid):
         return None
     if os.name == "nt":
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+        kernel32 = _windows_kernel32()
         kernel32.OpenProcess.argtypes = (
             wintypes.DWORD,
             wintypes.BOOL,
@@ -80,107 +275,11 @@ def process_identity(pid: int) -> dict[str, object] | None:
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         kernel32.CloseHandle.restype = wintypes.BOOL
-        kernel32.QueryFullProcessImageNameW.argtypes = (
-            wintypes.HANDLE,
-            wintypes.DWORD,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
-        )
-        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        kernel32.GetProcessTimes.argtypes = (
-            wintypes.HANDLE,
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-        )
-        kernel32.GetProcessTimes.restype = wintypes.BOOL
-        ntdll.NtQueryInformationProcess.argtypes = (
-            wintypes.HANDLE,
-            wintypes.ULONG,
-            wintypes.LPVOID,
-            wintypes.ULONG,
-            ctypes.POINTER(wintypes.ULONG),
-        )
-        ntdll.NtQueryInformationProcess.restype = wintypes.LONG
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
             return None
         try:
-            image_buffer = ctypes.create_unicode_buffer(32768)
-            image_size = wintypes.DWORD(len(image_buffer))
-            if not kernel32.QueryFullProcessImageNameW(
-                handle, 0, image_buffer, ctypes.byref(image_size)
-            ):
-                return None
-            creation = wintypes.FILETIME()
-            exit_time = wintypes.FILETIME()
-            kernel_time = wintypes.FILETIME()
-            user_time = wintypes.FILETIME()
-            if not kernel32.GetProcessTimes(
-                handle,
-                ctypes.byref(creation),
-                ctypes.byref(exit_time),
-                ctypes.byref(kernel_time),
-                ctypes.byref(user_time),
-            ):
-                return None
-
-            class ProcessBasicInformation(ctypes.Structure):
-                _fields_ = [
-                    ("Reserved1", wintypes.LPVOID),
-                    ("PebBaseAddress", wintypes.LPVOID),
-                    ("Reserved2_0", wintypes.LPVOID),
-                    ("Reserved2_1", wintypes.LPVOID),
-                    ("UniqueProcessId", ctypes.c_size_t),
-                    ("InheritedFromUniqueProcessId", ctypes.c_size_t),
-                ]
-
-            basic = ProcessBasicInformation()
-            returned = wintypes.ULONG()
-            if ntdll.NtQueryInformationProcess(
-                handle,
-                0,
-                ctypes.byref(basic),
-                ctypes.sizeof(basic),
-                ctypes.byref(returned),
-            ) != 0:
-                return None
-            required = wintypes.ULONG()
-            status = ntdll.NtQueryInformationProcess(
-                handle, 60, None, 0, ctypes.byref(required)
-            )
-            if status not in {-1073741820, -1073741789} or required.value <= 2:
-                return None
-            command_buffer = ctypes.create_string_buffer(required.value)
-            if ntdll.NtQueryInformationProcess(
-                handle,
-                60,
-                command_buffer,
-                required.value,
-                ctypes.byref(returned),
-            ) != 0:
-                return None
-            command_length = ctypes.cast(
-                command_buffer, ctypes.POINTER(wintypes.USHORT)
-            ).contents.value
-            pointer_offset = 8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 4
-            command_pointer = ctypes.c_void_p.from_buffer(
-                command_buffer, pointer_offset
-            ).value
-            if not command_pointer or not command_length:
-                return None
-            command_line = ctypes.wstring_at(command_pointer, command_length // 2)
-            creation_ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
-            return {
-                "pid": pid,
-                "creation_time": str(creation_ticks),
-                "executable": str(Path(image_buffer.value).resolve()),
-                "command_line_hash": hashlib.sha256(
-                    command_line.strip().casefold().encode("utf-8")
-                ).hexdigest(),
-                "parent_pid": int(basic.InheritedFromUniqueProcessId),
-            }
+            return _windows_identity_from_handle(int(handle), pid)
         finally:
             kernel32.CloseHandle(handle)
     proc = Path("/proc") / str(pid)
