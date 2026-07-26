@@ -180,8 +180,14 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
     )
     recovery = recovered["recovery"]
     assert recovery["provider_process_id"] == pid
-    assert recovery["attributable_tree_terminated"] is True
+    assert recovery["attributable_tree_terminated"] is False
     assert recovery["identity_verified"] is True
+    assert recovery["descendant_state"] == "ambiguous"
+    assert recovery["classification"] == "uncertain"
+    assert recovery["retry_safe"] is False
+    assert process_exists(pid)
+    assert process_exists(child_pid)
+    provider.cancel()
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert results and results[0].exit_code != 0

@@ -32,15 +32,19 @@ def _request(tmp_path: Path, prompt: str = "safe prompt") -> AgentRequest:
 
 def test_codex_adapter_uses_argument_array_and_output_schema(tmp_path: Path) -> None:
     request = _request(tmp_path, "content; Remove-Item -Recurse")
-    command = CodexCommandAdapter("codex.exe").build_command(request)
-    assert command[:2] == ["codex.exe", "exec"]
+    executable = tmp_path / "provider-one.exe"
+    executable.write_bytes(b"controlled provider")
+    command = CodexCommandAdapter(str(executable)).build_command(request)
+    assert command[:2] == [str(executable.resolve()), "exec"]
     assert command[-1] == "content; Remove-Item -Recurse"
     assert (tmp_path / "provider-output-schema.json").is_file()
 
 
 def test_claude_adapter_uses_argument_array_and_schema(tmp_path: Path) -> None:
-    command = ClaudeCommandAdapter("claude.exe").build_command(_request(tmp_path))
-    assert command[0] == "claude.exe"
+    executable = tmp_path / "provider-two.exe"
+    executable.write_bytes(b"controlled provider")
+    command = ClaudeCommandAdapter(str(executable)).build_command(_request(tmp_path))
+    assert command[0] == str(executable.resolve())
     assert "--json-schema" in command
     assert command[-2:] == ["-p", "safe prompt"]
 

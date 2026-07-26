@@ -10,7 +10,9 @@ import pytest
 
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.service import KeeperApplication
+from keeper.app.workflow import _routing_decision
 from keeper.desktop import KeeperViewModel
+from keeper.providers.adapters import ProviderCapabilities, ProviderDiagnostic
 from keeper.providers.base import AgentProvider
 from keeper.providers.mock import MockProvider
 
@@ -138,22 +140,30 @@ def _normal_routes(
     for role, key in routes.items():
         provider = providers[key]
         decisions.append(
-            {
-                "role": role,
-                "provider_id": provider.provider_name,
-                "provider": provider.provider_name,
-                "provider_instance_id": provider.instance_id,
-                "executable": "",
-                "capability": role,
-                "independence": (
+            _routing_decision(
+                role=role,
+                provider_id=provider.provider_name,
+                provider=provider,
+                diagnostic=ProviderDiagnostic(
+                    provider.provider_name,
+                    provider.provider_name,
+                    True,
+                    None,
+                    "built-in",
+                    "verified",
+                    ProviderCapabilities(local_only=True, streaming=False),
+                    "Controlled test provider.",
+                ),
+                capability=role,
+                independence=(
                     "independent-review"
                     if role in {"reviewer", "post_repair_reviewer"}
                     else "authoring"
                 ),
-                "reason": "controlled routing",
-                "reasons": ["controlled routing"],
-                "policy": "automatic",
-            }
+                reasons=["controlled routing"],
+                policy="automatic",
+                configured_paths={},
+            )
         )
     return providers, routes, decisions
 
