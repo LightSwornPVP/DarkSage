@@ -48,6 +48,7 @@ class CliProvider(AgentProvider):
         self.validate()
         request.stdout_path.parent.mkdir(parents=True, exist_ok=True)
         environment = filtered_environment(dict(os.environ))
+        environment["KEEPER_PROVIDER_ROLE"] = request.role
         with (
             request.stdout_path.open("w", encoding="utf-8") as stdout,
             request.stderr_path.open("w", encoding="utf-8") as stderr,

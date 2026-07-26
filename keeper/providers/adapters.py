@@ -73,12 +73,12 @@ class ClaudeCommandAdapter(CliProvider):
         prompt = request.prompt_path.read_text(encoding="utf-8")
         return [
             self.executable,
-            "-p",
-            prompt,
             "--output-format",
             "json",
             "--json-schema",
             json.dumps(_domain_schema(request.role), separators=(",", ":")),
+            "-p",
+            prompt,
         ]
 
     def run(self, request: AgentRequest) -> ProcessResult:
@@ -310,6 +310,7 @@ def _domain_schema(role: str) -> dict[str, Any]:
         required.append("dispositions")
     return {
         "type": "object",
+        "x-keeper-role": role,
         "required": required,
         "properties": properties,
         "additionalProperties": False,
