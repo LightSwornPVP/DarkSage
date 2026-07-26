@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-013 |
 | Title | Feature Backlog |
-| Version | 0.3.2 |
+| Version | 0.4.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,8 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.4.1 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H3): the Founder Vision Completion Backlog Policy section, previously misnumbered "## 16." (skipping §§12–15 after §11 References/Appendix A), renumbered to the correct next-available "## 12." No section content changed. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the final grouped batch (DS-013/DS-014). Establishes the backlog governance model (`DS-BLG-NNN`) and a structured catalog of 26 candidate features (`DS-BL-NNN`) not yet part of the committed implementation baseline, drawn from prior product discussion and this Codex's own DS-001–012 direction. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for three independent-audit High findings, plus one Founder-approved addition. **H1 (promotion lifecycle):** `DS-BLG-002`'s status taxonomy expanded from seven to **eight** values, adding **Promoted** as a terminal/transition-record status (never equivalent to implemented, released, or completed); `DS-BLG-003` updated so a valid promotion identifies both its destination authority (requirement/roadmap-item/ADR/implementation issue) and its promotion decision. **H2 (public Owner Approval authority):** `DS-BLG-004`'s Owner Approval flag no longer cites `.ai-workflow/KEEPER_AUTHORITY.md`; grounded instead in DS-012's public, reproducible approval model (DS-ADR-003) and DS-010's normative process rules (DS-DEV-025) — a local workflow file, if mentioned at all, is non-authoritative operational convenience only. **H3 (third-party model gates):** `DS-BL-018`, `DS-BL-020` (Kronos), and `DS-BL-021` updated to require all nine of DS-014's `DS-IDG-004` mandatory gates (licensing, independent benchmarking, compute requirements, privacy, security, model-supply-chain risk, untrusted-artifact/weight handling, integration-boundary risk, operational feasibility) before promotion, aligned with DS-008. **Addition:** new `DS-BL-027` — Responsive Loading and Interaction Feedback (§6.15), a Founder-approved backlog item defining skeleton loaders, caching, optimistic rendering for reversible actions only, and contextual tooltips, with an explicit Hard Safety Boundary prohibiting optimistic rendering for trades, broker actions, risk/permission changes, emergency controls, credentials, authentication, strategy promotion, and authoritative account state. Catalog is now 27 items. |
 | 0.3.0 | 2026-07-24 | TheSinnerMan | Final targeted repair closing the remaining High finding: the promotion lifecycle was still internally inconsistent after v0.2.0. **Scope taxonomy:** §2 Scope now lists all eight statuses explicitly (previously omitted Promoted); §1 Purpose, §2 Scope, §4 Definitions, `DS-BLG-002`, and `DS-BLG-003` now consistently define exactly eight. **Authoritative promotion destination:** an implementation-tracking issue is no longer accepted as a co-equal, standalone promotion destination — it may only be linked as a subordinate execution-tracking artifact beneath an already-approved **controlling authority** (a dedicated DS-002+ requirement, an approved DS-011 roadmap entry, an approved DS-012 ADR, or another explicitly recognized committed Codex authority), and it must itself cite that controlling authority by ID. **Terminology:** replaced "the requirement becomes authoritative" with "the promoted capability receives authority only from its approved controlling destination" throughout; added `Controlling authority`, `Promoted capability`, and `Implementation-tracking issue` to §4 Definitions, clearly distinguishing backlog item / promoted capability / controlling authority / implementation-tracking issue. **Promotion record:** `DS-BLG-003` now specifies a complete promotion record (source ID, controlling destination ID, destination type, approval authority/mechanism, approval date, decision record or evidence, optional implementation-tracking issue, bidirectional cross-reference where supported). **Acceptance criteria:** `DS-BLG-002`/`DS-BLG-003` updated so verification can prove all eight statuses are consistent, every Promoted item has an approved controlling authority, no implementation issue is standalone authority, every linked implementation issue cites its controlling authority, and Promoted never equals implemented/released/completed. |
@@ -626,3 +628,9 @@ Document-level verification (unique-ID check across `DS-BLG-NNN`/`DS-BL-NNN`, cr
 2. **Tax/budgeting product-identity fit (DS-BL-011)** — whether budgeting belongs in DarkSage's scope at all is unresolved.
 3. **Futures/crypto asset-class fit (DS-BL-008/009)** — entirely unevaluated; recorded for future research only.
 4. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (`ROADMAP.md` phase boundaries as Codex release-scope authority; multi-monitor commitment level, DS-BL-016) apply identically here and are not re-litigated.
+
+## 12. Founder Vision Completion Backlog Policy
+
+Research Intelligence, the structured Trading Journal, daily/weekly reviews, bounded Sage research workflows, canonical Trade Intelligence Packages, advanced Portfolio Intelligence, integrated Strategy Lifecycle, contextual education, and Discord alerts are approved product direction and shall not be treated as disposable ideas merely because they are not MVP.
+
+Tax Intelligence and Personal Finance/Budgeting shall remain separate backlog domains. Safe progression may reward learning and discipline but never raw trade frequency, leverage, or profit without process/risk context. Political-trading intelligence belongs under evidence-governed Research Intelligence rather than as an isolated novelty.

@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-009 |
 | Title | Testing & QA |
-| Version | 0.2.3 |
+| Version | 0.5.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.5.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blockers 2, 3): added `DS-QA-027` (Trade Intelligence Package Security Testing, covering DS-SCA-029) and `DS-QA-028` (Journal Retention and Deletion Testing, covering DS-JRN-007/DS-API-JRN-004/DS-SCA-028's extension). No prior requirement's content changed. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added `DS-QA-024` (Research Intelligence Testing), `DS-QA-025` (Journal & Review Testing), and `DS-QA-026` (Trade Intelligence Package Testing), closing the H1 test-traceability gap. Renumbered the Founder Vision Completion section from the misnumbered "## 25." (skipping §§16–24) to the correct next-available "## 16." No prior requirement's content changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 1 grouped pass (DS-007/DS-008/DS-009). Consolidates the testing obligations already stated per-requirement across DS-002 through DS-008 into a single testing/QA architecture under the `DS-QA` prefix — release gates, traceability, defect severity, and category-specific test requirements (unit, integration, contract, regression, e2e, security, performance, data-quality, model evaluation, backtesting validation, deterministic financial calculation). |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair pass. **DS-009-H1:** repaired `DS-QA-009`, which incorrectly listed the Planned `DS-API-EXE-006` alongside Committed governance boundaries; split into an always-required Committed pipeline-integrity constraint (DS-EXE-001/DS-API-EXE-001 only) and a conditional Planned Trade Proposal submission test (DS-API-EXE-005/006), with an explicit acceptance criterion barring any promotion of DS-API-EXE-006 to Committed. **Cross-volume alignment:** added `DS-QA-021` (Interface State Lifecycle Testing, covering DS-007's new DS-UX-016), `DS-QA-022` (Audit-Log Integrity Testing, covering DS-008's new DS-SCA-025), and `DS-QA-023` (Incident-Response Lifecycle Testing, covering DS-008's new DS-SCA-026); extended `DS-QA-013`'s acceptance criteria to require scenario-to-test mapping against DS-SCA-024's new threat-scenario table. Corrected stale `DS-UX-016`/`DS-UX-020` references (now `DS-UX-017`/`DS-UX-021`) following DS-007's H1 renumbering. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Narrow repair pass for the two remaining High findings. **DS-007-H1 alignment:** `DS-QA-021` split into Committed core-lifecycle testing (DS-UX-016) and Planned, conditional assistive-technology announcement testing (DS-UX-022) — the latter is never a Committed release gate before DS-UX-022 is implemented. **DS-008-H2 alignment:** `DS-QA-022` expanded to cover DS-008's new `DS-SCA-027` integrity-verification contract — direct-storage-corruption adversarial tests for modification, reordering, truncation, selective deletion, and unauthorized insertion; verification-trigger tests (startup, pre-review, scheduled, post-fault); a fail-closed-on-violation test; an evidence-preservation test; and an anti-silent-rebuild test — going beyond the prior API-level-only tamper tests. §13 Risks and Constraints updated to record DS-QA-021's split. |
@@ -328,6 +331,58 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 **Testing:** Tabletop/simulated-incident walkthrough per listed incident type; live-trading re-enablement gate-bypass adversarial test (both shared with DS-SCA-026's own test).
 
+## 10a. Research, Journal, and Trade Intelligence Testing (added in the independent-audit H1 repair)
+
+### DS-QA-024 — Research Intelligence Testing
+
+**Release Classification:** Planned | **Governing Source:** DS-RSH-001 through DS-RSH-006 (DS-002, Planned); DS-ARC-026 (DS-004, Planned); DS-API-RSH-001/002/003 (DS-006, Planned)
+
+**Description:** Testing for Research Intelligence covers: evidence-completeness (every ResearchEvidence record carries source/publication-time/retrieval-time), per-domain adapter substitution/disable regression, conflicting-evidence disclosure (DS-RSH-005), catalyst-timeline ordering and date-uncertainty disclosure (DS-RSH-003), and thesis-immutability/revision-chain integrity (DS-RSH-004).
+
+**Acceptance Criteria:** Matches DS-ARC-026/DS-API-RSH-001..003's acceptance criteria exactly.
+
+**Testing:** Adapter-substitution test per research domain; evidence-immutability audit; thesis-revision-chain integrity test; conflicting-evidence disclosure test (all shared with DS-ARC-026/DS-DB-029/030/031's own tests).
+
+### DS-QA-025 — Journal and Review Testing
+
+**Release Classification:** Planned | **Governing Source:** DS-JRN-001 through DS-JRN-005 (DS-002, Planned); DS-JRN-006 (DS-002, Future/Exploratory — not in scope of this testing requirement); DS-ARC-027 (DS-004, Planned); DS-API-JRN-001/002/003 (DS-006, Planned)
+
+**Description:** Testing for Journal & Review Intelligence covers: original-plan immutability and amendment-attribution (DS-JRN-002), deterministic-figure-reuse in daily/weekly reviews (confirming no review statistic is independently computed outside DS-PERF/DS-PRT), correlation-vs-causation content review for weekly pattern-discovery notes (DS-JRN-004), and the Sage coaching non-diagnosis boundary (DS-JRN-005).
+
+**Acceptance Criteria:** Matches DS-ARC-027/DS-API-JRN-001..003's acceptance criteria exactly.
+
+**Testing:** Original-plan immutability and amendment-attribution test; deterministic-figure-reuse audit; non-diagnosis boundary test (all shared with DS-ARC-027/DS-DB-032/033's own tests).
+
+### DS-QA-026 — Trade Intelligence Package Testing
+
+**Release Classification:** Planned | **Governing Source:** DS-SIG-005 (DS-002, Planned); DS-ARC-028 (DS-004, Planned); DS-API-TIP-001 (DS-006, Planned)
+
+**Description:** Testing for the canonical Trade Intelligence Package covers: cross-surface consistency (chart, journal, alert, and audit renderings of the same `package_id`/version show identical field values), field-provenance (every deterministic field traces to its owning engine, never to generated text), and null-vs-fabricated-field handling (an unavailable field is explicit/null, never a plausible-looking substitute).
+
+**Acceptance Criteria:** Matches DS-ARC-028/DS-API-TIP-001's acceptance criteria exactly.
+
+**Testing:** Cross-surface consistency test; field-provenance audit; null-vs-fabricated-field regression test (all shared with DS-ARC-028/DS-DB-028's own tests).
+
+### DS-QA-027 — Trade Intelligence Package Security Testing (added for independent-audit Blocker 2)
+
+**Release Classification:** Planned | **Governing Source:** DS-SCA-029 (DS-008, Planned)
+
+**Description:** Testing for DS-SCA-029's Trade Intelligence Package security authority covers: field-immutability-once-referenced (no in-place edit to a package version any downstream consumer has already read); provenance-retrieval (every field's owning-service attribution is present and correct); direct-storage tamper-detection (bypassing the API to modify/reorder/insert a package version is detected at the next verification trigger, sharing DS-SCA-027's mechanism); AI-deterministic-override adversarial testing (attempting to have Sage or any provider write a deterministic TIP field without an auditable engine call, and confirming rejection); stale/partial-disclosure (a package with expired freshness or partial assembly is never presented as complete/current); external-redaction (capital-at-risk/account-context fields never leave the product beyond explicit configuration, shared with DS-ALT-004's own test); audit-correlation (every consequential TIP change produces a matching AuditLogEntry); and fail-closed-on-unverifiable-package (a consequential action depending on an integrity- or freshness-unverifiable package is blocked).
+
+**Acceptance Criteria:** Matches DS-SCA-029's acceptance criteria exactly.
+
+**Testing:** Field-immutability-once-referenced regression test; provenance-retrieval audit; direct-storage tamper-detection test (shared with DS-SCA-027's own test); AI-deterministic-override adversarial test (shared pattern with DS-SGE-003/DS-PRD-011's own tests); stale/partial-disclosure test; external-redaction test; audit-correlation test; fail-closed-on-unverifiable-package test (all shared with DS-SCA-029's own test).
+
+### DS-QA-028 — Journal Retention and Deletion Testing (added for independent-audit Blocker 3)
+
+**Release Classification:** Planned | **Governing Source:** DS-JRN-007 (DS-002, Planned); DS-API-JRN-004 (DS-006, Planned); DS-SCA-028 (DS-008, Planned)
+
+**Description:** Testing for journal retention and deletion covers: deletion-propagation (a deleted JournalEntry's private content is removed along with its attachment references and any derived DailyReview/WeeklyReview narrative or Sage-drafted commentary that would reproduce it, while deterministic performance figures in those reviews remain intact); immutable-record-preservation (a deleted JournalEntry's linked Transaction/AuditLogEntry references are never themselves deleted, and a legal/audit-exception-retained record discloses exactly which factual fields were kept); backup behavior (deleted content is purged from backups on a disclosed schedule, or the residual-retention window is disclosed to the user, so a backup restore never silently reverses a deletion without disclosure); attachment handling (chart-snapshot/attachment references are deleted alongside their parent entry); export-before-delete (an export is available prior to deletion where DS-DAT-002 export is supported); deletion-failure disclosure (a failed deletion reports its reason rather than appearing to silently succeed); the conflict case (deletion against an entry with an active conflicting reference, e.g., an unresolved TradingThesis link, returns a disclosed conflict rather than silently orphaning the reference); and privacy-safe logging (no deletion-related audit-log entry reproduces the deleted private content — identifier, timestamp, and outcome only).
+
+**Acceptance Criteria:** Matches DS-JRN-007/DS-API-JRN-004's acceptance criteria exactly.
+
+**Testing:** Deletion-propagation regression test; immutable-record-preservation test; secure-deletion/backup-disclosure test (shared with DS-SCA-028's own test); attachment-deletion test; export-before-delete test; deletion-failure disclosure test; conflict (409) regression test; privacy-safe-logging audit (all shared with DS-JRN-007/DS-API-JRN-004's own tests).
+
 ## 11. Non-Goals
 
 DS-009 does not: select a specific test framework, runner, or CI/CD tooling (DS-010 concern); redefine any DS-006 API contract or DS-008 security control (it tests against them); commit new product capability via test authoring; or substitute model/AI evaluation (DS-QA-011) for deterministic-calculation verification (DS-QA-005) under any circumstance.
@@ -364,3 +419,9 @@ Each `DS-QA-NNN` requirement states its own Testing. Document-level verification
 1. **Test framework/tooling selection** — explicitly out of scope for this document (§11); belongs to a future DS-010 addition.
 2. **CI/CD pipeline configuration and gating automation** — the release-gate *content* is fixed here (DS-QA-017); the automation mechanism that enforces it in CI is a DS-010 concern not yet authored.
 3. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (`ROADMAP.md` phase boundaries as Codex release-scope authority; phase-mapping precision) apply identically to this document's Release Classification scheme and are not re-litigated here.
+
+## 16. Founder Vision Completion Test Program
+
+Testing shall include: canonical Trade Intelligence Package schema/traceability; streaming-chart state and overlay consistency; agent tool-permission and prompt-injection red teams; research-source provenance/conflict/freshness; thesis-version immutability; journal hindsight protection; daily/weekly review reproducibility; automation-mode action matrices; emergency-stop and policy-expiry behavior; and portfolio/strategy deterministic calculations.
+
+Discord tests shall cover opt-in defaults, secret redaction, test delivery, rate limits, duplicate suppression, retries, deleted webhook/permission loss, message-size handling, simulation/live labeling, in-app fallback, and proof that every Discord interaction path is unable to approve or execute a trade.

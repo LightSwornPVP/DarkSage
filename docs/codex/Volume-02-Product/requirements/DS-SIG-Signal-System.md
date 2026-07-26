@@ -105,3 +105,11 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** DS-005 concern.
 
 **Testing:** Expiration-state regression test.
+
+### DS-SIG-005 — Canonical Trade Intelligence Package
+
+**Priority:** Critical | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** Every actionable trade proposal shall use a canonical Trade Intelligence Package containing, where applicable: symbol/instrument identity, direction, setup and strategy version, entry or entry zone, stop, one or more targets, position size, capital at risk, risk/reward, confidence, quality rating, expected holding period or thesis clock, catalyst, expiration, evidence, contradictions, assumptions, invalidation conditions, market-regime compatibility, data freshness, account context, and current approval/automation state.
+
+**Acceptance Criteria:** The same package identifier and version are used across Sage, charts, journal, validation, execution, alerts, and audit records; missing fields are explicit rather than fabricated; deterministic fields originate from deterministic services.

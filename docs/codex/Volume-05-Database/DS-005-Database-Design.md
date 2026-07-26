@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-005 |
 | Title | Database Design |
-| Version | 0.2.1 |
+| Version | 0.5.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.5.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blockers 2, 3): DS-DB-032/033 constraints extended with DS-JRN-007 retention/deletion behavior; DS-DB-028 constraints extended with DS-SCA-029's provenance/tamper-detection/stale-state security requirements. No entity's Key Fields or Key Relationships changed; constraints/testing extended only. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added `DS-DB-028` (TradeIntelligencePackage), `DS-DB-029` (ResearchSource/ResearchEvidence), `DS-DB-030` (CatalystEvent), `DS-DB-031` (TradingThesis/ThesisRevision), `DS-DB-032` (JournalEntry), `DS-DB-033` (DailyReview/WeeklyReview) as fully-specified entities (Key Fields/Relationships/Constraints/Testing), replacing the prior unnumbered prose-only mention in this section. Renumbered the Founder Vision Completion section from the misnumbered "## 22." (skipping §§20–21) to the correct next-available "## 20." No prior entity's content changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft. Defines entity/schema design for the shared models `ARCHITECTURE.md` §6 names, on the SQLite-first strategy DS-ARC-016 already establishes, cross-referenced to DS-002's requirement families. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Repair pass addressing independent audit findings DS-005-A01 through A05. **A01:** added Transaction entity (DS-DB-025), Position and DS-DB-023 updated to reference it. **A02:** added Alert (DS-DB-026) and Notification (DS-DB-027) entities as new §13, sections renumbered 13→14 through 18→19 accordingly. **A03:** reclassified StrategyProfile and TradeDecision to Committed/MVP (Phase-1 base model, per ROADMAP.md/DS-ARC-005), reclassified BrokerState Future/Exploratory → Planned, made ScanConfiguration.profile_id nullable so it is independently satisfiable without the Planned UserProfile feature. **A04:** corrected Candle's foreign-key target (DS-DB-013 → DS-DB-014, SecurityIdentity); added signal_id to Signal and regime_id to MarketRegime as their primary identifiers, matching the foreign keys that already referenced them. **A05:** split StrategyProfile and TradeDecision into a Committed Phase-1 core and a Planned later-phase extension (Phase 2 for StrategyProfile's configuration/risk fields; Phase 6/7 for TradeDecision's AI-provider/pipeline fields), so neither Committed base model requires a Planned capability to be valid. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: corrected DS-DB-004's stale Alert reference (Alert was already added as DS-DB-026 in the 0.2.0 A02 repair; the Key Relationships text still said "not yet in this document's entity set") to cite DS-DB-026 directly. Corrected DS-DB-027's channel field, which mislabeled DS-ALT-002 (in-app notification delivery) as "Committed" although DS-ALT-002 is formally Planned — both in-app (DS-ALT-002) and external (DS-ALT-003) channels are now correctly stated as Planned. No entity, classification, or relationship was otherwise changed. |
@@ -441,6 +444,94 @@ Added in the DS-005-A02 repair to close a gap: DS-ALT-001/002 (Planned) require 
 
 **Testing:** Migration dry-run/rollback test (once the migration system exists; not yet applicable pre-Phase-1 tooling selection).
 
+## 14a. Research, Journal, and Trade Intelligence Entities (added in the independent-audit H1 repair)
+
+Closes a gap identified by independent audit: `TradeIntelligencePackage`, `ResearchSource`/`ResearchEvidence`, `CatalystEvent`, `TradingThesis`/`ThesisRevision`, `JournalEntry`, and `DailyReview`/`WeeklyReview` were named only in prose (§20) with no individually specified entity — this section gives each a full entity specification matching every other entity in this document.
+
+### DS-DB-028 — TradeIntelligencePackage
+
+**Release Classification:** Planned | **Governing Source:** DS-SIG-005 (DS-002, Planned); DS-ARC-028 (DS-004, Planned)
+
+**Purpose:** Store the canonical Trade Intelligence Package DS-SIG-005 defines, as a single versioned object referenced identically by Sage, charts, journal, validation, execution, alerts, and audit.
+
+**Key Fields:** package_id (primary identifier), version, signal_id (FK → Signal, DS-DB-004), symbol_id (FK), direction, strategy_id (FK, nullable), entry_zone (JSON: low/high or single value), stop, targets (JSON list), position_size, capital_at_risk, risk_reward, confidence, quality_rating, expected_holding_period, catalyst_ids (JSON list, FK → CatalystEvent, DS-DB-030), expires_at (nullable), evidence_ids (JSON list, FK → ResearchEvidence, DS-DB-029), contradictions (JSON), assumptions (JSON), invalidation_conditions (JSON), regime_id (FK → MarketRegime, DS-DB-003, nullable), data_freshness_state (enum, per DS-PRD-008), account_context (FK → Portfolio, DS-DB-008, nullable), approval_state, automation_mode (enum, per DS-EXE-008), generated_at.
+
+**Key Relationships:** One-to-one with the originating Signal; many-to-one with StrategyProfile; referenced by JournalEntry (DS-DB-032), ChartAnnotation overlays (DS-DB-013), Alert/Notification (DS-DB-026/027), and TradeDecision (DS-DB-007) where a package proceeds to a proposal.
+
+**Constraints/Invariants:** A field with no current value is explicitly null, never fabricated (DS-SIG-005); deterministic fields (capital_at_risk, risk_reward, position_size) are written only by the owning engine (Risk Engine, Portfolio) per DS-ARC-028, never by a generative process; package_id/version together are immutable once referenced by a downstream consumer — a material change creates a new version, not an in-place edit. **Security (DS-SCA-029, added for independent-audit Blocker 2):** each field additionally records its provenance (which service wrote it); the record is subject to the same tamper-detection discipline DS-SCA-027 applies to AuditLogEntry, extended to TradeIntelligencePackage versions; a package whose `data_freshness_state` has expired or whose assembly was partial is never treated as complete/current by a consuming query.
+
+**Testing:** Cross-surface consistency test (shared with DS-ARC-028's own test); field-provenance audit; null-vs-fabricated-field regression test; tamper-detection test (shared with DS-SCA-029's own test).
+
+### DS-DB-029 — ResearchSource / ResearchEvidence
+
+**Release Classification:** Planned | **Governing Source:** DS-RSH-001, DS-RSH-002 (DS-002, Planned); DS-ARC-026 (DS-004, Planned)
+
+**Purpose:** Store ingested research items with full source/provenance/freshness metadata, per DS-RSH-001.
+
+**Key Fields:** ResearchSource: source_id (primary identifier), provider_name, domain (enum: news/filing/earnings/macro/insider/political/analyst — DS-RSH-002), licensing_reference. ResearchEvidence: evidence_id (primary identifier), source_id (FK), affected_symbol_ids (JSON list, FK → SecurityIdentity), evidence_type, publication_time, event_time (nullable), retrieval_time, confidence, content_summary, raw_reference (opaque pointer to stored original), superseded_by (nullable, self-referential FK, for corrections).
+
+**Key Relationships:** Many ResearchEvidence per ResearchSource; referenced by TradeIntelligencePackage (DS-DB-028), TradingThesis (DS-DB-031), and CatalystEvent (DS-DB-030).
+
+**Constraints/Invariants:** Immutable once stored except through an explicit, logged correction (`superseded_by`), per DS-ARC-026; conflicting evidence for the same claim is stored as separate records, never collapsed into one (DS-RSH-005); a domain that is disabled excludes its ResearchSource records from active queries without deleting historical ResearchEvidence.
+
+**Testing:** Evidence-immutability audit (shared with DS-ARC-026's own test); conflicting-evidence disclosure test.
+
+### DS-DB-030 — CatalystEvent
+
+**Release Classification:** Planned | **Governing Source:** DS-RSH-003 (DS-002, Planned)
+
+**Purpose:** Represent a time-ordered, expected-or-realized market/company event exposed by the Catalyst and Event Timeline requirement (DS-RSH-003).
+
+**Key Fields:** catalyst_id (primary identifier), affected_symbol_ids (JSON list), event_type, expected_date (nullable), realized_date (nullable), date_uncertainty (enum), source_evidence_ids (JSON list, FK → ResearchEvidence), post_event_update_ids (JSON list, self-referential).
+
+**Key Relationships:** Referenced by TradeIntelligencePackage's `catalyst_ids` and by TradingThesis (DS-DB-031) as thesis-supporting evidence.
+
+**Constraints/Invariants:** An event with an unresolved date discloses its uncertainty explicitly rather than presenting a guessed date as confirmed (DS-RSH-003).
+
+**Testing:** Catalyst-timeline ordering and disclosure test.
+
+### DS-DB-031 — TradingThesis / ThesisRevision
+
+**Release Classification:** Planned | **Governing Source:** DS-RSH-004 (DS-002, Planned); DS-ARC-026 (DS-004, Planned)
+
+**Purpose:** Store a user- or Sage-assisted thesis with its supporting evidence, contradictions, assumptions, and invalidation conditions, preserving the original text as material evidence changes (DS-RSH-004).
+
+**Key Fields:** TradingThesis: thesis_id (primary identifier), symbol_id (FK), original_text, assumptions (JSON), invalidation_conditions (JSON), evidence_ids (JSON list, FK → ResearchEvidence), created_at. ThesisRevision: revision_id (primary identifier), thesis_id (FK), revision_type (annotation/material-change-flag/status-update), content, triggering_evidence_id (nullable, FK → ResearchEvidence), created_at.
+
+**Key Relationships:** One-to-many with ThesisRevision; referenced by JournalEntry (DS-DB-032) as the original plan's thesis link.
+
+**Constraints/Invariants:** `original_text` is never overwritten; a material evidence change produces a new ThesisRevision, never a silent rewrite of the thesis (DS-RSH-004's "surface material changes without silently rewriting the original thesis").
+
+**Testing:** Thesis-immutability and revision-chain integrity test (shared pattern with DS-DB-025's reversal-chain test).
+
+### DS-DB-032 — JournalEntry
+
+**Release Classification:** Planned | **Governing Source:** DS-JRN-001, DS-JRN-002 (DS-002, Planned); DS-ARC-027 (DS-004, Planned)
+
+**Purpose:** Store a structured trade journal entry — original plan, actual execution, outcome, and lessons — with the original-plan immutability DS-JRN-002 requires.
+
+**Key Fields:** entry_id (primary identifier), thesis_id (nullable, FK → TradingThesis), strategy_id (nullable, FK, version-pinned), original_plan (JSON: entry/stop/targets/size, written once), chart_state_reference (nullable), evidence_ids (JSON list), emotional_context (nullable, free text), actual_execution (JSON, populated after the fact), outcome (JSON, populated after close), rule_adherence (enum/JSON), mistake_classification (JSON list, from a defined vocabulary), lessons (text), created_at.
+
+**Key Relationships:** One-to-one (optional) with TradingThesis; referenced by DailyReview/WeeklyReview (DS-DB-033) aggregation.
+
+**Constraints/Invariants:** `original_plan` is written once and never overwritten; later edits, annotations, and Sage observations are separate, timestamped, attributable amendment records referencing this entry (DS-JRN-002) — append-only, mirroring DS-DB-023's pattern; an entry may represent a decision *not* to trade, under the same immutability discipline (DS-JRN-001). **Retention/deletion (DS-JRN-007, added for independent-audit Blocker 3):** a user-initiated deletion removes this record's private/emotional-context fields and its attachment references; it never deletes a Transaction (DS-DB-025) or AuditLogEntry (DS-DB-020) this entry references — those remain governed by their own append-only constraints (DS-DB-023) independent of journal deletion. A deletion under a documented legal/audit exception retains only the referenced immutable record's factual fields, never the JournalEntry's private narrative fields.
+
+**Testing:** Original-plan immutability and amendment-attribution test (shared with DS-ARC-027's own test); deletion-propagation and immutable-record-preservation test (DS-JRN-007).
+
+### DS-DB-033 — DailyReview / WeeklyReview
+
+**Release Classification:** Planned | **Governing Source:** DS-JRN-003, DS-JRN-004 (DS-002, Planned); DS-ARC-027 (DS-004, Planned)
+
+**Purpose:** Store generated daily/weekly review aggregates over JournalEntry and deterministic performance data (DS-PERF), distinguishing deterministic figures from Sage's advisory commentary.
+
+**Key Fields:** DailyReview: review_id (primary identifier), review_date, performance_metric_refs (JSON, FK references into DS-PERF's own metrics — never independently computed here), plan_adherence_summary (JSON), recurring_mistake_refs (JSON list), next_session_watchlist (JSON list, FK → SecurityIdentity), sage_commentary (nullable text, clearly separated from performance_metric_refs), generated_at. WeeklyReview: analogous fields aggregated over a week, plus `pattern_discovery_notes` (text, explicitly non-causal per DS-JRN-004).
+
+**Key Relationships:** Many-to-one aggregation over JournalEntry (DS-DB-032) and DS-PERF's performance metrics for the same date range.
+
+**Constraints/Invariants:** Every quantitative figure traces to a DS-PERF/DS-PRT deterministic calculation by reference, never recomputed or restated independently by this entity or by Sage (DS-PRD-004); `sage_commentary`/`pattern_discovery_notes` are structurally distinct fields from the deterministic references, never merged into one narrative that obscures which is which. **Retention/deletion (DS-JRN-007):** deleting a source JournalEntry (DS-DB-032) propagates to any DailyReview/WeeklyReview narrative content (`sage_commentary`/`pattern_discovery_notes`) that would reproduce that entry's private text; the review's `performance_metric_refs` (deterministic, sourced from DS-PERF/DS-PRT independent of any single journal entry) are unaffected.
+
+**Testing:** Deterministic-figure-reuse audit (shared with DS-ARC-027's own test); correlation-vs-causation content review for `pattern_discovery_notes` (DS-JRN-004).
+
 ## 15. Non-Goals
 
 DS-005 does not: select a database engine beyond SQLite-first (DS-ARC-016 already governs this); define exact SQL column types/indexes (implementation detail); or define API serialization shapes (DS-006).
@@ -471,3 +562,9 @@ Entity-level Testing per DS-DB-NNN item. Document-level verification (unique-ID 
 2. **JSON-blob field granularity** — several entities use JSON columns (e.g., `pipeline_stage_results`, `configuration`) as a placeholder for structured sub-schemas better suited to normalized tables. Acceptable for a first draft; a later revision should normalize where query patterns justify it (DS-006/DS-004 input).
 3. **RESOLVED in the DS-005-A02 repair.** Alert (DS-DB-026) and Notification (DS-DB-027) entities added, supporting DS-ALT-001/002 and preserving the DS-PRD-007 notification-only boundary. Retained here for revision-history traceability, not as an open item.
 4. **Nullable `profile_id` pattern (DS-005-A03 repair)** — `ScanConfiguration` and `Alert` both use a nullable `profile_id` resolving to an implicit default local profile so they remain independently satisfiable without the Planned multi-profile `UserProfile` feature (DS-USR-006). This is a routine implementation pattern, not a governance question, but is noted here since it's a repeated design choice worth keeping consistent if more Committed entities gain a similar dependency in the future.
+
+## 20. Founder Vision Completion Data Domains
+
+The logical data model shall provide versioned entities for `TradeIntelligencePackage`, `ResearchSource`, `ResearchEvidence`, `CatalystEvent`, `TradingThesis`, `ThesisRevision`, `JournalEntry`, `DailyReview`, `WeeklyReview`, `SageTaskPlan`, `SageToolInvocation`, `MonitoringPolicy`, `NotificationChannel`, `NotificationDelivery`, and `DiscordChannelConfiguration`.
+
+Original trade plans and thesis versions remain recoverable. Deterministic values record calculation version and inputs. Discord credentials are never stored in plaintext application records; configuration stores only protected secret references and non-secret routing metadata. Notification deliveries record idempotency key, event reference, channel, attempt state, timestamps, redacted response metadata, and final disposition.

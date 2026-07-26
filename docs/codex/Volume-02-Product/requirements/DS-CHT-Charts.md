@@ -104,3 +104,11 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** DS-003/DS-004 concern for evidence-access architecture.
 
 **Testing:** Widget-hidden evidence-availability regression test.
+
+### DS-CHT-006 — Live Trading Workstation Experience
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** DarkSage shall support streaming candle formation without manual reload, selectable intervals, extended-hours visibility where provided, last/bid/ask/spread state where licensed, provider/delay/freshness status, synchronized inspection, and overlays for positions, orders, entries, stops, targets, catalysts, support/resistance, and Sage annotations.
+
+**Acceptance Criteria:** Simulated, delayed, stale, and live states are unmistakable; current-candle updates are deterministic from the active feed; chart overlays reference canonical object identifiers rather than copied free text.

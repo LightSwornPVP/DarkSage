@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-004 |
 | Title | Technical Architecture |
-| Version | 0.3.0 |
+| Version | 0.4.2 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-23 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.4.2 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blockers 2, 3): extended DS-ARC-027 with the DS-JRN-007 retention/deletion architecture; extended DS-ARC-028 with a cross-reference to DS-SCA-029's Trade Intelligence Package security authority (DS-008). No prior section renumbered or restated. |
+| 0.4.1 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added §§16b–16d (`DS-ARC-026` Research Intelligence Architecture, `DS-ARC-027` Journal & Review Architecture, `DS-ARC-028` Canonical Trade Intelligence Package Service) closing the H1 architecture-traceability gap for Research Intelligence, Journal & Review Intelligence, and the Trade Intelligence Package. Renumbered the Founder Vision Completion section from the misnumbered "## 24." (skipping §§22–23) to the correct next-available "## 22." No prior section's content changed. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-23 | TheSinnerMan | Document control scaffold and Foundational Direction statement created; no detailed normative content. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | First substantial controlled draft. Formalizes the repository's pre-existing, authoritative `ARCHITECTURE.md` (31 sections) into Codex-governed, testable `DS-ARC-NNN` requirements, cross-referenced to DS-001, DS-002, DS-003, and ADR-001–004. `ARCHITECTURE.md` remains the detailed implementation reference (full indicator/pattern/metric catalogs, exact module lists); DS-004 states the governance-critical architectural contracts as traceable, auditable requirements. |
 | 0.3.0 | 2026-07-24 | TheSinnerMan | Repair pass addressing independent audit findings DS-004-A01 through A03. **A01:** reclassified `DS-ARC-011`/`012` (TradeValidationPipeline/Risk-Permissions integration, Phase 7) and `DS-ARC-013` (AI Provider Interface, Phase 6) from Committed/MVP to Planned; narrowed `DS-ARC-004` (Backend Service Architecture) and `DS-ARC-005` (Shared Models) to their genuine Phase-1 module/model subset, with the remainder explicitly Planned. Added a document-level Release Classification note distinguishing "implementation phase" from "governance boundary." **A02:** added six new requirements (`DS-ARC-020` through `DS-ARC-025`) covering Strategy Performance/DNA, Broker/Auto-Trader architecture, Emergency Stop/Flatten, Portfolio architecture, Mobile control security, and the complete Trading Knowledge Engine architecture (`ARCHITECTURE.md` §31) — all previously omitted. **A03:** gave `DS-ARC-003` (Mobile Client) concrete, testable acceptance criteria now (client-only, backend-authoritative boundaries), while its implementation timing remains Phase 9/Planned. |
@@ -608,6 +611,84 @@ The following close a completeness gap identified by independent audit: `ARCHITE
 
 **Testing:** Not yet applicable — Phase 5 exit criteria (`ROADMAP.md` Phase 5).
 
+## 16b. Research Intelligence Architecture (added in the independent-audit H1 repair)
+
+### DS-ARC-026 — Research Intelligence Architecture
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Governing Source:** DS-RSH-001 through DS-RSH-006 (DS-002, Planned); DS-001 §26.4
+
+**Purpose:** Give Research Intelligence a concrete backend architecture — ingestion adapters per approved evidence domain, an evidence store preserving source/timestamp/provenance, and a thesis-monitoring service — closing the independent-audit H1 gap where DS-RSH existed only as DS-002 requirements with no architectural contract.
+
+**Description:** DarkSage should implement Research Intelligence as provider-neutral ingestion adapters (news, filings, earnings, macro, insider/political disclosure, analyst revisions — DS-RSH-002) behind a common Research Source Adapter interface, mirroring DS-ARC-006's market-data provider-abstraction pattern, normalizing each item into a ResearchEvidence record (DS-DB-029) before it reaches any consuming feature. A Thesis Monitoring service (backing DS-RSH-004) evaluates registered theses against newly ingested evidence and flags material changes without rewriting the stored original thesis. Sage's bounded research workflow (DS-RSH-006; DS-003 §6) invokes this architecture only through registered tools; it never ingests or fabricates evidence outside the adapter path.
+
+**Dependencies:** DS-ARC-006 (adapter-pattern precedent); DS-RSH-001 through DS-RSH-006; DS-DB-029, DS-DB-030, DS-DB-031 (DS-005); DS-PRD-002
+
+**Acceptance Criteria:**
+- Each research domain (DS-RSH-002) is ingested through its own adapter; disabling one domain does not block or corrupt another.
+- Every stored ResearchEvidence record retains its original source, publication/event time, and retrieval time, immutable once stored except through an explicit, logged correction.
+- Thesis Monitoring evaluates new evidence against a stored thesis's assumptions/invalidation conditions and surfaces a flagged change without overwriting the thesis's original text (DS-RSH-004).
+- A domain adapter's unavailability degrades to disclosed absence (DS-RSH-002's edge case), never silent gap-filling.
+
+**Edge Cases:** A source returning conflicting evidence for the same claim is stored as multiple ResearchEvidence records, not collapsed into one (DS-RSH-005).
+
+**Implementation Notes:** DS-005 (DS-DB-029/030/031) defines the storage schema; DS-006 (DS-API-RSH-001 through 003) defines the client-facing contract.
+
+**Testing:** Adapter-substitution test per research domain (shared pattern with DS-ARC-006's own test); thesis-monitoring change-detection regression test; evidence-immutability audit.
+
+## 16c. Journal & Review Architecture (added in the independent-audit H1 repair)
+
+### DS-ARC-027 — Journal & Review Architecture
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Governing Source:** DS-JRN-001 through DS-JRN-005, DS-JRN-007 (DS-002, Planned); DS-JRN-006 (DS-002, Future/Exploratory — referenced for family context only, not an architectural commitment); DS-001 §26.3
+
+**Purpose:** Give Journal & Review Intelligence a concrete backend architecture — an append-only journal-entry store preserving the original plan, a review-generation service, and a clear boundary between deterministic performance data and Sage's advisory commentary — closing the independent-audit H1 gap.
+
+**Description:** DarkSage should implement the Trading Journal as an append-only JournalEntry store (DS-DB-032) where the original thesis/plan (DS-JRN-002) is written once and never overwritten; later annotations, Sage observations, and outcome records are appended as timestamped, attributed amendments referencing the original entry, never in-place edits. Daily and Weekly Review generation (DS-JRN-003/004, backed by DS-DB-033) reuses DS-PERF's and DS-PRT's deterministic performance-calculation services for every quantitative figure it presents; Sage may draft narrative commentary around those figures but never substitutes its own text for a deterministic value (the DS-PRD-004 boundary applies identically here).
+
+**Dependencies:** DS-ARC-009, DS-ARC-010 (deterministic-reuse pattern); DS-JRN-001 through DS-JRN-007; DS-DB-032, DS-DB-033 (DS-005); DS-PRD-004
+
+**Retention and deletion architecture (added for independent-audit Blocker 3):** DS-JRN-007's user-controlled retention/deletion is implemented as a propagating delete over JournalEntry, its attachment references, and any DailyReview/WeeklyReview or Sage-drafted content that would reproduce the deleted entry's private text — never over the immutable Transaction/AuditLogEntry records a journal entry may reference, which remain a structurally distinct, independently-retained data class. Deletion is logged (DS-OPS-001) by identifier/timestamp only, never by reproducing the deleted content in the log entry itself.
+
+**Acceptance Criteria:**
+- A confirmed JournalEntry's original plan fields are immutable; every later change is a new, attributed, timestamped amendment record linked to the original (mirrors DS-DB-023's append-only pattern).
+- Daily/Weekly Review quantitative figures trace to the same deterministic services DS-PERF/DS-PRT already define; no review figure is Sage-generated.
+- Sage's review commentary is clearly separable from the deterministic figures it discusses (DS-JRN-005).
+
+**Edge Cases:** A journal entry for a decision *not* to trade is stored with the same immutability/amendment discipline as an executed trade's entry (DS-JRN-001).
+
+**Implementation Notes:** DS-005 (DS-DB-032/033) defines storage; DS-006 (DS-API-JRN-001 through 003) defines the API contract; DS-008 (DS-SCA-028) governs journal-data protection given its behavioral/psychological content sensitivity.
+
+**Testing:** Append-only/amendment-chain integrity test (shared pattern with DS-DB-023/025's own tests); deterministic-figure-reuse audit confirming no review statistic is independently computed outside DS-PERF/DS-PRT.
+
+## 16d. Canonical Trade Intelligence Package Service (added in the independent-audit H1 repair)
+
+### DS-ARC-028 — Canonical Trade Intelligence Package Service
+
+**Priority:** Critical | **Release Classification:** Planned | **Status:** Draft
+
+**Governing Source:** DS-SIG-005 (DS-002, Planned); DS-004 §11 (DS-ARC-011)
+
+**Purpose:** Give the canonical Trade Intelligence Package (DS-SIG-005) a single backend service producing and versioning it, so Sage, charts, journal, validation, execution, alerts, and audit all reference the identical object rather than each recomputing or reconstructing an equivalent one independently — closing the independent-audit H1 gap where the package existed only as a DS-002 requirement with no architectural owner.
+
+**Description:** DarkSage should implement a single Trade Intelligence Package service that assembles a package's fields (DS-SIG-005's full field list) from their respective authoritative sources — Signal (DS-DB-004) for symbol/direction/confidence, the Risk Engine (DS-RSK-002) for capital-at-risk/risk-reward, StrategyProfile (DS-DB-005) for setup/strategy version, Research Intelligence (DS-ARC-026) for catalysts/evidence/contradictions, and the active automation mode (DS-EXE-008) for permission/automation state — never generating a deterministic field itself. Every package carries a stable identifier and version (DS-DB-028) referenced identically by every consuming surface (DS-CHT-006's chart overlays, DS-JRN's journal capture, DS-API-EXE-005's proposal creation, DS-ALT's alerts).
+
+**Dependencies:** DS-ARC-011 (TradeValidationPipeline, the package's downstream consumer); DS-SIG-005; DS-DB-028; DS-PRD-002, DS-PRD-004
+
+**Acceptance Criteria:**
+- No consuming surface (chart, journal, validation, execution, alert, audit) recomputes a package field independently — each reads the same versioned package object.
+- A field with no current value (e.g., no assigned strategy yet) is explicit/null in the package, never fabricated (DS-SIG-005's own acceptance criterion).
+- Deterministic fields (capital at risk, risk/reward, position size) trace to their owning engine's calculation, never to generated text.
+
+**Edge Cases:** A package referenced by an expired Signal (DS-SIG-004) retains its own historical field values; it is not silently regenerated against current market conditions.
+
+**Implementation Notes:** DS-005 (DS-DB-028) defines the schema; DS-006 (DS-API-TIP-001) defines the read/reference contract; DS-007 (DS-UX-025) defines cross-surface presentation consistency; DS-008 (DS-SCA-029, added for independent-audit Blocker 2) defines the package's integrity, provenance, tamper-detection, authorization, and fail-closed security authority — this service never writes a deterministic field without an auditable call to the owning engine, per DS-SCA-029's no-unauthorized-override rule.
+
+**Testing:** Cross-surface consistency test confirming chart, journal, and alert renderings of the same package ID show identical field values; field-provenance audit confirming every deterministic field traces to its owning engine.
+
 ## 17. Non-Goals
 
 Consistent with `AGENTS.md` "Scope Control," DS-004 does not authorize, without explicit separate approval:
@@ -653,3 +734,9 @@ Each DS-ARC requirement states its own Testing. `scripts/verify-foundation.sh` a
 2. **Live-trading hosting provider (Stage 3/4)** — not yet selected anywhere in the repository; genuinely unresolved but correctly out of current scope (Stage 4 is explicitly not committed).
 3. **DS-004 vs. `ARCHITECTURE.md` change-control process** — now that both exist, a future process decision is needed on whether `ARCHITECTURE.md` remains independently editable or becomes fully subordinate to DS-004's Codex change-control (Draft → Under Review → Approved). Recorded here as a governance question for the owner; not resolved by this draft, and not blocking DS-004's own use in the interim (DS-004 cites `ARCHITECTURE.md`, so either document being current keeps them consistent).
 4. **Phase-to-classification mapping precision** — the DS-004-A01 repair mapped requirements to Committed/Planned based on the best reading of `ROADMAP.md`'s phase boundaries and `AGENTS.md`'s document-priority order where `PROJECT_SPEC.md` and `ROADMAP.md` differ in granularity (e.g., `PROJECT_SPEC.md` §32's terse "Risk-engine foundation" Phase 1 mention vs. `ROADMAP.md`'s more detailed phase breakdown). This mapping is a defensible reading, not an owner-confirmed one; flagged for owner review alongside Open Question #3.
+
+## 22. Founder Vision Completion Architecture
+
+The architecture shall include bounded-agent orchestration, research ingestion/evidence services, thesis monitoring, canonical Trade Intelligence Package services, journal/review services, and notification-provider adapters. Agent orchestration may call only registered tools through policy enforcement and audit boundaries. Research and generative services cannot write authoritative deterministic financial fields.
+
+Discord delivery shall use a notification adapter isolated from trading execution. Webhook/bot credentials are secret-managed; delivery is idempotent, rate-limit aware, retry bounded, and backed by an authoritative in-app event record. No Discord adapter method may invoke order approval, execution, modification, cancellation, Risk Engine configuration, or emergency-control release.

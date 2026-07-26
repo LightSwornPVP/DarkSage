@@ -474,6 +474,44 @@ class TestControlledIdReferences(RepoFixtureTestCase):
         vp.check_controlled_id_references(report)
         self.assertFalse(report.has_failures)
 
+    def test_compound_api_id_is_defined_and_resolvable(self):
+        # DS-API-<DOMAIN>-NNN (e.g. DS-006's API contracts) is a compound
+        # controlled ID — two domain segments before the NNN — that the
+        # single-segment-only regex previously missed entirely, silently
+        # undercounting the controlled-ID inventory.
+        self.write(
+            "docs/codex/Volume-06-API/DS-006-x.md",
+            "#### DS-API-JRN-001 — Journal Entry Capture\n",
+        )
+        self.write("docs/publication/uses.md", "# DSF-102 — Uses\n\nSee DS-API-JRN-001.\n")
+        report = vp.Report()
+        vp.check_controlled_id_references(report)
+        self.assertFalse(report.has_failures)
+        self.assertIn("DS-API-JRN-001", vp.collect_controlled_definitions())
+
+    def test_bare_domain_family_title_is_not_a_malformed_candidate(self):
+        # "# DS-JRN — Journal & Review Intelligence" is a family/document
+        # title, not a numbered requirement ID, and must not be flagged.
+        self.write("docs/codex/Volume-02-Product/requirements/DS-JRN-x.md", "# DS-JRN — Journal & Review Intelligence\n")
+        report = vp.Report()
+        vp.check_controlled_id_inventory(report)
+        self.assertFalse(report.has_failures)
+
+    def test_malformed_id_heading_is_flagged(self):
+        self.write("docs/codex/Volume-02-Product/requirements/DS-JRN-x.md", "### DS-JRN-01 — Too Few Digits\n")
+        report = vp.Report()
+        vp.check_controlled_id_inventory(report)
+        self.assertTrue(report.has_failures)
+        self.assertTrue(any("DS-JRN-01" in f.message for f in report.findings if f.severity == "FAIL"))
+
+    def test_duplicate_requirement_id_definition_is_flagged(self):
+        self.write("docs/codex/Volume-02-Product/requirements/DS-JRN-x.md", "### DS-JRN-001 — First Definition\n")
+        self.write("docs/codex/Volume-02-Product/requirements/DS-JRN-y.md", "### DS-JRN-001 — Second Definition\n")
+        report = vp.Report()
+        vp.check_controlled_id_inventory(report)
+        self.assertTrue(report.has_failures)
+        self.assertTrue(any("DS-JRN-001" in f.message for f in report.findings if f.severity == "FAIL"))
+
 
 # ---------------------------------------------------------------------------
 # HIGH4-B — general Markdown-table validation

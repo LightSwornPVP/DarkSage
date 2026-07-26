@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-006 |
 | Title | API Specification |
-| Version | 0.2.1 |
+| Version | 0.5.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.5.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blockers 2, 3, 5): expanded DS-API-RSH-001/002/003, DS-API-JRN-001/002/003, and DS-API-TIP-001 from summary-level descriptions into full per-operation contracts (method, path, path/query params, headers, idempotency, request/response body schema with field constraints, success/validation/auth-failure/not-found/conflict/stale-data/integrity-failure/rate-limit/server-failure behavior, pagination, audit events, versioning/concurrency, redaction, paper/live restrictions) — closing the gap where this document's own revision record claimed that level of detail but these seven operations did not yet have it. DS-API-RSH-002 now has an explicit Acceptance Criteria block (previously missing). Added `DS-API-JRN-004` (Journal Retention and Deletion, DS-JRN-007). No endpoint's method, path, or prior acceptance criterion was removed — only expanded. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added §6.18 (Research Intelligence API, `DS-API-RSH-001..003`), §6.19 (Journal & Review API, `DS-API-JRN-001..003`), and §6.20 (Trade Intelligence Package API, `DS-API-TIP-001`), each with full per-operation method/path/params/body/response/status contracts, closing the H1 API-traceability gap. Renumbered the Founder Vision Completion section from the misnumbered "## 25." (skipping §§13–24, which were never used) to the correct next-available "## 13." (immediately following §12 References/Appendix A); no other section was renumbered or shifted. No endpoint contract's method, path, or acceptance criteria changed by this repair beyond the additions stated above. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft. Defines the API contract that realizes DS-ARC-001's client/server boundary: cross-cutting conventions (auth, versioning, pagination, errors, rate limiting, streaming, auditability) and 17 API domains covering every DS-002 requirement family and DS-005 entity, including the Transaction/Alert/Notification entities added in the DS-005 v0.2.0 repair. Authored using `.ai-workflow/DS-006-PREP-NOTES.md` as input. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair pass for four independent-audit High findings: (H1) added DS-API-COR-010 defining a mechanism-agnostic session lifecycle contract (login, logout, refresh, revoke-one, revoke-all, device/session visibility) without choosing a token scheme; (H2) split DS-API-WKS-001 so the Committed/MVP baseline workspace no longer depends on the Planned WorkspaceLayout entity (DS-DB-017), backing it with ephemeral session-scoped state instead, and clarified DS-API-WKS-002 as the sole Planned owner of persisted layouts; (H3) added DS-API-EXE-005/006 defining a Planned Trade Proposal creation and pipeline-submission contract, traced to DS-EXE-002, with explicit two-step separation from order placement; (H4) replaced ambiguous combined method declarations with deterministic per-operation method/path/params/body/response/status contracts, in full for Scanner, Integration Credential, Alert, and Notification endpoint groups and for candle range/timeframe/filtering, and in compact form elsewhere. Also clarified that external broker/data-provider APIs remain behind DS-004 adapters, outside this client/backend contract, and added a defense-in-depth redaction note to the audit-log endpoint. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Focused H1-only repair: DS-API-COR-010 referenced `GET /auth/sessions/current` as the discovery point for refresh support without defining that operation. Added its full deterministic contract (purpose, auth requirement, empty request parameters, response schema including `refresh_supported`/`refresh_expires_at`, success/error statuses, no-secret-exposure guarantee) and distinguished it from `DELETE /auth/sessions/current` (read vs. revoke, same path). Token mechanism (JWT vs. opaque) remains unresolved per Appendix A Open Question #2. No other requirement modified. |
@@ -702,6 +705,278 @@ Governing DS-002 family: DS-OPS-001/002 (Committed). Governing DS-005 entity: Au
 
 **Testing:** Secret-exposure scan across this endpoint's responses (shared with DS-DB-020's own test).
 
+### 6.18 Research Intelligence API (added in the independent-audit H1 repair; expanded to full per-operation contracts in the independent-audit Blocker 5 repair)
+
+Governing DS-002 family: DS-RSH (Planned). Governing DS-005 entities: ResearchSource/ResearchEvidence (DS-DB-029), CatalystEvent (DS-DB-030), TradingThesis/ThesisRevision (DS-DB-031). Every operation below follows DS-API-COR-001 through 010's cross-cutting conventions (versioning, envelope/timestamps/data-state, pagination, error schema, rate limiting, streaming, auditability, session lifecycle); only domain-specific detail is restated here.
+
+#### DS-API-RSH-001 — Research Evidence Retrieval
+
+**Release Classification:** Planned
+
+**Operations:**
+
+| Operation | Method | Path | Path Params | Query Params | Response Body | Success | Errors |
+|---|---|---|---|---|---|---|---|
+| List | GET | `/research/evidence` | — | `symbol_id?`, `domain?` (enum: news/filing/earnings/macro/insider/political/analyst, DS-RSH-002), `since?`/`until?` (ISO-8601), `limit`/pagination (DS-API-COR-005) | array of ResearchEvidence (DS-DB-029) + pagination | 200 | 400 (invalid `domain` or `since`>`until`), 401/403 |
+| Get | GET | `/research/evidence/{evidence_id}` | `evidence_id` | — | single ResearchEvidence | 200 | 404 (unknown `evidence_id`), 401/403 |
+
+**Auth:** Authenticated (read-only permission group).
+
+**Request headers:** Standard session header only (DS-API-COR-010); no domain-specific header.
+
+**Idempotency:** Both operations are read-only GETs; naturally idempotent, no idempotency key required.
+
+**Response body schema:** `evidence_id`, `source_id`, `affected_symbol_ids`, `evidence_type`, `publication_time`, `event_time` (nullable), `retrieval_time`, `confidence`, `content_summary`, `data_state` (per DS-API-COR-002), `superseded_by` (nullable) — matching DS-DB-029's Key Fields exactly.
+
+**Validation failures:** `domain` outside the defined enum, or `since` later than `until`, returns 400 with the specific invalid parameter named (DS-API-COR-006 error schema).
+
+**Authentication/authorization failures:** Missing/invalid session credential → 401; authenticated but lacking the read-only permission group → 403.
+
+**Not-found behavior:** An unknown `evidence_id` returns 404, never a silent empty object.
+
+**Conflict behavior:** Not applicable — read-only endpoint group.
+
+**Stale-data behavior:** Every returned record's `retrieval_time` and `data_state` disclose whether the underlying source has been re-fetched since `publication_time`; a record whose source domain is currently disabled (DS-RSH-002) is simply absent from results, not returned with a misleading current-looking state.
+
+**Integrity/provenance failure behavior:** A record whose `source_id` cannot be resolved (e.g., a corrupted reference) is excluded from the response with the gap surfaced via a `range_truncated`-style indicator (mirroring DS-API-MKT-001's pattern) rather than silently returned with a null source.
+
+**Rate-limit behavior:** Subject to DS-API-COR-007's general policy once defined; no domain-specific override.
+
+**Server/provider failure behavior:** If a specific research-domain adapter (DS-ARC-026) is unavailable, results from other domains are still returned; the response discloses which domain(s) were unavailable at request time rather than failing the whole request.
+
+**Pagination/filtering/sorting:** Cursor or offset/limit per DS-API-COR-005 (scheme TBD, DS-006 Appendix A #3); default sort is `publication_time` descending; filterable by `symbol_id` and `domain`.
+
+**Audit events:** Read access to this endpoint group is not independently audited beyond standard access logging (DS-OPS-001) — it is not security-sensitive at the read level (DS-API-COR-009 applies only to state-changing/security-sensitive reads, e.g., credentials).
+
+**Versioning/concurrency controls:** Standard API versioning (DS-API-COR-003); no per-record concurrency token needed since ResearchEvidence is append-only/immutable (DS-DB-029).
+
+**Data redaction:** No redaction beyond standard field set; licensing-restricted content (DS-RSH-001) is excluded from `content_summary` where the source's licensing terms require it, per `licensing_reference`.
+
+**Paper/live or automation-state restrictions:** None — research evidence retrieval is unrelated to trading mode.
+
+**Acceptance Criteria:** A response never omits `publication_time`/`retrieval_time`/`source_id`; disabling a research domain (DS-RSH-002) excludes it from results without erroring.
+
+**Testing:** Evidence-completeness and per-domain-disable regression test (shared with DS-DB-029's own test); validation-failure and not-found regression test.
+
+#### DS-API-RSH-002 — Catalyst and Event Timeline
+
+**Release Classification:** Planned | **Endpoint:** `GET /symbols/{symbol_id}/catalysts`
+
+**Description:** Returns the time-ordered CatalystEvent (DS-DB-030) timeline for a symbol, per DS-RSH-003, with date uncertainty disclosed explicitly.
+
+**Auth:** Authenticated (read-only permission group).
+
+**Path Params:** `symbol_id` (resolved SecurityIdentity, DS-DB-014). **Query Params:** `since?`/`until?` (ISO-8601, filters by `expected_date`/`realized_date`), `limit`/pagination (DS-API-COR-005). **Request headers:** standard session header only. **Idempotency:** read-only GET, naturally idempotent.
+
+**Response body schema:** array of CatalystEvent (DS-DB-030): `catalyst_id`, `affected_symbol_ids`, `event_type`, `expected_date` (nullable), `realized_date` (nullable), `date_uncertainty`, `source_evidence_ids`, `post_event_update_ids`, plus pagination metadata.
+
+**Success status:** 200. **Validation failures:** 400 for an unresolvable `symbol_id` format or `since`>`until`. **Authentication/authorization failures:** 401 (no/invalid session), 403 (unauthorized permission group). **Not-found behavior:** an unknown `symbol_id` returns 404 (mirrors DS-API-MKT-002's symbol-resolution behavior); a resolvable symbol with zero catalysts returns 200 with an empty array, never 404. **Conflict behavior:** not applicable — read-only. **Stale-data behavior:** an event whose `date_uncertainty` reflects an unresolved date is returned with that uncertainty explicit, never a guessed confirmed date (DS-RSH-003). **Integrity/provenance failure behavior:** a catalyst referencing a `source_evidence_ids` entry that fails DS-API-RSH-001's own integrity check is flagged in-line rather than silently included as verified. **Rate-limit behavior:** per DS-API-COR-007's general policy. **Server/provider failure behavior:** a research-domain adapter outage affecting catalyst sourcing (DS-ARC-026) degrades to the last-known timeline with a disclosed staleness indicator, never a full request failure. **Pagination/filtering/sorting:** per DS-API-COR-005; default sort is chronological by `expected_date`/`realized_date`. **Audit events:** standard access logging only (DS-OPS-001); not independently security-sensitive. **Versioning/concurrency controls:** standard API versioning (DS-API-COR-003); CatalystEvent records are immutable once created (`post_event_update_ids` chain forward rather than mutating). **Data redaction:** none beyond standard field set. **Paper/live or automation-state restrictions:** none.
+
+**Acceptance Criteria:**
+- The response never presents an unresolved `expected_date`/`realized_date` as confirmed; `date_uncertainty` is always present when either date is uncertain.
+- A symbol with a resolvable identity and zero catalysts returns 200 with an empty array, distinguishable from an unresolvable `symbol_id` (404).
+- Timeline ordering is chronological and stable for identical underlying data.
+
+**Testing:** Catalyst-timeline ordering/disclosure test (shared with DS-DB-030's own test); symbol-resolution 404-vs-empty-array regression test.
+
+#### DS-API-RSH-003 — Thesis Creation and Monitoring
+
+**Release Classification:** Planned
+
+**Operations:**
+
+| Operation | Method | Path | Path Params | Request Body | Response Body | Success | Errors |
+|---|---|---|---|---|---|---|---|
+| List | GET | `/theses` | — | — | array of TradingThesis summaries + pagination | 200 | 401/403 |
+| Create | POST | `/theses` | — | `symbol_id` (required), `original_text` (required, string), `assumptions` (optional, JSON), `invalidation_conditions` (optional, JSON), `evidence_ids` (optional, array of ResearchEvidence IDs) | created TradingThesis (DS-DB-031) | 201 | 400 (missing `symbol_id`/`original_text`, or an `evidence_ids` entry that does not resolve), 401/403 |
+| Get | GET | `/theses/{thesis_id}` | `thesis_id` | — | TradingThesis including full ThesisRevision history | 200 | 404, 401/403 |
+| Append revision | POST | `/theses/{thesis_id}/revisions` | `thesis_id` | `revision_type` (required, enum: annotation/material-change-flag/status-update), `content` (required, string), `triggering_evidence_id` (optional) | created ThesisRevision | 201 | 400 (invalid `revision_type`), 404 (`thesis_id`), 401/403 |
+
+**Auth:** Authenticated (owner-scoped).
+
+**Idempotency:** `POST /theses` and `POST .../revisions` are not idempotent by default; a client-supplied `Idempotency-Key` header, where provided, causes a retried identical request to return the original 201 response rather than creating a duplicate thesis/revision.
+
+**Required/optional fields and constraints:** `symbol_id` must resolve to an existing SecurityIdentity (DS-DB-014); `original_text` is required and, once created, is never a target of any update operation in this group — there is no `PUT`/`PATCH` against a thesis's `original_text` anywhere in this contract; `revision_type` must be one of the three defined enum values.
+
+**Conflict behavior:** No operation in this group can conflict with itself in a way requiring a 409 — creation always produces a new resource; there is no update-in-place path to race against.
+
+**Stale-data behavior:** `GET /theses/{thesis_id}` always returns the full revision chain in creation order; a thesis whose most recent ThesisRevision is a `material-change-flag` is returned with that flag visible, never silently resolved.
+
+**Integrity/provenance failure behavior:** An `evidence_ids`/`triggering_evidence_id` reference that fails DS-API-RSH-001's integrity check is flagged in the response rather than silently dropped.
+
+**Rate-limit behavior:** Per DS-API-COR-007's general policy; creation operations are additionally subject to any abuse-prevention limit that policy defines.
+
+**Server/provider failure behavior:** A failure persisting a new ThesisRevision returns 500-class error (DS-API-COR-006 schema) and does not partially apply — the original thesis is unaffected by a failed append attempt.
+
+**Pagination/filtering/sorting:** `GET /theses` list supports pagination (DS-API-COR-005), filterable by `symbol_id`.
+
+**Audit events:** Every `POST /theses` and `POST .../revisions` call produces a correlated AuditLogEntry (DS-API-COR-009), since these are state-changing requests.
+
+**Versioning/concurrency controls:** No concurrency token is needed for `original_text` since it is never updated; concurrent `POST .../revisions` calls each succeed independently as separate, ordered ThesisRevision records (no last-write-wins race).
+
+**Data redaction:** None beyond standard field set.
+
+**Paper/live or automation-state restrictions:** None — thesis creation/monitoring is unrelated to trading mode.
+
+**Acceptance Criteria:** No operation in this group updates or deletes an existing thesis's `original_text`; a material evidence change is recorded only via a new ThesisRevision; a `POST` with a missing required field or an unresolvable `evidence_ids` entry is rejected with a specific 400, not silently accepted with a null.
+
+**Testing:** Thesis-immutability and revision-chain integrity test (shared with DS-DB-031's own test); required-field/unresolvable-reference validation test; idempotency-key retry test.
+
+### 6.19 Journal & Review Intelligence API (added in the independent-audit H1 repair; expanded to full per-operation contracts in the independent-audit Blocker 5 repair)
+
+Governing DS-002 family: DS-JRN-001 through DS-JRN-005, DS-JRN-007 (Planned); DS-JRN-006 (Future/Exploratory — not represented in this API). Governing DS-005 entities: JournalEntry (DS-DB-032), DailyReview/WeeklyReview (DS-DB-033).
+
+#### DS-API-JRN-001 — Journal Entry Capture
+
+**Release Classification:** Planned
+
+**Operations:**
+
+| Operation | Method | Path | Path Params | Request Body | Response Body | Success | Errors |
+|---|---|---|---|---|---|---|---|
+| List | GET | `/journal/entries` | — | — | array of JournalEntry summaries + pagination | 200 | 401/403 |
+| Create | POST | `/journal/entries` | — | `original_plan` (required, JSON: entry/stop/targets/size), `thesis_id` (optional), `strategy_id` (optional, version-pinned), `chart_state_reference` (optional), `evidence_ids` (optional), `emotional_context` (optional, string) | created JournalEntry | 201 | 400 (missing `original_plan`), 401/403 |
+| Get | GET | `/journal/entries/{entry_id}` | `entry_id` | — | JournalEntry including amendment history | 200 | 404, 401/403 |
+| Append amendment | POST | `/journal/entries/{entry_id}/amendments` | `entry_id` | one of: `actual_execution`, `outcome`, `rule_adherence`, `mistake_classification`, `lessons`, or a Sage-authored observation (JSON, author-tagged) | created amendment record | 201 | 400 (empty amendment body), 404, 401/403 |
+
+**Auth:** Authenticated (owner-scoped).
+
+**Idempotency:** `POST /journal/entries` and the amendments operation support an optional `Idempotency-Key` header; a retried identical request returns the original 201 rather than duplicating the entry/amendment.
+
+**Required/optional fields and constraints:** `original_plan` is required at creation and is never a target of any update operation in this group — no `PUT`/`PATCH` against it exists anywhere in this contract; every later change is a distinct amendments-operation call.
+
+**Conflict behavior:** Not applicable — there is no update-in-place path to conflict with.
+
+**Stale-data behavior:** `GET /journal/entries/{entry_id}` always returns amendments in creation order, each independently timestamped/attributed; nothing is silently merged into `original_plan`.
+
+**Integrity/provenance failure behavior:** An amendment referencing an `evidence_ids`/`thesis_id` value that fails its own domain's integrity check is flagged rather than silently accepted as verified.
+
+**Rate-limit behavior:** Per DS-API-COR-007's general policy.
+
+**Server/provider failure behavior:** A failed amendment write does not partially apply and does not affect `original_plan` or prior amendments.
+
+**Pagination/filtering/sorting:** `GET /journal/entries` supports pagination (DS-API-COR-005), filterable by date range and `strategy_id`.
+
+**Audit events:** `POST` and the amendments operation produce a correlated AuditLogEntry (DS-API-COR-009).
+
+**Versioning/concurrency controls:** No concurrency token needed for `original_plan` (immutable); amendments are independently ordered, append-only records.
+
+**Data redaction:** `emotional_context` and other private fields are never included in any export or external-channel delivery without the explicit configuration DS-SCA-028/DS-ALT-004 require.
+
+**Paper/live or automation-state restrictions:** None — journal capture is unrelated to trading mode, though `strategy_id`/`original_plan` may reference a strategy running under any automation mode (DS-EXE-008) without restriction on the journal side.
+
+**Acceptance Criteria:** No operation updates a JournalEntry's `original_plan` field once created; every amendment is timestamped and attributable; a `POST` missing the required `original_plan` is rejected with 400.
+
+**Testing:** Original-plan immutability and amendment-attribution test (shared with DS-DB-032's own test); required-field validation test; idempotency-key retry test.
+
+#### DS-API-JRN-002 — Daily and Weekly Reviews
+
+**Release Classification:** Planned | **Endpoints:** `GET /journal/reviews/daily/{date}`, `GET /journal/reviews/weekly/{week}`
+
+**Description:** Returns generated DailyReview/WeeklyReview (DS-DB-033) aggregates, per DS-JRN-003/004, with every quantitative figure referencing its source DS-PERF/DS-PRT calculation and Sage's commentary in a structurally separate field.
+
+**Auth:** Authenticated (owner-scoped). **Path Params:** `date` (ISO-8601 date) or `week` (ISO-8601 week identifier). **Query Params:** none beyond the path identifier. **Idempotency:** read-only GET, naturally idempotent.
+
+**Response body schema:** `review_id`, `review_date`/`week`, `performance_metric_refs` (JSON, FK references only — never an inlined recomputation), `plan_adherence_summary`, `recurring_mistake_refs`, `next_session_watchlist`, `sage_commentary` (nullable, structurally separate field), `generated_at`.
+
+**Success status:** 200. **Validation failures:** 400 for a malformed `date`/`week` identifier. **Authentication/authorization failures:** 401/403. **Not-found behavior:** a valid but not-yet-generated date/week returns 404 (the review does not exist yet), distinct from a malformed identifier (400). **Conflict behavior:** not applicable — read-only. **Stale-data behavior:** a review generated before the current session's data was fully available discloses that via `data_state`/freshness fields inherited from its underlying `performance_metric_refs`. **Integrity/provenance failure behavior:** a `performance_metric_refs` entry that cannot be resolved against DS-PERF/DS-PRT is flagged, never silently omitted from the figure. **Rate-limit behavior:** per DS-API-COR-007. **Server/provider failure behavior:** if review generation itself is degraded, the endpoint returns 503 with a retry indication rather than a partially-computed review presented as complete. **Pagination/filtering/sorting:** not applicable — single-resource lookup by date/week. **Audit events:** standard access logging only; read-only and not security-sensitive. **Versioning/concurrency controls:** standard API versioning (DS-API-COR-003); reviews are generated, immutable snapshots — no concurrent-write race exists. **Data redaction:** `sage_commentary` is excluded from any external-channel delivery beyond what DS-ALT-004 explicitly configures. **Paper/live or automation-state restrictions:** none.
+
+**Acceptance Criteria:** No quantitative field in the response is computed by this endpoint independently of DS-PERF/DS-PRT; `sage_commentary`/`pattern_discovery_notes` never presents correlation as proven causation (DS-JRN-004); a not-yet-generated review returns 404, never an empty-but-200 response.
+
+**Testing:** Deterministic-figure-reuse audit (shared with DS-DB-033's own test); not-generated-vs-malformed-identifier regression test.
+
+#### DS-API-JRN-003 — Sage Review Drafting
+
+**Release Classification:** Planned | **Endpoint:** `POST /journal/reviews/{review_id}/sage-draft`
+
+**Description:** Requests Sage-drafted narrative commentary for an existing, already-generated review (DS-API-JRN-002); Sage may analyze journal records and propose learning actions (DS-JRN-005) but never diagnoses medical/psychological conditions and never alters the review's deterministic figures.
+
+**Auth:** Authenticated (owner-scoped). **Path Params:** `review_id`. **Request body:** none required beyond the path identifier; an optional `focus_areas` hint (array of strings) may be supplied. **Idempotency:** not idempotent by default (each call may produce a new draft); an optional `Idempotency-Key` header returns the original draft on retry.
+
+**Response body schema:** the updated review's `sage_commentary` field only; no other field of the review is present in this endpoint's response.
+
+**Success status:** 200. **Validation failures:** 400 for an unresolvable `focus_areas` shape. **Authentication/authorization failures:** 401/403. **Not-found behavior:** an unknown/not-yet-generated `review_id` returns 404. **Conflict behavior:** not applicable. **Stale-data behavior:** if the underlying review's `performance_metric_refs` have since changed (e.g., a late-arriving transaction), the draft discloses that its commentary was generated against a specific review version. **Integrity/provenance failure behavior:** if journal records this endpoint would analyze fail an integrity check, drafting is refused with a disclosed reason rather than proceeding against unverified data. **Rate-limit behavior:** per DS-API-COR-007, plus any AI-cost-specific throttling DS-ARC-013/DS-ARC-014 impose. **Server/provider failure behavior:** an AI-provider outage (DS-AI-006) returns a disclosed-degradation error, never a silently empty commentary field. **Pagination/filtering/sorting:** not applicable. **Audit events:** the drafting request is logged (DS-OPS-001); the resulting commentary is attributed to Sage, never presented as user-authored. **Versioning/concurrency controls:** each draft call is independently versioned against the review it targets. **Data redaction:** drafted commentary is subject to the same external-delivery redaction as `sage_commentary` generally (DS-ALT-004). **Paper/live or automation-state restrictions:** none.
+
+**Acceptance Criteria:** This endpoint can only append/attach commentary to an existing review; it has no request shape capable of altering `performance_metric_refs` or any other deterministic field.
+
+**Testing:** Boundary test confirming no deterministic field is writable through this endpoint (shared with DS-SGE non-diagnosis boundary, DS-JRN-005); AI-outage degradation-disclosure test.
+
+#### DS-API-JRN-004 — Journal Retention and Deletion (added for independent-audit Blocker 3)
+
+**Release Classification:** Planned
+
+**Operations:**
+
+| Operation | Method | Path | Path Params | Request Body | Response Body | Success | Errors |
+|---|---|---|---|---|---|---|---|
+| Get policy | GET | `/journal/retention-policy` | — | — | current retention policy | 200 | 401/403 |
+| Set policy | PUT | `/journal/retention-policy` | — | `retention_period` (required) | updated policy | 200 | 400, 401/403 |
+| Export | POST | `/journal/entries/{entry_id}/export` | `entry_id` | — | exportable copy (DS-DAT-002 format) | 200 | 404, 401/403 |
+| Delete | DELETE | `/journal/entries/{entry_id}` | `entry_id` | — | deletion-status object | 200 (or 202 if async) | 404, 409 (see below), 401/403 |
+
+**Auth:** Authenticated (owner-scoped).
+
+**Idempotency:** `DELETE` is idempotent — a repeated `DELETE` against an already-deleted `entry_id` returns 200/404-with-`already_deleted: true` (implementation choice recorded at generation time), never a duplicate deletion side effect.
+
+**Response body schema (Delete):** `entry_id`, `status` (`pending`/`completed`/`failed`), `retained_fields` (array, non-empty only when a legal/audit exception applies, per DS-JRN-007), `failure_reason` (nullable).
+
+**Validation failures:** `PUT .../retention-policy` with an invalid `retention_period` value returns 400.
+
+**Authentication/authorization failures:** 401/403 as elsewhere.
+
+**Not-found behavior:** `DELETE`/`POST .../export` against an unknown `entry_id` returns 404.
+
+**Conflict behavior:** `DELETE` against an entry that is the sole surviving source for an active, unresolved TradingThesis reference returns 409 with the conflicting reference named, rather than silently orphaning it — matching DS-JRN-007's edge case; the client may resolve the reference and retry.
+
+**Stale-data behavior:** Not applicable to deletion itself; export reflects the entry's state at export time.
+
+**Integrity/provenance failure behavior:** Not applicable — this endpoint group does not read package/evidence integrity state.
+
+**Rate-limit behavior:** Per DS-API-COR-007's general policy.
+
+**Server/provider failure behavior:** A failed deletion returns `status: failed` with `failure_reason` populated; it never silently reports success.
+
+**Pagination/filtering/sorting:** Not applicable — single-resource operations.
+
+**Audit events:** Every `DELETE` and `PUT .../retention-policy` call produces a correlated AuditLogEntry (DS-API-COR-009) containing only `entry_id`, timestamp, and outcome — never the deleted private content (DS-JRN-007).
+
+**Versioning/concurrency controls:** Standard API versioning (DS-API-COR-003); no concurrency token needed since deletion is a terminal, idempotent state.
+
+**Data redaction:** The deletion-status response never echoes the deleted private content back to the caller.
+
+**Paper/live or automation-state restrictions:** None.
+
+**Acceptance Criteria:**
+- `DELETE` response reports deletion status (`pending`/`completed`/`failed`) and, on failure, a reason.
+- `DELETE` propagates to derived DailyReview/WeeklyReview narrative content and Sage-drafted commentary referencing the deleted entry (DS-API-JRN-002/003), never to their deterministic `performance_metric_refs`.
+- No audit-log entry produced by this endpoint group reproduces the deleted entry's private content — only its identifier, timestamp, and outcome.
+- A retained-under-exception record's factual fields are listed explicitly in the response; the user's private narrative fields are never among them.
+- A `DELETE` against an entry with an active conflicting reference returns 409, not a silent orphaning.
+
+**Testing:** Deletion-propagation regression test; immutable-record-preservation test; export-before-delete test; deletion-failure disclosure test; privacy-safe-logging audit; conflict (409) regression test (all shared with DS-JRN-007/DS-DB-032's own tests).
+
+### 6.20 Trade Intelligence Package API (added in the independent-audit H1 repair; expanded to full per-operation contract in the independent-audit Blocker 5 repair)
+
+Governing DS-002 family: DS-SIG-005 (Planned). Governing DS-005 entity: TradeIntelligencePackage (DS-DB-028). Governing DS-008 requirement: DS-SCA-029 (Planned, added for independent-audit Blocker 2).
+
+#### DS-API-TIP-001 — Trade Intelligence Package Retrieval
+
+**Release Classification:** Planned | **Endpoint:** `GET /trade-intelligence-packages/{package_id}`
+
+**Description:** Returns the canonical Trade Intelligence Package (DS-DB-028) by its stable identifier and version, per DS-SIG-005/DS-ARC-028 — the single read contract every consuming surface (chart, journal, alert, audit) uses, so no surface reconstructs an equivalent object independently.
+
+**Auth:** Authenticated (read-only permission group). No write operation exists in this contract — creation/update of a TradeIntelligencePackage is performed only by the deterministic services DS-ARC-028 names, never through a client-facing write endpoint, per DS-SCA-029's authorization rule.
+
+**Path Params:** `package_id`. **Query Params:** `version?` (optional; defaults to the latest version if omitted). **Request headers:** standard session header only. **Idempotency:** read-only GET, naturally idempotent.
+
+**Response body schema:** every DS-SIG-005 field (symbol, direction, strategy/setup, entry/entry zone, stop, targets, position size, capital at risk, risk/reward, confidence, quality rating, expected holding period, catalysts, expiration, evidence, contradictions, assumptions, invalidation conditions, market-regime compatibility, data freshness, account context, approval/automation state), plus `package_id`, `version`, `generated_at`, and a `field_provenance` map (per DS-SCA-029) naming the owning service for each deterministic field, and an `integrity_state` (`verified`/`unverified`/`stale`) per DS-SCA-029's tamper/freshness disclosure.
+
+**Success status:** 200. **Validation failures:** 400 for a malformed `version` parameter. **Authentication/authorization failures:** 401 (no/invalid session), 403 (unauthorized permission group, or a caller outside the package's owning account context). **Not-found behavior:** an unknown `package_id` (or an unknown `version` of a known package) returns 404. **Conflict behavior:** not applicable — read-only. **Stale-data behavior:** a package whose `data_freshness_state` has expired (DS-PRD-008) is still returned (never hidden), but with `integrity_state` reflecting the staleness, per DS-SCA-029/DS-UX-025's disclosure requirement. **Integrity/provenance failure behavior:** if `integrity_state` resolves to `unverified` (DS-SCA-029/DS-SCA-027's tamper-detection mechanism could not confirm the stored version's integrity), the response still returns the package data but with `integrity_state: unverified` explicit, and any consequential action a caller would take based on it (e.g., DS-API-EXE-005 proposal creation) independently fails closed per DS-SCA-029 — this endpoint itself does not block the read, only downstream consequential use. **Rate-limit behavior:** per DS-API-COR-007's general policy. **Server/provider failure behavior:** if the underlying TIP service (DS-ARC-028) is degraded, this endpoint returns 503 rather than a partially-assembled package presented as complete. **Pagination/filtering/sorting:** not applicable — single-resource lookup by ID/version. **Audit events:** reads are standard-logged (DS-OPS-001); this endpoint performs no consequential write, so DS-API-COR-009's state-changing-audit requirement does not apply to it (creation/versioning audit events are produced by the owning deterministic service per DS-SCA-029, not by this read endpoint). **Versioning/concurrency controls:** `package_id`+`version` together are immutable and never reused for different content (DS-DB-028); requesting without `version` always resolves to the current latest, with no read-write race since this endpoint never writes. **Data redaction:** a caller without explicit external-channel configuration never receives account-context/capital-at-risk fields through any path other than this authenticated, owner-scoped endpoint — external delivery (Discord) redaction is DS-ALT-004's own concern, not a variant of this endpoint. **Paper/live or automation-state restrictions:** the package's own `automation_state`/`approval_state` fields reflect whichever mode (DS-EXE-008) applies; this read endpoint imposes no additional restriction based on that state — restrictions on *acting* on the package belong to DS-API-EXE-005/006, not to reading it.
+
+**Acceptance Criteria:** The response includes every DS-SIG-005 field, with unavailable fields explicit/null rather than omitted; two different consuming surfaces requesting the same `package_id`/version receive identical field values; `integrity_state`/`field_provenance` are always present (DS-SCA-029); no write path to this resource exists anywhere in this contract.
+
+**Testing:** Cross-surface consistency test (shared with DS-ARC-028/DS-DB-028's own test); field-provenance and integrity-state presence test (shared with DS-SCA-029's own test); no-write-path adversarial test (confirms no method other than `GET` is accepted at this resource).
+
 ## 7. Mobile API Contract Considerations
 
 Per `ROADMAP.md` Phase 1's explicit inclusion of "Mobile API contracts" as a Phase 1 backend deliverable — even though the Mobile app itself is Phase 9 (DS-MOB, DS-ARC-003) — every Committed/MVP endpoint in §6 shall be designed mobile-ready from the start: stable, versioned (DS-API-COR-003), and independent of any desktop-specific assumption (e.g., no endpoint may assume a persistent local desktop process). This is a design constraint on the Committed/MVP endpoints authored now, not a deferred Phase-9 concern. Mobile-specific endpoints (offline cached read-only snapshots, push-notification registration, trade-approval flows) are Planned, matching DS-MOB-001/DS-ARC-003's own classification.
@@ -742,3 +1017,9 @@ Each `DS-API-<DOMAIN>-NNN` requirement states its own Testing. Document-level ve
 5. **Real-time transport protocol** — WebSocket vs. Server-Sent Events vs. polling not yet decided (DS-API-COR-008); Phase-1 Committed/MVP acceptance does not require resolving this (polling against existing read endpoints suffices).
 6. **Missing Auth/Session requirement family at the DS-002/DS-004 level** — DS-API-COR-004 is grounded directly in `SECURITY_RULES.md` since no DS-002/DS-004 requirement currently owns authentication/session behavior as a first-class product/architecture requirement. Recommend a future DS-002/DS-004 addition to formalize this rather than leaving DS-006 as its only home.
 7. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (ROADMAP.md phase boundaries as Codex release-scope authority; phase-mapping precision) apply identically to this document's Release Classification scheme and are not re-litigated here.
+
+## 13. Founder Vision Completion API Domains
+
+The API surface shall define versioned contracts for canonical trade-intelligence packages, research/evidence timelines, thesis monitoring, journal entries, daily/weekly reviews, bounded Sage task plans/tool status, monitoring policies, and notification-channel configuration.
+
+Discord endpoints shall support create/update/disable, secret rotation, test delivery, channel health, content-scope preview, and delivery-history inspection. Secrets are write-only and never returned. Discord endpoints shall not expose trade approval or execution operations. Streaming events shall carry stable object IDs, data-state metadata, and idempotency identifiers.

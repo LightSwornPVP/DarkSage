@@ -495,19 +495,32 @@ def check_contrast_ratios(report: Report) -> None:
 # HIGH4-A: Controlled-ID reference validation
 # ---------------------------------------------------------------------------
 
-CONTROLLED_ID_RE = re.compile(r"\b(DSF-\d{3}|ADR-\d{3}|DS-\d{3}|DS-[A-Z]{2,8}-\d{3})\b")
+
+# A requirement domain segment is one or more hyphen-joined uppercase groups
+# (e.g. "JRN", or the compound "API-JRN") — `(?:[A-Z]{2,8}-)+` — so both a
+# plain domain ID (DS-JRN-001) and a compound API ID (DS-API-JRN-001,
+# DS-API-TIP-001) are recognized as the same controlled-ID family. Without
+# the compound form, every DS-API-<DOMAIN>-NNN identifier defined in DS-006
+# was silently invisible to both reference-resolution and definition
+# counting, undercounting the true controlled-ID inventory.
+CONTROLLED_ID_RE = re.compile(r"\b(DSF-\d{3}|ADR-\d{3}|DS-\d{3}|DS-(?:[A-Z]{2,8}-)+\d{3})\b")
 VOLUME_H1_RE = re.compile(r"^#\s+(DS-\d{3})\b")
-DOMAIN_REQ_HEADING_RE = re.compile(r"^#{2,4}\s+(DS-[A-Z]{2,8}-\d{3})\b")
+DOMAIN_REQ_HEADING_RE = re.compile(r"^#{2,4}\s+(DS-(?:[A-Z]{2,8}-)+\d{3})\b")
 ADR_H1_RE = re.compile(r"^#\s+(ADR-\d{3})\b")
 DSF_H1_RE = re.compile(r"^#\s+(DSF-\d{3})\b")
 
 
-def collect_controlled_definitions() -> set:
+def collect_controlled_definitions_with_locations() -> dict:
     """Collect every controlled ID (DS-NNN volume, DS-<DOMAIN>-NNN
-    requirement, ADR-NNN, DSF-NNN) actually *defined* by a heading in the
-    committed Codex or the publication batch. Never invented — only IDs that
-    exist as a real heading count as defined."""
-    defined = set()
+    requirement — including the compound DS-API-<DOMAIN>-NNN form used by
+    DS-006's API contracts — ADR-NNN, DSF-NNN) actually *defined* by a
+    heading in the committed Codex or the publication batch, mapped to every
+    file that defines it. Never invented — only IDs that exist as a real
+    heading count as defined. Returning every defining file (not just a
+    deduplicated set of IDs) lets callers detect an ID defined in more than
+    one place instead of silently collapsing the duplicate into a single
+    entry and inflating the apparent inventory."""
+    id_to_files: dict[str, set] = {}
     codex_dir = resolve_repo_path("docs/codex")
     if codex_dir.is_dir():
         for f in codex_dir.rglob("*.md"):
@@ -515,7 +528,7 @@ def collect_controlled_definitions() -> set:
                 for rx in (VOLUME_H1_RE, DOMAIN_REQ_HEADING_RE, ADR_H1_RE):
                     m = rx.match(line)
                     if m:
-                        defined.add(m.group(1))
+                        id_to_files.setdefault(m.group(1), set()).add(repo_relative(f))
     for base in PUBLICATION_DIRS:
         d = resolve_repo_path(base)
         if not d.is_dir():
@@ -527,8 +540,100 @@ def collect_controlled_definitions() -> set:
             if lines:
                 m = DSF_H1_RE.match(lines[0])
                 if m:
-                    defined.add(m.group(1))
-    return defined
+                    id_to_files.setdefault(m.group(1), set()).add(repo_relative(f))
+    return id_to_files
+
+
+def collect_controlled_definitions() -> set:
+    """Convenience wrapper: the set of unique controlled IDs, discarding the
+    per-file location detail. Use collect_controlled_definitions_with_locations()
+    directly when duplicate-location detection matters."""
+    return set(collect_controlled_definitions_with_locations().keys())
+
+
+# A requirement domain segment's grammar, standalone, for validating a
+# candidate token that was found via the broader ID_CANDIDATE_HEADING_RE
+# below — never used to *find* candidates, only to judge ones already found.
+STRICT_ID_FULLMATCH_RES = [
+    re.compile(r"^DSF-\d{3}$"),
+    re.compile(r"^ADR-\d{3}$"),
+    re.compile(r"^DS-\d{3}$"),
+    re.compile(r"^DS-(?:[A-Z]{2,8}-)+\d{3}$"),
+]
+
+# Deliberately broad "this heading token looks like an attempted controlled
+# ID" detector — anything starting with DS-/ADR-/DSF-, optionally followed by
+# domain segment(s), ending in a segment that *starts with a digit* (a real
+# ID's final NNN segment always does). This last-segment-starts-with-digit
+# requirement is what distinguishes a numbered ID attempt (DS-JRN-001,
+# DS-jrn-01, ADR-12 — all candidates, some malformed) from a bare domain/
+# family H1 title like "DS-JRN — Journal & Review Intelligence", which
+# legitimately has no trailing number and must not be flagged. Malformed
+# attempts (lowercase, wrong digit count) are still caught; used only to
+# *find* candidates so they can be checked against STRICT_ID_FULLMATCH_RES,
+# never used by itself to decide a token is a valid controlled ID.
+ID_CANDIDATE_HEADING_RE = re.compile(r"^#{1,6}\s+((?:DS|ADR|DSF)(?:-[A-Za-z0-9]+)*-[0-9][A-Za-z0-9]*)\b")
+
+
+def check_controlled_id_inventory(report: Report) -> None:
+    """HIGH4-A extension: the dynamically-derived controlled-ID inventory
+    itself — duplicate definitions and malformed near-miss ID headings —
+    which check_controlled_id_references (reference *resolution*) does not
+    cover on its own."""
+    check = "controlled-id-inventory"
+    id_to_files = collect_controlled_definitions_with_locations()
+
+    dup_count = 0
+    for doc_id, files in sorted(id_to_files.items()):
+        if len(files) > 1:
+            report.fail(check, f"{doc_id} is defined as a controlled-ID heading in more than one file: {sorted(files)}")
+            dup_count += 1
+    if dup_count == 0:
+        report.ok(check, f"no duplicate controlled-ID definitions found across {len(id_to_files)} unique ID(s)")
+
+    files = []
+    codex_dir = resolve_repo_path("docs/codex")
+    if codex_dir.is_dir():
+        files.extend(codex_dir.rglob("*.md"))
+    for base in PUBLICATION_DIRS:
+        d = resolve_repo_path(base)
+        if d.is_dir():
+            files.extend(p for p in d.rglob("*.md") if not repo_relative(p).startswith(TEMPLATE_DIR_PREFIXES))
+
+    malformed = 0
+    for f in files:
+        for lineno, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            m = ID_CANDIDATE_HEADING_RE.match(line)
+            if not m:
+                continue
+            token = m.group(1)
+            if not any(rx.match(token) for rx in STRICT_ID_FULLMATCH_RES):
+                report.fail(check, f"{repo_relative(f)}:{lineno}: heading token '{token}' looks like an attempted controlled ID but does not match the strict grammar")
+                malformed += 1
+    if malformed == 0:
+        report.ok(check, "no malformed controlled-ID-like headings found")
+
+    # Category breakdown, computed from the same STRICT_ID_FULLMATCH_RES
+    # grammar used everywhere else in this module, so the requirement-ID
+    # subtotal (plain DS-<DOMAIN>-NNN plus compound DS-API-<DOMAIN>-NNN) and
+    # the full inventory total (adding DS-NNN volumes, ADR-NNN, DSF-NNN) can
+    # never silently drift apart from how those IDs are actually defined.
+    ids = list(id_to_files.keys())
+    volumes = [i for i in ids if re.match(r"^DS-\d{3}$", i)]
+    adrs = [i for i in ids if re.match(r"^ADR-\d{3}$", i)]
+    dsf_docs = [i for i in ids if re.match(r"^DSF-\d{3}$", i)]
+    plain_requirements = [i for i in ids if re.match(r"^DS-[A-Z]{2,8}-\d{3}$", i)]
+    compound_requirements = [i for i in ids if re.match(r"^DS-(?:[A-Z]{2,8}-){2,}\d{3}$", i)]
+    requirement_total = len(plain_requirements) + len(compound_requirements)
+
+    report.ok(
+        check,
+        f"category breakdown — DS-NNN volumes: {len(volumes)}, ADR-NNN: {len(adrs)}, "
+        f"DSF-NNN (publication): {len(dsf_docs)}, plain DS-<DOMAIN>-NNN requirements: {len(plain_requirements)}, "
+        f"compound DS-API-<DOMAIN>-NNN requirements: {len(compound_requirements)}",
+    )
+    report.ok(check, f"requirement-ID-only subtotal (plain + compound): {requirement_total}")
+    report.ok(check, f"controlled-ID inventory total (all categories): {len(id_to_files)} unique definition(s) dynamically derived from repository content")
 
 
 def check_controlled_id_references(report: Report) -> None:
@@ -983,6 +1088,7 @@ def run_all() -> Report:
     check_no_unsupported_proprietary_font(report)
     check_contrast_ratios(report)
     check_controlled_id_references(report)
+    check_controlled_id_inventory(report)
     check_markdown_tables(report)
     check_mermaid_sources(report)
     return report

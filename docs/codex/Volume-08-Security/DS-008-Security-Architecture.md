@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-008 |
 | Title | Security Architecture |
-| Version | 0.2.2 |
+| Version | 0.5.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.5.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blockers 2, 3): added `DS-SCA-029` (Trade Intelligence Package Security and Integrity), establishing the security authority Blocker 2 found missing — integrity, provenance, tamper detection, authorization, no-unauthorized-deterministic-override, stale/partial-package protection, external-channel redaction, audit logging, conflicting-evidence handling, storage/transport protection, and fail-closed behavior for the canonical Trade Intelligence Package. Extended `DS-SCA-028` with secure-deletion/backup-disclosure behavior for DS-JRN-007's journal retention/deletion contract (Blocker 3). No prior requirement's Decision/Status/classification changed. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added `DS-SCA-028` (Research and Journal Data Protection — closing the H1 security-traceability gap for the new ResearchSource/ResearchEvidence/TradingThesis/JournalEntry protected-asset classes, extending DS-SCA-023's catalog). Renumbered the Founder Vision Completion section from the misnumbered "## 29." (skipping §§19–28) to the correct next-available "## 19." No prior control's content changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 1 grouped pass (DS-007/DS-008/DS-009). Translates `SECURITY_RULES.md` and DS-002's DS-SEC family, together with DS-004's security-relevant architecture (DS-ARC-015/019/021/022/024) and DS-006's session/authentication contracts (DS-API-COR-004/010), into a consolidated security architecture under the `DS-SCA` prefix. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for three independent-audit High findings, added as new §13a (appended after existing content to preserve requirement-ID document order, mirroring the DS-004 §16a repair precedent): **H1** added `DS-SCA-023` (Protected Assets, Threat Actors, and Trust Boundaries) and `DS-SCA-024` (Material Threat Scenarios and Controls, a 10-row scenario/control/fail-safe/residual-risk table) making the threat model actionable, with a forward pointer added to DS-SCA-001. **H2** added `DS-SCA-025` (Audit-Log Integrity and Protection Architecture) — append-only/tamper-evident writes, authorized writer/reader boundaries, deterministic ordering, fail-closed-on-unavailable-audit behavior — without mandating a specific storage vendor. **H3** added `DS-SCA-026` (Security Incident Response Lifecycle) — a 10-step detection-through-post-incident-review lifecycle explicitly covering compromised sessions/credentials, suspected unauthorized trading, compromised update/dependency paths, audit-log integrity failures, malicious external data/integrations, and local-device compromise, preserving owner/user authority and requiring stronger validation before live-trading capability is restored. §14 Non-Goals updated to exclude operational-staffing/legal-response policy. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Narrow repair for independent-audit finding DS-008-H2 (audit-log integrity verification): added `DS-SCA-027` (Audit-Log Integrity Verification Contract, Committed/MVP) defining the deterministic detection behavior DS-SCA-025's append-only architecture required but did not itself specify — protected record set, integrity evidence for modification/reordering/truncation/selective-deletion/unauthorized-insertion, verification triggers (startup, pre-review, scheduled, post-fault), verification result states, fail-closed behavior, escalation into DS-SCA-026's incident lifecycle, evidence-preservation/repair boundaries, and an explicit prohibition on silently rebuilding audit history to hide a verification failure. Implementation-neutral — no vendor or cryptographic product mandated. DS-SCA-025 updated with a one-sentence pointer to DS-SCA-027; DS-SCA-026's audit-log-integrity-failure cross-reference updated to cite DS-SCA-027 as the detection/escalation mechanism. |
@@ -431,6 +434,61 @@ Owner/user authority is preserved throughout: no automated process disables the 
 
 **Testing:** Direct-storage-corruption adversarial test (bypassing the API to modify/delete/reorder/insert records directly) confirming detection at the next verification trigger; startup-verification test; pre-review-verification test; scheduled-verification test; post-fault-verification test; fail-closed test confirming a security-sensitive/trading-relevant operation is blocked while a violation is unresolved; evidence-preservation test confirming the compromised range is not altered during investigation; anti-silent-rebuild test confirming no code path regenerates history to pass verification without escalation.
 
+## 13b. Additional Missing Security Architecture Contracts (added in the independent-audit H1 repair)
+
+### DS-SCA-028 — Research and Journal Data Protection
+
+**Release Classification:** Planned | **Governing Source:** DS-SCA-023 (this document, Committed, protected-assets catalog); DS-RSH-001..006, DS-JRN-001..005/007 (DS-002, Planned); DS-JRN-006 (DS-002, Future/Exploratory — its Safe Progression data, if ever implemented, would fall under this same protected-asset class); DS-SGE-011 (DS-003, memory-privacy pattern)
+
+**Description:** Closes a gap identified by independent audit: DS-SCA-023's protected-assets catalog did not name the ResearchSource/ResearchEvidence, TradingThesis, or JournalEntry data classes introduced by Research Intelligence and Journal & Review Intelligence, even though journal content in particular (emotional context, mistake classification, behavioral notes) is materially more privacy-sensitive than most other Codex-defined entities. This requirement extends DS-SCA-023's catalog: **Research/journal data** (ResearchEvidence, DS-DB-029; TradingThesis/ThesisRevision, DS-DB-031; JournalEntry, DS-DB-032; DailyReview/WeeklyReview, DS-DB-033) is added as a protected asset class, governed by the same data-minimization (DS-SEC-002), local-first-storage (DS-DAT-001), and credential/secret-exclusion (DS-SEC-001) principles already applied elsewhere, with journal behavioral/emotional-context fields treated as sensitive personal data requiring the same storage and access-control discipline as any other locally-stored personal data — never transmitted externally absent explicit, opt-in configuration (DS-SEC-002/003).
+
+**Acceptance Criteria:**
+- DS-SCA-023's protected-assets catalog is read together with this requirement as including research/journal data; a future DS-SCA-023 revision folds this class in directly.
+- No research/journal data is transmitted to an external service (including an external notification channel, e.g., Discord) without explicit, opt-in configuration and content-minimization consistent with DS-ALT-004's redaction requirements.
+- Journal behavioral/emotional-context fields are excluded from any external channel's default content scope; inclusion requires explicit, separately-configured opt-in.
+
+**Edge Cases:** A user who opts into Discord delivery of journal/review summaries (DS-ALT-004) receives redacted, evidence-preserving content per that requirement's own boundary — this requirement does not create a new external-sharing path beyond what DS-ALT-004 already governs.
+
+**Retention and deletion security (extended for independent-audit Blocker 3):** DS-JRN-007's user-initiated deletion of journal content uses secure deletion or cryptographic erasure where the underlying storage layer requires it to make deleted content actually unrecoverable (not merely unindexed); a deletion request's own audit-log entry (DS-SCA-020/025) never reproduces the deleted content, recording only the deleted record's identifier, timestamp, and outcome. Backup copies of deleted journal content are either purged on the same schedule or the residual-retention window is disclosed to the user at deletion time — deletion is never silently reversed by a backup restore without disclosure.
+
+**Implementation Notes:** DS-004 (DS-ARC-026/027) owns the architecture this requirement protects; DS-005 (DS-DB-029/031/032/033) owns the entity schema; DS-JRN-007/DS-API-JRN-004 own the product-level deletion contract this requirement secures.
+
+**Testing:** Data-minimization/no-external-transmission-without-opt-in test (shared pattern with DS-SEC-002/003's own tests), extended to research/journal entities; secure-deletion/backup-disclosure test (DS-JRN-007).
+
+### DS-SCA-029 — Trade Intelligence Package Security and Integrity
+
+**Release Classification:** Planned | **Governing Source:** DS-SIG-005 (DS-002, Planned); DS-ARC-028 (DS-004, Planned); DS-DB-028 (DS-005, Planned); DS-API-TIP-001 (DS-006, Planned)
+
+**Description:** Closes a gap identified by independent audit (Blocker 2): DS-SCA-028 protects Research and Journal data but does not itself establish security authority for the canonical Trade Intelligence Package (TIP). This requirement is that authority. It covers:
+
+- **Integrity of every TIP field** — entry/entry-zone, stop, targets, position size, capital at risk, risk/reward, confidence, quality rating, expected holding period, catalysts, evidence, contradictions, assumptions, invalidation conditions, data freshness, approval state, and automation state are each protected against unauthorized modification once a package version is referenced by a downstream consumer (chart, journal, execution, alert, audit); a change to any field creates a new package version (DS-DB-028), never a silent in-place edit.
+- **Provenance and source attribution** — every field's origin (Signal, Risk Engine, StrategyProfile, Research Intelligence, or automation-mode service, per DS-ARC-028) is retained with the package so a field's authoritative source is always determinable, never presented as if self-originating.
+- **Tamper detection** — a TIP record's integrity is verifiable using the same append-only/tamper-evident discipline DS-SCA-025/027 already establish for audit records, extended to TIP versions: a direct-storage modification, reordering, or unauthorized insertion against an existing package version is detectable, not merely rejected at the write-path level.
+- **Authorization** — creation and update of a TIP are restricted to the deterministic services that own each field (DS-ARC-028); viewing is scoped to the owning user/account; export is subject to the same data-minimization review as any other export (DS-SEC-002); use in a downstream action (chart overlay, journal capture, trade proposal) requires only read authorization, never write authorization to the package itself.
+- **No unauthorized deterministic override** — Sage or any AI provider may reference, explain, or summarize a TIP's fields but may never write, recompute, or silently override a deterministic field (capital at risk, risk/reward, position size) without that change being an auditable, deterministic recalculation performed by the owning engine (DS-PRD-004, DS-SGE-003/020) — a generative process is never the source of a corrected deterministic value.
+- **Stale/partial package protection** — a package whose underlying data freshness has expired (DS-PRD-008) or whose fields were only partially assembled (e.g., a research-domain adapter was unavailable at generation time, DS-ARC-026) discloses that state explicitly (per DS-UX-025's presentation contract) rather than being treated as complete and current.
+- **Redaction for external delivery** — a TIP summarized or referenced in a Discord/external notification (DS-ALT-004) is redacted consistent with that requirement's own content-minimization boundary; capital-at-risk and account-context fields are never transmitted externally beyond what the user has explicitly configured.
+- **Audit logging** — every consequential change to a TIP (a new version, a state transition in approval/automation state) produces a correlated AuditLogEntry (DS-DB-020) per DS-SCA-020/025, distinguishable from a mere read/reference.
+- **Conflicting/untrusted evidence handling** — a TIP's `evidence`/`contradictions` fields reflect DS-RSH-005's conflict-disclosure discipline; evidence from a source that has not passed DS-IDG-004-equivalent trust review (where applicable) is never silently promoted into a TIP field as if fully trusted.
+- **Storage and transport protection** — a TIP is protected at rest and in transit per DS-SCA-010/011's existing database and secure-communication controls; no new storage or transport mechanism is introduced by this requirement.
+- **Failure behavior** — when a TIP's integrity or freshness cannot be verified, any consequential action depending on that package (chart-driven proposal creation, DS-API-EXE-005; automation-state transition) fails closed per DS-SCA-001/015 rather than proceeding against an unverified package.
+
+**Acceptance Criteria:**
+- No TIP field is modified in place once referenced by a downstream consumer; every material change is a new, versioned package.
+- Every field's provenance is retrievable; a field with no current authoritative source is explicit/null (DS-SIG-005), never fabricated.
+- A direct-storage tamper attempt against a stored TIP version is detectable at the next integrity-verification trigger (shared mechanism with DS-SCA-027).
+- No AI/generative process can write a deterministic TIP field without that write being an auditable call to the owning deterministic engine.
+- A stale or partially-assembled package discloses its state; it is never presented with the same confidence as a complete, current package.
+- External-channel delivery of TIP content is redacted per DS-ALT-004; capital-at-risk/account-context are never sent beyond explicit user configuration.
+- Every consequential TIP change produces a correlated audit entry.
+- A consequential action depending on an integrity- or freshness-unverifiable TIP is blocked, not permitted to proceed.
+
+**Edge Cases:** A TIP referenced by an expired Signal (DS-SIG-004) retains its own historical, already-verified field values and integrity state; it is not silently re-verified against current, different market conditions.
+
+**Implementation Notes:** DS-004 (DS-ARC-028) owns the service architecture this requirement secures; DS-005 (DS-DB-028) owns the schema; DS-006 (DS-API-TIP-001) owns the API contract this requirement's authorization rules apply to; DS-007 (DS-UX-025) owns the stale/partial-state presentation contract.
+
+**Testing:** Field-immutability-once-referenced regression test; provenance-retrieval audit; direct-storage tamper-detection test (shared mechanism with DS-SCA-027's own test); AI-deterministic-override adversarial test (shared pattern with DS-SGE-003/DS-PRD-011's own tests); stale/partial-disclosure test; external-redaction test (shared with DS-ALT-004's own test); audit-correlation test; fail-closed-on-unverifiable-package test.
+
 ## 14. Non-Goals
 
 DS-008 does not: redesign any DS-004 architectural boundary or DS-006 API contract; select a specific authentication token mechanism (DS-006 Appendix A Open Question #2 remains open); commit live-trading timing beyond `ROADMAP.md` Phase 13/DS-EXE-007; weaken DS-001 §14's local-first-where-practical or privacy-by-design principles; introduce a new credential/identity architecture beyond the session lifecycle DS-006 already defines; or define operational staffing, on-call rotation, or legal/regulatory incident-response policy (DS-SCA-026 states the technical/architectural lifecycle only).
@@ -464,3 +522,9 @@ Each `DS-SCA-NNN` requirement states its own Testing. Document-level verificatio
 1. **Authentication token mechanism** — unchanged from DS-006 Appendix A #2; DS-SCA-004/005 remain mechanism-agnostic pending that decision.
 2. **Application update/distribution mechanism** — no DS-002/DS-004 requirement currently commits a specific mechanism (Electron auto-updater vs. manual installer distribution); DS-SCA-019 states the security obligation that applies once one is chosen. Recommend a future DS-004/DS-011 addition to formalize the mechanism itself.
 3. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (`ROADMAP.md` phase boundaries as Codex release-scope authority; phase-mapping precision) apply identically to this document's Release Classification scheme and are not re-litigated here.
+
+## 19. Founder Vision Completion Security Controls
+
+Bounded Sage agency shall use explicit tool allowlists, least-privilege scopes, argument validation, output validation, rate/time/cost limits, cancellation, audit trails, and protection against prompt injection from research sources. Untrusted external content cannot grant tools, alter system policy, or write authoritative deterministic fields.
+
+Discord webhook tokens and bot credentials shall be encrypted through approved secret storage, redacted from logs and exports, rotatable, revocable, and inaccessible to the renderer/client except through protected configuration workflows. Discord messages shall minimize sensitive portfolio data by default. Discord input is not an authentication or trade-authorization channel. A future remote-control capability requires a separate threat model, strong authentication, replay protection, explicit authority, and an approved ADR.

@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-003 |
 | Title | Sage AI Bible |
-| Version | 0.3.0 |
+| Version | 0.4.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-23 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,8 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.4.1 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H3): the Founder Vision Completion section, previously misnumbered "## 20." (skipping §§18–19 after §17 References/Appendix A), renumbered to the correct next-available "## 18." No section content changed. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-23 | TheSinnerMan | Document control scaffold and Core Rule statement created; no detailed normative content. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | First substantial controlled draft. Translates DS-001 §12 (AI Philosophy) and §15 (Explainability Standard), together with DS-002's DS-AI/DS-PRD requirements, into detailed Sage behavior, evidence governance, memory, reasoning, and AI-governance requirements under the DS-SGE prefix. |
 | 0.3.0 | 2026-07-24 | TheSinnerMan | Repair pass addressing independent audit findings DS-003-A01 through A03. **A01:** reclassified all 19 original `DS-SGE-NNN` requirements from Committed/MVP to Planned — Sage itself is `ROADMAP.md` Phase 6, not Phase 1; underlying safety constraints remain governed unconditionally by DS-PRD-001/002/003/004/005/006/007/008/009/011. **A02:** rewrote the Core Rule and strengthened `DS-SGE-005` — Sage may never directly submit an order or access/call the Execution Engine or Broker Adapter under any circumstance, including after user confirmation; the prior "without explicit authorization" phrasing was fixed to remove any implication that authorization transfers execution authority to Sage. **A03:** added `DS-SGE-020` (Sage Output Validation Before Use), the Sage-specific instantiation of new cross-cutting DS-PRD-011 (AI Output Validation), Committed, since `SECURITY_RULES.md` treats all AI output as untrusted input requiring validation before use. |
@@ -542,3 +544,11 @@ Each DS-SGE requirement states its own Testing. Document-level verification (uni
 1. **Confidence vocabulary label set (DS-SGE-014)** — this draft mandates that a fixed vocabulary exists and is used consistently, but does not fix the exact label set (e.g., three-level vs. five-level scale). Routine implementation detail, appropriately delegated to DS-004 rather than an owner-decision blocker.
 2. **Persistent Sage Memory consent model (DS-SGE-012)** — genuinely unresolved and explicitly out of current scope (Future/Exploratory); any future promotion requires a dedicated privacy/consent review, not answered here.
 3. **Adversarial-resistance test coverage bar (DS-SGE-017)** — what constitutes "sufficient" red-team coverage for release is a DS-009 (Testing & QA) policy decision, not fixed by this document.
+
+## 18. Founder Vision Completion — Bounded Agency
+
+Sage is a trusted intelligence partner: strategist, research partner, analyst, mentor, and second set of eyes. Sage may plan and perform approved multi-step work through permission-scoped tools, including research, deterministic analysis, comparison, strategy drafting, thesis monitoring, and journal/review coaching. Every plan, tool call, evidence item, material assumption, and resulting artifact shall be visible or inspectable, attributable, cancellable where practical, and auditable.
+
+Sage may prepare and hand off a canonical Trade Intelligence Package. Sage does not approve or execute it. Execution authority belongs to the user's active automation policy and the deterministic validation/execution services. Proactive Sage behavior requires a user-configured monitoring policy and never inherits authority from a conversational response or external notification channel.
+
+Discord and other external channels may carry Sage summaries and alerts, but are notification-only by default. Their content shall preserve evidence, freshness, simulation/live state, and material risk disclosures within channel limits, with a link or reference to the authoritative in-product record.

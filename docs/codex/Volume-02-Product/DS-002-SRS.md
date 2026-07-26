@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-002 |
 | Title | Software Requirements Specification |
-| Version | 0.6.0 |
+| Version | 0.7.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-23 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.7.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion: reconciled confirmation and automation language; added research, journal/review, canonical trade-intelligence, live-chart, education, portfolio, strategy, and Discord requirements. |
 | 0.1.0 | 2026-07-23 | TheSinnerMan | Document control scaffold created; no normative content. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | First substantial controlled draft. Translates DS-001 and ADR-001–004 into requirement conventions, cross-cutting DS-PRD requirements, and an index of requirement family volumes under `requirements/`. |
 | 0.3.0 | 2026-07-24 | TheSinnerMan | Repair pass addressing independent audit findings DS-002-H01 through H05: corrected the Sage/Risk Engine boundary wording (DS-RSK-001) to permit read/evidence access while preserving the bypass/override prohibition; reclassified 47 unsupported Committed/MVP requirements to Planned after auditing each against DS-001/ADR traceability (Committed/MVP count: 71 → 38 → 35 after a further dependency-consistency pass); resolved Committed-depends-on-Planned inconsistencies by reclassifying the dependent requirements rather than promoting Planned features; clarified undefined market/asset acceptance boundaries as Owner Decision-pending rather than silently delegated to DS-004; added the DS-EDU (Trading Knowledge & Education) requirement family to close a DS-001 §19.2 coverage gap. No MVP scope was invented; the asset-class/product-boundary decision remains an explicit open Owner Decision (Appendix A). |
@@ -194,12 +195,12 @@ The following requirements apply across multiple requirement families and are re
 
 **Purpose:** Preserve the user as the final decision-maker for consequential actions.
 
-**Description:** Sage may recommend, explain, compare, and warn, but the user shall retain decision authority over consequential investment, trading, and automation actions.
+**Description:** Sage may recommend, explain, compare, prepare, and warn, but the user shall retain authority over consequential investment, trading, and automation actions. User authority may be exercised either through a distinct per-action confirmation or through explicit prior activation of a bounded automation policy with defined permissions, limits, and emergency controls.
 
 **Dependencies:** DS-001 §8.3, §11 (Constitution #1, #7), §12; DS-AI; DS-RSK
 
 **Acceptance Criteria:**
-- No Committed/MVP feature allows Sage to execute a consequential action (trade, order, fund movement, irreversible configuration change) without an explicit, distinguishable user confirmation step.
+- Sage never directly executes a consequential action. A consequential action proceeds only through either (a) a distinct, attributable user confirmation or (b) a previously confirmed, bounded automation policy whose permissions, limits, and current state are visible and auditable.
 - Recommendation language is distinguishable from confirmed-action language in the UI and in Sage's own output (e.g., "I recommend..." vs. an executed state).
 - Users can decline, question, or ignore a Sage recommendation without being blocked from proceeding with their own decision, subject only to Risk Engine controls (DS-PRD-006).
 
@@ -209,7 +210,7 @@ The following requirements apply across multiple requirement families and are re
 
 **Implementation Notes:** Detailed Sage behavioral boundaries belong to DS-003.
 
-**Testing:** UI/behavioral test confirming no consequential action completes without a distinct confirmation event attributable to the user.
+**Testing:** UI/behavioral tests confirm that consequential actions require either an attributable per-action confirmation or an active, previously confirmed automation policy; Sage never serves as the confirming or executing authority.
 
 ### DS-PRD-006 — Risk Engine Authority
 
@@ -238,23 +239,26 @@ The following requirements apply across multiple requirement families and are re
 
 **Priority:** Critical | **Release Classification:** Committed / MVP | **Status:** Draft
 
-**Purpose:** Prevent scope creep into autonomous execution without dedicated governance.
+**Purpose:** Prevent unapproved execution authority while preserving Founder-approved bounded automation modes.
 
-**Description:** Autonomous trade execution shall remain outside approved product scope unless separately authorized through future dedicated Codex requirements, risk review, and governance approval.
+**Description:** DarkSage shall not permit unapproved, self-escalating, or Sage-directed autonomous execution. Unattended execution is permitted only within a separately defined automation mode that the user explicitly activates and that remains bounded by deterministic strategy logic, permissions, exposure limits, buying-power checks, market-condition checks, execution validation, broker controls, auditability, and emergency-stop behavior.
 
-**Dependencies:** DS-001 §13, §21; DS-RSK; DS-STR
+**Dependencies:** DS-001 §13, §26.5; DS-RSK; DS-STR; DS-EXE; ADR-002; ADR-005
 
 **Acceptance Criteria:**
-- No Committed/MVP or Planned requirement in this document authorizes unattended, self-initiated trade execution.
-- Any strategy, alert, or automation feature that could be mistaken for autonomous execution explicitly states, in its own requirement text, that it stops at recommendation/notification and does not place orders.
-- Introduction of any future autonomous-execution capability requires a new ADR and dedicated requirement family, not an amendment to an existing family's scope.
+- Advisory Only and Confirmation Required modes never place an order without the required user action.
+- Full-Auto Paper may operate unattended only after explicit activation and remains clearly simulated.
+- Restricted Full-Auto Live remains unavailable until its dedicated release gates, independent security review, broker permissions, risk controls, reconciliation, and operational readiness requirements are satisfied.
+- Sage cannot directly submit, approve, modify, cancel, or route an order; approved deterministic services perform those actions through the canonical validation pipeline.
+- The active automation mode, scope, limits, and emergency controls are always visible and auditable.
 
 **Edge Cases:**
-- A user-configured alert that fires a notification is not autonomous trading; a hypothetical future feature that would place an order without per-trade user confirmation is out of scope until separately approved.
+- Disabling, expiring, or invalidating an automation policy stops new order creation fail-closed.
+- An alert, Discord message, Sage conversation, or external-channel reaction is notification-only unless a future remote-control design is separately approved with strong authentication and explicit authority.
 
-**Implementation Notes:** None beyond the governance gate itself.
+**Implementation Notes:** DS-EXE owns detailed automation-mode behavior. ADR-005 records the durable five-mode decision.
 
-**Testing:** Requirements review — reject any proposed requirement that would execute trades without per-action user confirmation, absent a governing ADR.
+**Testing:** Mode-matrix tests verify allowed and forbidden actions for every automation state, including restart, stale data, provider outage, policy expiry, and emergency-stop transitions.
 
 ### DS-PRD-008 — Data State Visibility (Freshness, Delay, History, Simulation)
 
@@ -369,6 +373,8 @@ Detailed functional requirements are held in per-family documents under `docs/co
 | DS-EXE | Execution, Auto-Trader & Broker | `requirements/DS-EXE-Execution-and-Broker.md` | TradeValidationPipeline product boundary, Auto-Trader states, Emergency Stop/Flatten, broker adapter, live-trading gate |
 | DS-MOB | Mobile Client | `requirements/DS-MOB-Mobile-Client.md` | Mobile scope, client-only boundary, mobile security |
 | DS-ALT | Alerts & Monitoring | `requirements/DS-ALT-Alerts.md` | Alerts and notifications |
+| DS-RSH | Research Intelligence | `requirements/DS-RSH-Research-Intelligence.md` | Evidence-governed news, filings, earnings, macro, insider/political disclosures, catalysts, and thesis monitoring |
+| DS-JRN | Journal & Review Intelligence | `requirements/DS-JRN-Journal-and-Review.md` | Trade journal, behavioral reflection, daily/weekly review, lessons, and process improvement |
 | DS-DAT | Data Management | `requirements/DS-DAT-Data-Management.md` | Local data storage, import/export, symbol/security identity |
 | DS-EDU | Trading Knowledge & Education | `requirements/DS-EDU-Trading-Knowledge.md` | Contextual terminology reference; future Trading Knowledge Engine (DS-001 §19.2) |
 | DS-INT | Integrations | `requirements/DS-INT-Integrations.md` | External integration boundaries |

@@ -99,3 +99,11 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** DS-007 concern for presentation.
 
 **Testing:** Overview consistency test confirming figures match their source calculations exactly.
+
+### DS-PRT-005 — Portfolio Intelligence
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** DarkSage shall support explainable diversification, concentration, correlation, sector/factor exposure, risk-budget, scenario stress, income projection, allocation, rebalancing, and strategy-contribution analysis as data and approved models permit.
+
+**Acceptance Criteria:** Recommendations expose assumptions, tax limitations, risk effects, and deterministic calculations; unavailable data produces a disclosed limitation rather than false completeness.

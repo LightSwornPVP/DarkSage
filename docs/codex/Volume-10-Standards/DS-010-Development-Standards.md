@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-010 |
 | Title | Development Standards |
-| Version | 0.2.1 |
+| Version | 0.3.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,8 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.3.1 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H3): the Foundation Completion Delivery Standard section, previously misnumbered "## 24." (skipping §§16–23 after §15 References/Appendix A), renumbered to the correct next-available "## 16." No section content changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 2 grouped pass (DS-010/DS-011/DS-012). Consolidates `AGENTS.md`, `SECURITY_RULES.md`'s development-facing sections, `docs/standards/*`, and this Codex's own established authoring/audit practice into a single development-standards volume under the `DS-DEV` prefix. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit findings DS-010-H1/H2. **H1:** repaired `DS-DEV-004`'s self-contradiction (claimed IDs are "never reused after removal" while also requiring renumbering on insertion) — controlled IDs are now permanently stable once assigned; document order may differ from numeric ID order; renumbering is permitted only pre-baseline or via an explicit, approved migration mapping. **H2:** `DS-DEV-006`, `DS-DEV-008`, `DS-DEV-009`, `DS-DEV-010`, and `DS-DEV-025` no longer cite `.ai-workflow/**` files as Governing Source — each now cites DS-010 itself (normative) or another public Codex/root source; local workflow files may implement a rule locally but never constitute its authority, consistent with `DS-DEV-025`'s own rule. §13 updated to record this fix. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: clarified `DS-DEV-008`'s acceptance criteria, which previously read "no task requires more repair passes than the number of genuine Critical/High findings identified" — a criterion that was trivially satisfiable and did not mechanically capture the intended bundle-findings-into-one-pass discipline. Rewritten so the criterion is keyed to audit/verification cycles (one repair pass per cycle that identifies new findings) rather than raw finding count, and is checkable directly against each task's recorded blocker/finding history. The underlying blocker-only review philosophy and default workflow sequence are unchanged. |
@@ -381,3 +383,9 @@ Each `DS-DEV-NNN` requirement states its own Testing. Document-level verificatio
 1. **CI/CD tooling/platform selection** — explicitly out of scope for this document (§11); a future DS-010 revision may adopt one once chosen.
 2. **Linter/formatter selection** — not fixed here; DS-DEV-001's clarity/maintainability principles apply regardless of tooling choice.
 3. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (`ROADMAP.md` phase boundaries as Codex release-scope authority; phase-mapping precision) apply identically to this document's Release Classification scheme and are not re-litigated here.
+
+## 16. Foundation Completion Delivery Standard
+
+Governance shall protect product value without creating unnecessary ceremony. For a bounded change, the normal path is: author or repair; self-verify; one independent Critical/High blocker audit; one repair pass if needed; final verification; approval; commit. Additional cycles require a real blocker, ambiguity, or material risk.
+
+New product domains must trace from DS-001 through requirements, architecture, data, API, UX, security, testing, and roadmap before being represented as implementation-ready. Release artifacts must be regenerated from approved Markdown and accompanied by a manifest recording source commit/version, generated files, checksums, validation results, and known limitations.

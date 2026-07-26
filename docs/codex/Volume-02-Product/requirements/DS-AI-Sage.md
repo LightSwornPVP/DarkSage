@@ -164,3 +164,15 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** Enforcement architecture belongs to DS-004/DS-008; DS-AI-007 exists to ensure the Sage requirement family cannot be read in isolation from this boundary.
 
 **Testing:** See DS-PRD-006 adversarial test.
+
+### DS-AI-008 — Bounded Multi-Step Agency
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** Sage may create and execute a visible, reviewable multi-step plan using only enabled tools and approved data, including research, comparisons, deterministic calculations, strategy drafting, backtest preparation, thesis monitoring, and journal/review analysis. Tool calls shall be permission-scoped, auditable, cancellable, and unable to bypass the Risk Engine or canonical execution pipeline.
+
+### DS-AI-009 — Proactive Intelligence Under User Policy
+
+**Priority:** Medium | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** Sage may surface meaningful changes proactively only under an explicit user-configured monitoring policy defining subjects, evidence sources, thresholds, frequency, channels, quiet hours, and expiry. Proactivity does not grant trading authority.

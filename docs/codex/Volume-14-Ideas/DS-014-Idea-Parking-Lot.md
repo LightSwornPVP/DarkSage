@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-014 |
 | Title | Idea Parking Lot |
-| Version | 0.2.1 |
+| Version | 0.3.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,8 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.3.1 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H3): the Founder Vision Completion Disposition section, previously misnumbered "## 14." (skipping §§12–13 after §11 References/Appendix A), renumbered to the correct next-available "## 12." No section content changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the final grouped batch (DS-013/DS-014). Establishes the idea-parking governance model (`DS-IDG-NNN`) and a structured catalog of 25 exploratory ideas (`DS-IDEA-NNN`) — research directions, architectural inspirations, and speculative concepts not yet mature enough for DS-013. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit High finding H3 (third-party model privacy/security gates). `DS-IDG-004` expanded from four gates (licensing, benchmark, compute, integration) to **nine mandatory gates**: licensing, independent benchmarking, compute requirements, privacy, security (aligned with DS-008 in full), model-supply-chain risk, untrusted-artifact/weight handling, integration-boundary risk, and operational feasibility — no third-party model candidate may be promoted until all nine are satisfied and recorded. `DS-IDEA-002` (Kronos), `DS-IDEA-019` (Training Sage as a Dedicated Model), and `DS-IDEA-020` (Distillation) updated to reference the full nine-gate requirement; Kronos remains treated strictly as a research reference, never a committed dependency. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: `DS-IDEA-018` no longer cites `.ai-workflow/AGENT_PROTOCOL.md` directly as a Promotion Criteria destination or Related Feature/Volume — a public controlled document must not depend on a local-only workflow file for authority (DS-DEV-025). It now points to DS-010 process documentation or another public, committed process record instead; any local file implementing a resulting practice is explicitly described as non-authoritative operational convenience only. Appendix A Open Question #2 (DS-IDEA-018's process-vs-product classification) is unchanged and remains open. |
@@ -463,3 +465,7 @@ Document-level verification (unique-ID check across `DS-IDG-NNN`/`DS-IDEA-NNN`, 
 1. **Kronos and market-foundation-model licensing/benchmarking** — entirely unresolved; DS-IDEA-002 exists specifically to track this evaluation, not to presuppose its outcome.
 2. **DS-IDEA-018's process-vs-product classification** — recorded as a genuine boundary question: this Codex has no precedent for whether an internal-process idea belongs in DS-014 at all; retained here per the batch instruction, flagged for future governance clarification.
 3. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items apply identically here and are not re-litigated.
+
+## 12. Founder Vision Completion Disposition
+
+Ideas promoted into controlled direction by the Foundation Completion amendment—Research Intelligence, structured Journal/Reviews, bounded Sage agency, canonical trade-intelligence packages, advanced portfolio/strategy intelligence, contextual education, and Discord alerts—shall be cross-referenced as Promoted rather than left appearing unowned or merely speculative. Remaining model-training, distillation, market-foundation-model, social, tax, budgeting, and advanced multi-platform ideas stay exploratory until their own requirements and risk reviews are approved.

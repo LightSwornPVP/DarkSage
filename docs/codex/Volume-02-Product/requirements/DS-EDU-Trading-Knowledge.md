@@ -56,3 +56,9 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Testing:** Not applicable until promoted.
 
 **Future Enhancements:** Guided curricula; progress tracking; personalized learning paths; integration with Sage's explainability output (DS-AI-003) as a source of teachable moments.
+
+### DS-EDU-003 — Contextual Learning and Mastery
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** DarkSage shall provide contextual explanations tied to the user's current chart, signal, strategy, portfolio, or journal review; adapt depth to demonstrated knowledge; expose why a concept matters; and support learning progress without making the user permanently dependent on unexplained output.

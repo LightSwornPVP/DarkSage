@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document ID | DEV-COVERAGE-001 |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Draft — for Founder review |
 | Baseline | `34a65818d48f596122281075e18c6e5f36ec93b5` |
 
@@ -18,7 +18,7 @@ Every idea below appears in the controlled documentation set (a requirement, DS-
 | 5 | Strategy intelligence (creation/backtesting/promotion) | DS-STR-001–003, DS-BKT-001–004, DS-PERF-001–004, DS-ARC-020; DS-013 DS-BL-005/006 | Planned; DS-BL-005 Planned, DS-BL-006 Candidate | Fully Covered | Already correct | No |
 | 6 | Research sources (news/fundamentals/sentiment/macro/alt-data) | PRS §9.9; DS-013 DS-BL-010; DS-014 DS-IDEA-012/013; ROADMAP Phase 10 | DS-BL-010 Candidate; DS-IDEA-012/013 Exploratory; Phase 10 items have no DS-002 requirement yet | Partially Covered — every sub-area tracked, none Committed/Planned | Already correct — appropriately unpromoted | No |
 | 7 | Portfolio management | DS-PRT-001–004; DS-013 DS-BL-023 | Planned | Fully Covered | Already correct | No |
-| 8 | Trading journal | `ROADMAP.md` Phase 7 mention only; PRS §9.14 states no DS-002 requirement or DS-013 entry exists | None | **Missing** — no backlog entry at all | DS-013 backlog — needs authoring | Yes — should a Journal entry be authored now or stay unscheduled |
+| 8 | Trading journal | `DS-JRN-Journal-and-Review.md` DS-JRN-001–006 | Planned; DS-JRN-006 Future/Exploratory | **Now Fully Covered** — closed by the Founder Vision Completion pass (2026-07-25) | Already correct | No — resolved |
 | 9 | UI/UX general | DS-UX-001/009/012/016/017/022; ADR-004; DS-PRD-003 | DS-UX-016 Committed/MVP; others Planned | Fully Covered | Already correct | No |
 | 10 | Safety/execution controls | DS-EXE-001, DS-RSK-001/002, DS-EXE-004/005; TRADING_RULES.md | Committed/MVP core; DS-EXE-004/005 Planned | Fully Covered | Already correct | No |
 | 11 | Social/gamification features | DS-013 DS-BL-012/013 | Candidate; DS-BL-013 "leans toward Rejected pending owner review" | Partially Covered — tensions with DS-001 §9 anti-engagement stance | Genuine Open Question (DS-013 Appendix A #1) | **Yes** |
@@ -35,13 +35,13 @@ Every idea below appears in the controlled documentation set (a requirement, DS-
 | 22 | Caching strategy | Same DS-BL-027 entry | Approved Future | Fully Covered | Same as row 21 | No |
 | 23 | Optimistic rendering | Same DS-BL-027 entry, incl. explicit Hard Safety Boundary (never for trades/broker/risk/permissions/Emergency Stop-Flatten/credentials/auth/promotion/account state) | Approved Future | Fully Covered, including safety boundary | Same as row 21 | No |
 | 24 | Tooltips/contextual help | Same DS-BL-027 entry; cross-refs DS-EDU-001 | Approved Future | Fully Covered | Same as row 21 | No |
-| 25 | Daily/weekly review features | No distinct entry anywhere; only adjacent to the Journal gap | None | **Missing** | DS-013 backlog — should be authored | Yes — likely paired with Journal (row 8) decision |
+| 25 | Daily/weekly review features | `DS-JRN-Journal-and-Review.md` DS-JRN-003/004 | Planned | **Now Fully Covered** — closed by the Founder Vision Completion pass (2026-07-25), paired with row 8 as anticipated | Already correct | No — resolved |
 | 26 | Estimated time-in-trade | PRS §9.8: "no dedicated DS-002 requirement currently defines thesis-clock mechanics, a holding-time model, or thesis-invalidation logic"; directional only in PROJECT_SPEC.md §22, DS-PRT-004 | None | **Missing** | DS-013 backlog — should be authored (also flagged in [[DARKSAGE_FOUNDER_VISION_ALIGNMENT]] §5) | Yes |
 | 27 | Ratings and explanations (grading + reasoning) | DS-SIG-001/002/003 | Committed/MVP | Fully Covered | Already correct | No |
 
 ## Cross-cutting findings
 
-- **Two clean gaps** with zero DS-013/DS-014 entries despite roadmap-level directional mentions: Trading Journal (#8) and Daily/Weekly Review (#25). These are natural companions and should likely be authored together in a future backlog pass.
+- **Both previously-flagged gaps are now closed.** Trading Journal (#8) and Daily/Weekly Review (#25) were authored together as the DS-JRN (Journal & Review Intelligence) requirement family in the 2026-07-25 Founder Vision Completion pass, exactly as this report's original recommendation anticipated — see DS-JRN-001 through DS-JRN-006.
 - **One structural gap** shared with the vision-alignment report: Estimated Time-in-Trade / thesis-clock (#26) has no requirement anywhere, only a documented absence (PRS §9.8) — correctly not fabricated.
 - **One scope-conflation risk**: Tax (#13) and Budgeting (#14) share a single DS-013 entry despite materially different regulatory risk and an open product-identity question ("is budgeting even in-identity for a trading-intelligence product") — recommend splitting before either is promoted.
 - **One tension already flagged by the Codex itself**: Social/gamification (#11) sits at Candidate with the backlog's own note that it "leans toward Rejected pending owner review," consistent with DS-001 §9's anti-engagement-optimization stance (see [[DARKSAGE_FOUNDER_VISION_ALIGNMENT]] §13).
@@ -49,7 +49,7 @@ Every idea below appears in the controlled documentation set (a requirement, DS-
 
 ## Founder decisions required (summary)
 
-1. Author Trading Journal + Daily/Weekly Review as new DS-013 entries, or leave unscheduled? (#8, #25)
+1. ~~Author Trading Journal + Daily/Weekly Review as new DS-013 entries, or leave unscheduled? (#8, #25)~~ — **Resolved 2026-07-25**: authored directly as the DS-JRN DS-002 requirement family (DS-JRN-001–006) in the Founder Vision Completion pass, rather than staged through DS-013 first.
 2. Split Tax Reporting from Budgeting into separate DS-013 entries? (#13, #14)
 3. Is Budgeting in-identity for DarkSage at all, given DS-001 §4 defines it as trading intelligence, not personal finance? (#14)
 4. Resolve Social/Gamification (#11) — Candidate or Rejected, per the backlog's own flagged tension with anti-engagement philosophy?
@@ -60,4 +60,5 @@ Every idea below appears in the controlled documentation set (a requirement, DS-
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-07-25 | Updated rows #8 and #25 (Trading Journal, Daily/Weekly Review) from Missing to Fully Covered following the Founder Vision Completion pass's DS-JRN family; corresponding cross-cutting finding and Founder-decision item marked resolved. No other row re-evaluated in this pass. |
 | 1.0.0 | 2026-07-25 | Initial founder idea coverage review at baseline `34a6581` |

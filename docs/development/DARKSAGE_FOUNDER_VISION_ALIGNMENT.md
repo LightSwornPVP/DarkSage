@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | Document ID | DEV-VISION-001 |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Draft — for Founder review |
 | Baseline | `34a65818d48f596122281075e18c6e5f36ec93b5` |
 
-This report reviews the controlled DarkSage documentation set (Codex DS-001–DS-014, ADR-001–004, PRS, Executive Product Plan, ARCHITECTURE.md, TRADING_RULES.md) against the original founder vision across 14 dimensions. Each finding is classified using exactly one of: **Vision Preserved**, **Vision Weakened**, **Safety Distortion**, **Scope Drift**, **Missing Vision**, **Classification Drift**, **Product-Experience Drift**, **Bureaucracy/Overengineering**, **Contradictions**. Per instruction, findings are reported, not silently repaired — the one exception already authorized is the full-auto trading controlled update (see [[DARKSAGE_FULL_AUTO_TRADING_MODES]]), tracked separately.
+This report reviews the controlled DarkSage documentation set (Codex DS-001–DS-014, ADR-001–007, PRS, Executive Product Plan, ARCHITECTURE.md, TRADING_RULES.md) against the original founder vision across 14 dimensions. The original 14-dimension review below was performed at baseline `34a6581`, before the 2026-07-25 Founder Vision Completion pass (which added ADR-005/006/007, DS-RSH, DS-JRN, and the canonical Trade Intelligence Package) and before the subsequent independent-audit repair (which closed the H1 cross-volume traceability gap those additions initially had). Dimension #11's note is updated below to reflect the resulting narrowing of its previously-flagged Scope Drift; the other 13 dimensions were not re-reviewed in this pass. Each finding is classified using exactly one of: **Vision Preserved**, **Vision Weakened**, **Safety Distortion**, **Scope Drift**, **Missing Vision**, **Classification Drift**, **Product-Experience Drift**, **Bureaucracy/Overengineering**, **Contradictions**. Per instruction, findings are reported, not silently repaired — the one exception already authorized is the full-auto trading controlled update (see [[DARKSAGE_FULL_AUTO_TRADING_MODES]]), tracked separately.
 
 ## 1. Sage as agentic conversational intelligence
 
@@ -51,7 +51,7 @@ This report reviews the controlled DarkSage documentation set (Codex DS-001–DS
 
 ## 11. Research breadth (news/fundamentals/sentiment/macro)
 
-**Finding: Vision Preserved at core tier; Scope Drift at edges.** Core breadth (fundamental/sentiment/news scores in DS-SIG-001, `get_fundamentals()`/`get_news()` interfaces in ARCHITECTURE.md §7) is Committed/Planned. Deeper alt-data (political-trading intel, insider/institutional flow, macro/sector rotation, SEC-news-fundamental fusion) is explicitly non-committed — DS-013/DS-014 candidates or Phase-10 Future/Exploratory items, and the PRS is explicit that this catalog exists "only so this catalog is complete about what is not yet committed," which is exactly the correct non-fabricating posture. Not a distortion — a truthful scope boundary.
+**Finding: Vision Preserved at core tier; Scope Drift narrowed at edges (updated 2026-07-25).** Core breadth (fundamental/sentiment/news scores in DS-SIG-001, `get_fundamentals()`/`get_news()` interfaces in ARCHITECTURE.md §7) is Committed/Planned. The Founder Vision Completion pass subsequently authored the DS-RSH (Research Intelligence) requirement family — evidence-governed news, filings, earnings, macro, insider/political disclosure, analyst revisions, catalyst timelines, and thesis monitoring, all Planned, with DS-ARC-026/DS-DB-029..031/DS-API-RSH-001..003 giving it full cross-volume traceability as of the subsequent independent-audit repair. Deeper alt-data breadth beyond DS-RSH's scoped domains (e.g., institutional order-flow, deeper macro/sector rotation modeling) remains a DS-013/DS-014 candidate or Phase-10 Future/Exploratory item, and is still a truthful, non-fabricated scope boundary rather than a distortion.
 
 ## 12. Provider extensibility
 
@@ -100,4 +100,5 @@ None identified specific to vision-dimension coverage. The nine-gate promotion c
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-07-25 | Updated header ADR count (ADR-001–004 → ADR-001–007) and dimension #11 (Research breadth) to reflect the subsequent Founder Vision Completion pass's DS-RSH family and its independent-audit-repaired cross-volume traceability. Dimensions #1–10 and #12–14 not re-reviewed in this pass. |
 | 1.0.0 | 2026-07-25 | Initial founder vision alignment review at baseline `34a6581` |

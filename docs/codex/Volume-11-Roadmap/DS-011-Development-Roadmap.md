@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-011 |
 | Title | Development Roadmap |
-| Version | 0.2.1 |
+| Version | 0.5.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.5.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blocker 4): corrected §6a's DS-JRN row, which had incorrectly represented DS-JRN-006 (Safe Progression, governing-classified Future/Exploratory in DS-002) as Planned and Sage/Phase-6-gated grouped together with DS-JRN-005. DS-JRN-006 is not Sage-dependent (its mechanic is education/discipline/process-consistency reward, unrelated to Sage coaching) and now carries no phase placement and no Planned classification anywhere in this document, consistent with DS-002's own governing classification. DS-JRN-005 (genuinely Sage-dependent, Planned) is unaffected. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added Phase Reference Table rows/mappings for DS-RSH (Research Intelligence), DS-JRN (Journal & Review Intelligence), and DS-ALT/Discord (Alerts & Monitoring), closing the H1 roadmap-placement gap — none previously appeared in §6's table. Renumbered the Founder Vision Completion section from the misnumbered "## 20." (skipping §§15–19) to the correct next-available "## 15." No existing phase's Purpose, Key Dependency, or Classification Note changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 2 grouped pass (DS-010/DS-011/DS-012). Adds a Codex governance layer over the existing `ROADMAP.md` (Phase 0 through Phase 14): phase-to-Release-Classification mapping rules, entry/exit criteria discipline, the paper-first/live-later gate, and a phase reference table — without restating `ROADMAP.md`'s full deliverable lists, which remain its own authoritative content. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit finding DS-011-H1 (phase dependencies and sequencing). Added `DS-RM-015` (Sequencing Categories and Exception Rule: Strict/Parallel/Optional-Deferred/Gate-chain) and a Sequencing Category column to §6's Phase Reference Table, so entry is determined by each phase's declared Key Dependency rather than assumed immediate-predecessor order. Corrected `DS-RM-004`'s mis-citation of `DS-RM-005` as a sequencing-exception mechanism (DS-RM-005 governs only Committed-depends-on-Planned defects). Corrected Phase 4's row, which falsely implied Transaction/Position (Planned, delivered within Phase 4's own scope) were pre-existing Phase-1 dependencies. `DS-RM-006` now explicitly places Phases 9–11 as Parallel/Optional tracks outside the Gate-chain rather than silently omitting them from the stated live-trading sequence. The open owner-governance question about `ROADMAP.md` classification authority (DS-RM-002) is unchanged. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: replaced the blended "Planned/Future" Classification Note label on Phase 5 and Phase 8 of §6's Phase Reference Table with DS-002 §5.3's exact three-value Release Classification vocabulary (Committed/MVP, Planned, Future/Exploratory), stated per item rather than as an ambiguous hybrid. Phase 5 now lists DS-EDU-001/DS-ARC-025 as Planned and DS-EDU-002 as Future/Exploratory separately; Phase 8 now reads Future/Exploratory only, matching DS-RM-015's own definition of Optional/Deferred content. No new release-classification authority was introduced; ROADMAP.md's phase-boundary authority and DS-RM-002's still-open governance-confirmation question are unchanged. |
@@ -112,6 +115,24 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 | 14 — Full Live Platform | Mature production trading platform | Phase 13 exits (limited live trading proven) | Gate-chain | `ROADMAP.md` Phase 14 | Future/Exploratory for full-auto mode; remains subject to deterministic risk/permissions systems at all times per `ROADMAP.md`'s own closing statement |
 
 Phases 9, 10, and 11 are Parallel/Optional tracks: they may proceed concurrently with Phase 8 and Phase 12 once their own Key Dependency is met, and their progress or timing has no bearing on entry into the Gate-chain sequence (DS-RM-006). They are not omitted from this Codex's sequencing logic — they simply do not belong to the Gate-chain category.
+
+## 6a. Cross-Cutting Family Phase Mapping (added in the independent-audit H1 repair)
+
+`ROADMAP.md` predates the DS-RSH (Research Intelligence), DS-JRN (Journal & Review Intelligence), and DS-ALT (Alerts & Monitoring, including Discord) requirement families and does not name a dedicated phase for any of the three, which is the gap independent audit finding H1 identified — none of the three previously appeared anywhere in §6's table. This section maps each to its Key Dependency and Sequencing Category using the same DS-RM-002/DS-RM-015 rules §6 applies to every `ROADMAP.md`-named phase, without inventing a new numbered phase or an unsupported MVP commitment.
+
+| Family | Purpose | Key Dependency | Sequencing Category | Classification Note |
+|---|---|---|---|---|
+| DS-ALT (Alerts & Monitoring, incl. Discord) | Notify users of market/watchlist/risk conditions without requiring continuous screen attention | Phase 1 exits (market data, scanner, risk foundation) | Parallel (independent of Phases 2–14; may enter once Phase 1's data/risk foundation exists) | Planned — DS-ALT-001/002/003 family; DS-ALT-004 (Discord) and DS-INT-006 additionally benefit from, but do not require, Phase 6's Sage summarization capability for richer daily/weekly report content |
+| DS-RSH (Research Intelligence) | Evidence-governed news/filings/earnings/macro/insider/political research and thesis monitoring | Phase 1 exits (market data foundation) for evidence ingestion/storage; Phase 6 exits (Sage) for the bounded Sage research workflow (DS-RSH-006) specifically | Parallel (independent of Phases 2–5, 7–14; evidence ingestion/storage per DS-ARC-026 does not require Sage to exist, only DS-RSH-006's Sage-orchestrated workflow does) | Planned — DS-RSH family; DS-RSH-006 is additionally gated by Phase 6 per DS-RM-009's Sage-gating rule |
+| DS-JRN (Journal & Review Intelligence) | Structured trade journal, daily/weekly review, and Sage coaching | Phase 4 exits (Portfolio/Transaction data, DS-PRT) for deterministic performance figures; Phase 6 exits (Sage) for Sage-drafted review commentary (DS-JRN-005) specifically | Parallel (independent of Phases 2–3, 5, 7–14; journal capture per DS-ARC-027 does not require Sage to exist, only DS-JRN-005's Sage coaching does) | Planned — DS-JRN-001 through DS-JRN-005 and DS-JRN-007; DS-JRN-005 is additionally gated by Phase 6 per DS-RM-009's Sage-gating rule. **DS-JRN-006 (Safe Progression) is Future/Exploratory, not Planned, and is not Sage-dependent** — its education/discipline/process-consistency reward mechanic has no Sage-coaching relationship and is corrected here (independent-audit repair) to no longer be grouped with DS-JRN-005's Phase-6 gate; it carries no phase placement at all pending a future owner decision to promote it out of Future/Exploratory (DS-RM-012 applies: roadmap non-mention is not itself a commitment). |
+
+**Acceptance Criteria:**
+- DS-RSH, DS-JRN, and DS-ALT each appear with an explicit Key Dependency and Sequencing Category, closing the independent-audit H1 gap.
+- No mapping in this table commits a delivery date or promotes any DS-RSH/DS-JRN/DS-ALT requirement beyond its own DS-002-stated Release Classification (all Planned) — this table fixes sequencing, not classification, per DS-RM-002.
+- The Sage-dependent sub-requirements within each family (DS-RSH-006; DS-JRN-005 only) are called out individually rather than implying the entire family waits on Phase 6.
+- DS-JRN-006 is never represented as Planned or as Sage-gated anywhere in this table — it retains DS-002's own Future/Exploratory classification and carries no phase dependency, consistent with DS-RM-002 (this table fixes sequencing for committed/planned direction; it does not promote a Future/Exploratory item).
+
+**Testing:** Sequencing-category completeness audit, extended to this table (shared with DS-RM-015's own test).
 
 ## 7. Sequencing and Gating
 
@@ -292,3 +313,9 @@ Each `DS-RM-NNN` requirement states its own Testing. Document-level verification
 1. **`ROADMAP.md` phase boundaries as Codex release-scope authority** — unchanged from DS-002 Appendix A #1 / DS-004 Appendix A #4; DS-RM-002 restates the working convention without closing it.
 2. **Specialized financial-model research scope** — DS-RM-009 defers this to a future DS-014 (Idea Parking Lot) entry rather than committing any direction here.
 3. **Multi-monitor, live brokerage timing, PostgreSQL migration trigger, live-trading hosting provider** — unchanged from DS-002/DS-004 Appendix A; cross-referenced, not re-litigated here.
+
+## 15. Founder Vision Completion Sequencing
+
+The roadmap shall deliver an early recognizable DarkSage experience rather than postponing intelligence until late phases. Early desktop slices should include live/current charts, basic scanner/signal context, deterministic explanations, and a constrained Sage explanation layer. Deeper multi-step Sage research, persistent monitoring, advanced journal coaching, and specialized models may follow after their dependencies mature.
+
+Discord notification support should enter with the general alerts/monitoring milestone: first webhook delivery, then an approved bot only if it provides material value. Full-Auto Paper remains paper-first. Restricted Full-Auto Live remains gated by security, reconciliation, operations, broker permissions, and independent approval.

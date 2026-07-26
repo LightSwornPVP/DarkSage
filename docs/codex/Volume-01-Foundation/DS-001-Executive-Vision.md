@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-001 |
 | Title | Executive Vision & Product Foundation |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Approved |
 | Project | DarkSage |
 | Owner | TheSinnerMan |
@@ -14,7 +14,7 @@
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-23 |
-| Last Updated | 2026-07-23 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -22,6 +22,7 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 1.1.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment: strengthens Sage identity, user growth, integrated intelligence, research, journal/review, and approved bounded automation direction while preserving deterministic controls. |
 | 0.2.0 | 2026-07-23 | TheSinnerMan | First substantial controlled draft of the executive vision and product foundation. |
 | 0.9.0 | 2026-07-23 | TheSinnerMan | Owner-review refinement; terminology normalization; normative-language refinement; promoted to Under Review. |
 | 1.0.0 | 2026-07-23 | TheSinnerMan | Approved initial release of DS-001 following owner review. |
@@ -471,3 +472,31 @@ DS-001 constrains lower-level documents but does not preempt the detail assigned
 ## Appendix B — Open Questions
 
 No unresolved product-foundation questions are currently recorded.
+
+## 26. Founder Vision Completion Principles
+
+The following principles clarify the intended experience without weakening any existing safety, evidence, privacy, or user-authority rule.
+
+### 26.1 Sage as a Trusted Intelligence Partner
+
+Sage is intended to feel like a strategist, research partner, analyst, mentor, and second set of eyes—not merely a chat interface. Sage should help users investigate questions, compare opportunities, organize evidence, prepare plans, recognize mistakes, and grow in judgment. Sage remains bounded by enabled tools, permissions, evidence, the Risk Engine, and the canonical execution pipeline.
+
+### 26.2 Unified Intelligence Experience
+
+Charts, scanners, signals, strategies, backtests, research, portfolios, journals, alerts, and Sage should operate as one coherent intelligence system. A material conclusion should be capable of carrying its evidence, risk, freshness, contradictions, and decision context across surfaces rather than being recreated inconsistently in each feature.
+
+### 26.3 User Growth and Mastery
+
+DarkSage should help users become more capable, disciplined, and independent over time. Education, journaling, daily and weekly reviews, contextual explanations, and safe progression may reward understanding, preparation, risk discipline, and process consistency. DarkSage shall not reward reckless risk, excessive trade frequency, or profit without regard to process.
+
+### 26.4 Research and Thesis Intelligence
+
+Approved product direction includes structured research intelligence covering material market news, company disclosures, earnings, macro events, analyst changes, insider and publicly disclosed political activity, catalysts, source credibility, conflicting evidence, and thesis monitoring. Research output remains evidence-governed and does not become deterministic financial truth merely because Sage summarizes it.
+
+### 26.5 Bounded Automation
+
+DarkSage may support explicitly selected automation modes ranging from advisory-only behavior through unattended paper trading and, only after dedicated approval gates, restricted live automation. User authority is expressed through explicit policy configuration, permissions, limits, and emergency controls; it does not necessarily require per-order confirmation when the user has deliberately enabled an approved automation policy. Sage itself never bypasses deterministic validation or broker boundaries.
+
+### 26.6 Notification Reach
+
+DarkSage may deliver opt-in alerts and reports through external channels, including Discord. External notification channels are notification-only by default and shall not silently gain trade approval, order modification, cancellation, or execution authority.

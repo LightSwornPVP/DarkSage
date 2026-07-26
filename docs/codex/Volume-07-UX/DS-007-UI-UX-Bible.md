@@ -6,14 +6,14 @@
 |---|---|
 | Document ID | DS-007 |
 | Title | UI/UX Bible |
-| Version | 0.2.1 |
+| Version | 0.5.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.5.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blockers 2, 3): DS-UX-024 extended with retention/deletion disclosure behavior (DS-JRN-007/DS-API-JRN-004); DS-UX-025 extended with trust-state (integrity/staleness) presentation behavior (DS-SCA-029). No requirement's core acceptance criteria removed — only extended. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H1, H3): added `DS-UX-023` (Research Intelligence Presentation), `DS-UX-024` (Journal & Review Presentation), and `DS-UX-025` (Trade Intelligence Package Presentation), closing the H1 UX-traceability gap. Renumbered the Founder Vision Completion section from the misnumbered "## 24." (skipping §§16–23) to the correct next-available "## 16." No prior requirement's content changed. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 1 grouped pass (DS-007/DS-008/DS-009). Translates DS-001's Presentation Independence, Explainability Standard, and Product Experience Principles, together with DS-002's DS-WKS/DS-USR/DS-NFR families and DS-006's UI-relevant API contracts, into detailed interface behavior requirements under the `DS-UX` prefix. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit finding DS-007-H1: added `DS-UX-016` (Interface State Lifecycle, Committed/MVP) defining the Loading → Ready → Refreshing → Degraded/Partial → Error → Retry/Recovery transition model, integrating rather than duplicating DS-UX-012 (data-state labeling) and DS-UX-015 (error presentation), and adding an accessibility state-announcement acceptance criterion. Inserted before the prior DS-UX-016 through DS-UX-020, which were renumbered DS-UX-017 through DS-UX-021 respectively (all internal cross-references updated) to keep requirement IDs in document order. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Narrow repair for independent-audit finding DS-007-H1 (accessibility classification): removed `DS-UX-016`'s assistive-technology announcement acceptance criterion and testing clause, since it depended on the Planned `DS-NFR-004`/`DS-UX-017` accessibility work while `DS-UX-016` itself is Committed/MVP. Added `DS-UX-022` (Accessible Interface State Announcements, Planned), tracing to `DS-NFR-004`/`DS-UX-017`, owning assistive-technology announcements and non-visual state/staleness disclosure for the `DS-UX-016` lifecycle. `DS-UX-016`'s Committed/MVP core (loading, ready, refreshing, degraded/partial, stale-data disclosure, error, retry/recovery, safe data preservation, visible incomplete/delayed/unavailable disclosure) is unchanged and unweakened. |
@@ -328,6 +331,38 @@ Non-visual (assistive-technology) announcement of these state transitions is a s
 
 **Testing:** Assistive-technology state-announcement test per DS-UX-016 lifecycle state, deferred to this requirement's own implementation timing (tied to DS-NFR-004/DS-UX-017's own tests).
 
+## 10a. Research, Journal, and Trade Intelligence Presentation (added in the independent-audit H1 repair)
+
+### DS-UX-023 — Research Intelligence Presentation
+
+**Release Classification:** Planned | **Governing Source:** DS-RSH-001 through DS-RSH-005 (DS-002, Planned); DS-API-RSH-001/002/003 (DS-006, Planned)
+
+**Description:** The UI should present research evidence, catalyst timelines, and thesis monitoring with source, freshness, and confidence always visible alongside the claim they support, per DS-RSH-001/DS-PRD-002/DS-PRD-008. Conflicting evidence is shown as multiple disclosed items, never silently collapsed into one (DS-RSH-005). A thesis's original text remains visible and distinguishable from later revision flags (DS-RSH-004).
+
+**Acceptance Criteria:** Matches DS-API-RSH-001/002/003's acceptance criteria; no research surface presents a claim without a discoverable source/timestamp.
+
+**Testing:** Evidence-completeness and conflicting-evidence-disclosure test (shared with DS-API-RSH-001's own test).
+
+### DS-UX-024 — Journal and Review Presentation
+
+**Release Classification:** Planned | **Governing Source:** DS-JRN-001 through DS-JRN-005 (DS-002, Planned); DS-API-JRN-001/002/003 (DS-006, Planned)
+
+**Description:** The UI should present a journal entry's original plan as permanently distinguishable from later amendments (DS-JRN-002), and daily/weekly review surfaces should visually separate deterministic performance figures from Sage's narrative commentary (DS-JRN-003/004/005), never blending the two into one undifferentiated block of text.
+
+**Acceptance Criteria:** Matches DS-API-JRN-001/002/003's acceptance criteria; no review surface presents `sage_commentary` with the same visual treatment as a deterministic figure (consistent with DS-UX-010's uncertainty/confidence labeling pattern). **Retention/deletion presentation (DS-JRN-007, DS-API-JRN-004):** a deletion action clearly discloses, before confirmation, what will be deleted (private narrative, attachments) versus what will be retained (any linked immutable Transaction/AuditLogEntry, or a legal/audit-exception-retained record's factual fields), offers export-before-delete where supported, and reports deletion status/failure per DS-OPS-003's understandable-error pattern.
+
+**Testing:** Original-plan-vs-amendment visual-distinction test; deterministic-vs-commentary separation test (shared with DS-API-JRN-002's own test); deletion-disclosure and export-before-delete UX test (shared with DS-API-JRN-004's own test).
+
+### DS-UX-025 — Trade Intelligence Package Presentation
+
+**Release Classification:** Planned | **Governing Source:** DS-SIG-005 (DS-002, Planned); DS-API-TIP-001 (DS-006, Planned); DS-ARC-028 (DS-004, Planned)
+
+**Description:** The UI should present a Trade Intelligence Package identically across every surface that references it (chart overlay, journal capture, alert, audit) — same package ID and version, same field values — reusing DS-UX-016's interface-state lifecycle and DS-UX-012's data-state labeling for the package's own freshness/simulation state rather than introducing a parallel presentation pattern.
+
+**Acceptance Criteria:** A package rendered on a chart and the same package viewed in the journal show identical field values for the same `package_id`/version (shared with DS-ARC-028's cross-surface consistency test); a missing field is shown as explicit/absent, never fabricated. **Trust-state presentation (DS-SCA-029, added for independent-audit Blocker 2):** a package whose integrity cannot be verified, or whose data-freshness has expired, is visually and textually distinguished from a verified/current package on every surface — never rendered with the same confidence treatment as a fully-verified, current package.
+
+**Testing:** Cross-surface consistency test (shared with DS-ARC-028/DS-API-TIP-001's own test); trust-state/stale-disclosure test (shared with DS-SCA-029's own test).
+
 ## 11. Non-Goals
 
 DS-007 does not: select a specific component library, CSS/styling framework, or visual design system; define color palette, typography, or brand voice (`docs/standards/BRAND_GUIDE.md`/`STYLE_GUIDE.md`); redesign any DS-004 architectural boundary or DS-006 API contract; commit any UI capability beyond what DS-002 (DS-WKS/DS-USR/DS-NFR) has approved; or make widget/UI visibility itself an enabled-system-capability control (DS-UX-001 fixes this as a permanent constraint, not a current-scope omission).
@@ -359,3 +394,11 @@ Each `DS-UX-NNN` requirement states its own Testing. Document-level verification
 1. **Multi-monitor commitment level** — unchanged from DS-002 Appendix A #3; DS-WKS-006/DS-UX-006 remain Future/Exploratory pending an owner decision.
 2. **Accessibility standard version** — DS-NFR-004/DS-UX-017 cite WCAG 2.2 Level AA as an example target; formal adoption of a specific standard/version is an owner decision not yet recorded as binding.
 3. **Component library / design-system selection** — explicitly out of scope for this document (§11); recorded here so a future DS-007 revision (or a DS-010 standards addition) knows the gap exists.
+
+## 16. Founder Vision Completion Experience
+
+The flagship workstation experience shall make charts, Sage, research, trade intelligence, portfolio context, and journal history feel like one system. A user shall be able to inspect a canonical proposal, see entry/stop/targets and evidence on the chart, understand contradictions and freshness, ask Sage questions, save the thesis, and later compare the plan with the result.
+
+The visual identity should preserve the approved black, gold, gray, and white direction while meeting accessibility and state-differentiation requirements. Premium visual character shall never substitute for clarity.
+
+Notification settings shall include Discord as an explicit opt-in channel with message preview, redaction controls, simulation/live labels, quiet hours, test delivery, failure state, and a clear notification-only badge. No Discord control affordance shall imply trade authority.

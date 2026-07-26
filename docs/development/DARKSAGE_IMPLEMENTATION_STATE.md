@@ -96,7 +96,7 @@ From `.ai-workflow/STATUS.md`/`CURRENT_TASK.md`: current declared mode is `DELEG
 ## 10. Controlling IDs referenced in this audit
 
 - Codex volumes: `DS-001` through `DS-014` (`docs/codex/Volume-01-Foundation/` … `Volume-14-Ideas/`)
-- ADRs: `ADR-001` through `ADR-004` (`docs/codex/Volume-12-ADRs/`)
+- ADRs: `ADR-001` through `ADR-007` (`docs/codex/Volume-12-ADRs/`) — ADR-005/006/007 added by the 2026-07-25 Founder Vision Completion pass
 - PRS: `docs/requirements/DARKSAGE_PRODUCT_REQUIREMENTS_SPECIFICATION.md`
 - Roadmap: `ROADMAP.md`
 - Architecture/safety: `ARCHITECTURE.md`, `TRADING_RULES.md`, `SECURITY_RULES.md`

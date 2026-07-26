@@ -103,13 +103,26 @@ def _para_style(name, size, color_hex, font=None, leading=None, space_after=6,
 class _HeadingParagraph(Paragraph):
     """A Paragraph tagged with TOC/outline metadata, consumed by
     DSDocTemplate.afterFlowable to register a real page bookmark, an outline
-    entry, and a TOC row -- all three keyed off the same anchor."""
+    entry, and a TOC row -- all three keyed off the same anchor.
+
+    Never split across a page/frame boundary: Paragraph.split() rebuilds
+    fragments via self.__class__(None, style, bulletText=..., frags=...),
+    but this subclass's __init__ takes fixed positional args (level,
+    plain_text, key) with no matching keyword parameters, so accepting the
+    base class's split behavior would raise TypeError whenever a long
+    heading falls near the bottom of a page. Headings should not visually
+    break mid-text at a page boundary regardless, so split() is disabled
+    here -- reportlab's frame logic then moves the whole heading, intact,
+    to the next page instead of raising."""
 
     def __init__(self, text, style, level, plain_text, key):
         Paragraph.__init__(self, text, style)
         self._ds_level = level
         self._ds_text = plain_text
         self._ds_key = key
+
+    def split(self, availWidth, availHeight):
+        return []
 
 
 class DSDocTemplate(BaseDocTemplate):

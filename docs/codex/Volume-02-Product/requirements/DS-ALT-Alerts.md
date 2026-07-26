@@ -4,13 +4,13 @@
 |---|---|
 | Document ID | DS-ALT |
 | Title | Alerts & Monitoring |
-| Version | 0.2.0 |
+| Version | 0.3.0 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Classification | Internal |
 | Repository | LightSwornPVP/DarkSage |
 | Created | 2026-07-24 |
-| Last Updated | 2026-07-24 |
+| Last Updated | 2026-07-25 |
 
 Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requirement conventions defined in DS-002 §5.
 
@@ -66,7 +66,7 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 
 **Purpose:** Reach users when the application is not open.
 
-**Description:** DarkSage should support optional delivery of alert notifications through external channels (e.g., OS-level notification, email) as user-configured, opt-in extensions of DS-ALT-002.
+**Description:** DarkSage should support optional delivery of alert notifications through external channels (e.g., OS-level notification, email, Discord webhook or approved Discord bot) as user-configured, opt-in extensions of DS-ALT-002.
 
 **Dependencies:** DS-ALT-002; DS-SEC
 
@@ -77,6 +77,21 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Edge Cases:**
 - External channel delivery failure does not suppress the in-app notification (DS-ALT-002 remains authoritative).
 
-**Implementation Notes:** DS-INT/DS-008 concern for channel integration and credential handling.
+**Implementation Notes:** DS-INT/DS-008 concern for channel integration and credential handling. Discord is notification-only by default; webhook or bot interactions shall not approve, place, modify, cancel, or otherwise control trades.
 
 **Testing:** Opt-in default test; external-channel-failure fallback test.
+
+### DS-ALT-004 — Discord Alerts and Reports
+
+**Priority:** Medium | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** DarkSage shall support opt-in Discord delivery through a user-configured webhook or an approved DarkSage bot for selected price/indicator alerts, trade-intelligence opportunities, entry/stop/target updates, paper/live order events, rejected-trade explanations, risk warnings, automation pauses/emergency stops, provider outages/stale data, and daily/weekly summaries.
+
+**Acceptance Criteria:**
+- Discord is disabled by default and requires explicit channel selection and content scope.
+- Test delivery is available before activation.
+- Secrets are encrypted and redacted; messages disclose simulated/delayed/stale/live state.
+- Retries are bounded and idempotent; Discord failure never suppresses the authoritative in-app record.
+- Discord is notification-only by default. Messages, reactions, slash commands, and replies cannot approve or execute trades.
+
+**Edge Cases:** Rate limits, deleted webhooks, missing channel permissions, duplicate events, and message-size limits produce observable, non-secret-bearing failure records.

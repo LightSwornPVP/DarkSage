@@ -6,7 +6,7 @@
 |---|---|
 | Document ID | DS-012 |
 | Title | Architecture Decision Records |
-| Version | 0.2.3 |
+| Version | 0.4.1 |
 | Status | Draft |
 | Owner | TheSinnerMan |
 | Contributors | |
@@ -21,6 +21,9 @@ Status lifecycle: Draft → Under Review → Approved → Superseded/Deprecated.
 
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| 0.4.1 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit blocker-repair (Blocker 1 semantic-extraction finding): three remaining current-state occurrences of stale "the four existing ADRs" wording (DS-ADR-004's Description, DS-ADR-008's Governing Source, §14 Verification Approach) corrected to "the seven existing ADRs" — these were missed by the 0.4.0 H2 repair, which fixed only §9's index and lead sentence. The 0.1.0 revision-history row's "four existing" reference is intentionally left unchanged: it accurately describes that version's original scope at the time it was authored (2026-07-24, when only ADR-001–004 existed), consistent with this document's own established practice of preserving historical revision-history entries rather than rewriting them to reflect the present. |
+| 0.4.0 | 2026-07-25 | TheSinnerMan / Keeper | Independent-audit repair (H2): §9's Index of Existing ADRs now lists all seven Approved ADRs (added ADR-005, ADR-006, ADR-007 rows; "four" corrected to "seven" in the section's lead sentence); §12 Dependencies and §15 References updated to cite ADR-005–007 alongside ADR-001–004. Repaired a duplicate "## 12." section heading (the Founder Vision Completion ADR Set section, previously misnumbered "## 12." colliding with §12 Dependencies, is now correctly "## 16.", the next available number after §15 References/Appendix A). No ADR Decision, Status, or approval authority changed by this repair — index/reference accuracy and section numbering only. |
+| 0.3.0 | 2026-07-25 | TheSinnerMan / Keeper | Founder Vision Completion amendment and cross-volume traceability, including Discord notification boundaries where applicable. |
 | 0.1.0 | 2026-07-24 | TheSinnerMan | First controlled draft, authored as part of the Batch 2 grouped pass (DS-010/DS-011/DS-012). Establishes the ADR governance layer (lifecycle, creation/approval rules, metadata, decision-history, superseding/deprecating rules, conflict-resolution hierarchy) and indexes the four existing, approved ADRs (ADR-001 through ADR-004) without restating or weakening their decisions. |
 | 0.2.0 | 2026-07-24 | TheSinnerMan | Targeted repair for independent-audit findings DS-012-H1/H2. **H1:** `DS-ADR-003`/`DS-ADR-009` no longer cite `.ai-workflow/KEEPER_AUTHORITY.md` as Governing Source; ADR approval authority is now grounded in DS-012 itself (Owner authority, or explicitly delegated approval within documented scope, recorded as reproducible evidence in the ADR's own Decision History or an equivalent committed record) — local workflow files may facilitate an approval but never constitute its authority. Does not broaden delegated authority beyond its existing local operational boundary. **H2:** `DS-ADR-010` rewritten into one explicit six-tier conflict-resolution hierarchy (root mandatory safety governance → approved owner decisions → Approved ADRs → Approved Codex volumes → implementation documentation → local workflow files), stating explicitly that no ADR may weaken or override `SECURITY_RULES.md`, `TRADING_RULES.md`, Risk Engine authority, deterministic financial truth, or mandatory pipeline safeguards, that same-tier/ambiguous-tier conflicts stop work for Owner/governance resolution, and that superseding an ADR never supersedes root safety governance. |
 | 0.2.1 | 2026-07-24 | TheSinnerMan | Consolidated cleanup pass: ADR-001 through ADR-004's previously template-minimal Context, Consequences, Alternatives Considered, and Related Requirements sections were populated (each ADR bumped 1.0.0 → 1.1.0) in this same pass, closing the retrofit item DS-ADR-003's Acceptance Criteria and Appendix A Open Question #1 recorded as deferred. §9 Index table updated to show Version 1.1.0 for all four ADRs; Appendix A Open Question #1 updated to reflect completion rather than deferral. **Correction (see 0.2.2):** this entry's claim that §13's retrofit note was also updated was inaccurate — that bullet was missed in this pass and remained stale until 0.2.2. |
@@ -95,7 +98,7 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 **Release Classification:** Committed / MVP | **Governing Source:** `docs/templates/markdown/ADR.md` (Committed, existing template)
 
-**Description:** Every ADR's Document Control table states, at minimum: Document ID (`ADR-NNN`), Title, Version, Status, Owner, Classification, Repository, Created, and Last Updated — matching the fields the four existing ADRs already carry. An ADR's body includes at minimum a Decision statement and a Decision History table; Context, Consequences, Alternatives Considered, and Related Requirements are present in the template and are now populated in ADR-001 through ADR-004 (retrofitted in the consolidated Codex cleanup pass, each bumped to Version 1.1.0). Their populated content is additive context grounded in already-approved material — it does not alter, and did not need to alter, those already-Approved decisions (DS-ADR-001 — DS-012 does not weaken them).
+**Description:** Every ADR's Document Control table states, at minimum: Document ID (`ADR-NNN`), Title, Version, Status, Owner, Classification, Repository, Created, and Last Updated — matching the fields all seven existing ADRs already carry. An ADR's body includes at minimum a Decision statement and a Decision History table; Context, Consequences, Alternatives Considered, and Related Requirements are present in the template and are now populated in ADR-001 through ADR-004 (retrofitted in the consolidated Codex cleanup pass, each bumped to Version 1.1.0). Their populated content is additive context grounded in already-approved material — it does not alter, and did not need to alter, those already-Approved decisions (DS-ADR-001 — DS-012 does not weaken them).
 
 **Acceptance Criteria:**
 - Every ADR's Document Control table matches `docs/templates/markdown/ADR.md`'s field set exactly.
@@ -142,7 +145,7 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 ### DS-ADR-008 — When an ADR Is Required
 
-**Release Classification:** Committed / MVP | **Governing Source:** DS-001 §11 (Constitution #12); the four existing ADRs' own topics as precedent
+**Release Classification:** Committed / MVP | **Governing Source:** DS-001 §11 (Constitution #12); the seven existing ADRs' own topics as precedent
 
 **Description:** A material, durable, cross-cutting decision with long-term product or architectural consequences requires an ADR before implementation — the same category ADR-001 through ADR-004 already occupy: platform direction (desktop-first), a safety boundary between two major subsystems (Sage/Risk Engine), a calculation-authority rule (deterministic financial calculations), and a UI/capability separation principle (Presentation Independence). A decision of comparable scope and durability (e.g., choosing the authentication token mechanism DS-006 Appendix A leaves open, or committing to a specific database-migration trigger) requires a new ADR when it is finally decided.
 
@@ -209,7 +212,7 @@ See DS-001 §24 and DS-002 §4. Additional terms:
 
 ## 9. Index of Existing ADRs
 
-The following table indexes the four existing, Approved ADRs. This index summarizes; the `ADR-NNN` files linked below remain the sole authoritative record of each decision. No decision content is restated or altered here.
+The following table indexes the seven existing, Approved ADRs. This index summarizes; the `ADR-NNN` files linked below remain the sole authoritative record of each decision. No decision content is restated or altered here.
 
 | ID | Title | Status | Version | Owner | Summary | Related Governing Volumes |
 |---|---|---|---|---|---|---|
@@ -217,6 +220,9 @@ The following table indexes the four existing, Approved ADRs. This index summari
 | [ADR-002](ADR-002-Sage-Cannot-Bypass-the-Risk-Engine.md) | Sage Cannot Bypass the Risk Engine | Approved | 1.1.0 | TheSinnerMan | Sage may advise and calculate; Sage cannot bypass or silently override the Risk Engine. | DS-001 §13; DS-PRD-006; DS-RSK-001; DS-ARC-011/012; DS-SCA-012/015; DS-QA-006 |
 | [ADR-003](ADR-003-Deterministic-Financial-Calculations.md) | Deterministic Financial Calculations | Approved | 1.1.0 | TheSinnerMan | Material financial calculations shall use deterministic implementations rather than generative model output. | DS-001 §9/§11; DS-PRD-004; DS-RSK-002; DS-DEV-019; DS-QA-004/005 |
 | [ADR-004](ADR-004-Presentation-Independence.md) | Presentation Independence | Approved | 1.1.0 | TheSinnerMan | Workspace layout and widget visibility shall not determine enabled analytical capability or Sage evidence availability. | DS-001 §16; DS-PRD-003; DS-WKS; DS-UX-001 |
+| [ADR-005](ADR-005-Five-Automation-Modes.md) | Five Automation Modes and Policy-Based User Authority | Approved | 1.0.0 | TheSinnerMan | DarkSage uses five explicit automation states (Advisory Only, Confirmation Required, Full-Auto Paper, Restricted Full-Auto Live, Paused/Emergency Stopped); user authority may be expressed via per-action confirmation or prior activation of a bounded automation policy; Sage never directly executes orders. | DS-001 §26.5; DS-PRD-007; DS-EXE-008; DS-RM-006 |
+| [ADR-006](ADR-006-Bounded-Sage-Agency.md) | Bounded Sage Agency and Tool Orchestration | Approved | 1.0.0 | TheSinnerMan | Sage may perform visible, permission-scoped multi-step work through registered tools; Sage cannot grant itself tools, alter policy, write authoritative deterministic figures, bypass Guardian, or directly approve/execute broker actions. | DS-001 §26.1; DS-AI-008/009; DS-SGE (DS-003 §6); DS-SCA-019 |
+| [ADR-007](ADR-007-External-Notifications-Non-Authoritative.md) | External Notifications Are Non-Authoritative by Default | Approved | 1.0.0 | TheSinnerMan | Discord, email, OS notifications, mobile push, and future external channels are notification-only by default; they may not approve, place, modify, cancel, or otherwise control trades without a separate future ADR, threat model, and explicit authority design. | DS-001 §26.6; DS-ALT-003/004; DS-INT-006; DS-SCA-019 |
 
 ## 10. Process for Adding Future ADRs
 
@@ -234,7 +240,7 @@ DS-012 does not: restate, alter, or weaken any existing ADR's Decision content (
 ## 12. Dependencies
 
 - [DS-001](../Volume-01-Foundation/DS-001-Executive-Vision.md) §11, §23
-- [ADR-001](ADR-001-Desktop-First-Application.md), [ADR-002](ADR-002-Sage-Cannot-Bypass-the-Risk-Engine.md), [ADR-003](ADR-003-Deterministic-Financial-Calculations.md), [ADR-004](ADR-004-Presentation-Independence.md)
+- [ADR-001](ADR-001-Desktop-First-Application.md), [ADR-002](ADR-002-Sage-Cannot-Bypass-the-Risk-Engine.md), [ADR-003](ADR-003-Deterministic-Financial-Calculations.md), [ADR-004](ADR-004-Presentation-Independence.md), [ADR-005](ADR-005-Five-Automation-Modes.md), [ADR-006](ADR-006-Bounded-Sage-Agency.md), [ADR-007](ADR-007-External-Notifications-Non-Authoritative.md)
 - `docs/templates/markdown/ADR.md`
 - `.ai-workflow/KEEPER_AUTHORITY.md`, `DECISION_LOG.md`
 - `docs/traceability/TRACEABILITY_MATRIX.csv`
@@ -247,11 +253,11 @@ DS-012 does not: restate, alter, or weaken any existing ADR's Decision content (
 
 ## 14. Verification Approach
 
-Each `DS-ADR-NNN` requirement states its own Testing. Document-level verification (unique-ID check, §9 index accuracy against the four existing ADR files, no restated/altered ADR decision content, no contradiction with DS-001 through DS-011) recorded in `.ai-workflow/HANDOFF.md`.
+Each `DS-ADR-NNN` requirement states its own Testing. Document-level verification (unique-ID check, §9 index accuracy against the seven existing ADR files, no restated/altered ADR decision content, no contradiction with DS-001 through DS-011) recorded in `.ai-workflow/HANDOFF.md`.
 
 ## 15. References
 
-- `docs/codex/Volume-12-ADRs/ADR-001-Desktop-First-Application.md` through `ADR-004-Presentation-Independence.md`
+- `docs/codex/Volume-12-ADRs/ADR-001-Desktop-First-Application.md` through `ADR-007-External-Notifications-Non-Authoritative.md`
 - `docs/templates/markdown/ADR.md`
 - [DS-001](../Volume-01-Foundation/DS-001-Executive-Vision.md) §11, §23
 - `.ai-workflow/KEEPER_AUTHORITY.md`, `DECISION_LOG.md`
@@ -261,3 +267,7 @@ Each `DS-ADR-NNN` requirement states its own Testing. Document-level verificatio
 1. **RESOLVED in the consolidated Codex cleanup pass.** Context, Consequences, Alternatives Considered, and Related Requirements were retrofitted into ADR-001 through ADR-004 (each bumped to Version 1.1.0), grounded in already-approved DS-001/DS-002/DS-003/DS-004/DS-007/DS-009 content, with no change to any Decision, Status, or approval authority. Retained here for revision-history traceability, not as an open item.
 2. **Future ADR candidates already implied by open questions elsewhere in this Codex** — e.g., the authentication token mechanism (DS-006 Appendix A #2) and the database-migration trigger (DS-004 Appendix A #1) are plausible future ADR topics once decided, per DS-ADR-008; not created preemptively here.
 3. **Governance-confirmation carryover** — the standing `BLOCKERS.md` items (`ROADMAP.md` phase boundaries as Codex release-scope authority; phase-mapping precision) are unaffected by DS-012 and not re-litigated here.
+
+## 16. Founder Vision Completion ADR Set
+
+The following durable decisions are added to the ADR register: ADR-005 Five Automation Modes and Policy-Based User Authority; ADR-006 Bounded Sage Agency and Tool Orchestration; ADR-007 External Notifications Are Non-Authoritative by Default. These decisions prevent confirmation-language drift, preserve useful Sage capability without execution authority, and keep Discord or other external channels from becoming accidental trading controls.

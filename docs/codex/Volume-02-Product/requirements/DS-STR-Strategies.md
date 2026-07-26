@@ -79,3 +79,9 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** DS-003 concern for the drafting interaction.
 
 **Testing:** Draft-then-confirm workflow test; validation-parity test against manually authored strategies.
+
+### DS-STR-006 — Integrated Strategy Lifecycle
+
+**Priority:** High | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** DarkSage shall support an integrated lifecycle from natural-language or visual drafting through deterministic validation, backtesting, robustness analysis, paper promotion, monitored deployment, version comparison, degradation detection, rollback, retirement, and review. Sage may propose strategy changes but may not silently modify an active strategy version.

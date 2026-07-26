@@ -78,3 +78,9 @@ Parent: [DS-002 — Software Requirements Specification](../DS-002-SRS.md). Requ
 **Implementation Notes:** Full execution-integration architecture requires its own ADR and DS-006/DS-008 review before implementation.
 
 **Testing:** Not applicable to order placement until promoted; read-only import test covered under DS-DAT-002.
+
+### DS-INT-006 — Discord Notification Integration
+
+**Priority:** Medium | **Release Classification:** Planned | **Status:** Draft
+
+**Description:** DarkSage shall implement Discord behind a notification-provider adapter supporting webhook delivery and, only when approved, a bot integration. The adapter shall expose health, test, rate-limit, retry, redaction, and revocation behavior and shall not expose execution-engine credentials or trading-control methods.
