@@ -39,6 +39,7 @@ from keeper.providers.ollama import OllamaProvider
 from keeper.providers.routing import ProviderRouter
 from keeper.workspace import WorkspaceManager
 from keeper.recovery import (
+    atomic_write_json,
     load_json,
     process_exists,
     process_identity,
@@ -818,11 +819,47 @@ class WorkflowCoordinator:
             for item in records
             if item.get("role") == "repairer"
         ]
+        git_snapshot = dict(git_result or run.get("git_result") or {})
+        findings_snapshot = {
+            "findings": [
+                finding
+                for item in initial_reviews
+                for finding in item.get("review_findings", [])
+            ],
+            "dispositions": [
+                disposition
+                for item in post_reviews
+                for disposition in item.get("accepted_findings", [])
+            ],
+            "post_repair_findings": [
+                finding
+                for item in post_reviews
+                for finding in item.get("review_findings", [])
+            ],
+            "repairs": repairs,
+        }
+        atomic_write_json(evidence / "task-definition.json", stored)
+        atomic_write_json(
+            evidence / "verification-records.json",
+            {"records": verifications},
+        )
+        atomic_write_json(
+            evidence / "review-records.json", findings_snapshot
+        )
+        atomic_write_json(
+            evidence / "authorization-records.json",
+            {"records": authorizations},
+        )
+        atomic_write_json(evidence / "git-result.json", git_snapshot)
+        atomic_write_json(
+            evidence / "routing-records.json",
+            {"attempts": list(run.get("routing_attempts", []))},
+        )
         artifacts = _evidence_artifacts(evidence)
         provider_identities = run.get("providers", {})
         if not isinstance(provider_identities, dict):
             provider_identities = {}
-        git_values = dict(git_result or run.get("git_result") or {})
+        git_values = dict(git_snapshot)
         push_result = git_values.pop("push_result", {})
         approval = run.get("approval")
         if not isinstance(approval, dict):
@@ -877,21 +914,11 @@ class WorkflowCoordinator:
             "waivers": waivers,
             "commands": verifications,
             "verification_results": verifications,
-            "findings": [
-                finding
-                for item in initial_reviews
-                for finding in item.get("review_findings", [])
-            ],
-            "dispositions": [
-                disposition
-                for item in post_reviews
-                for disposition in item.get("accepted_findings", [])
-            ],
+            "findings": findings_snapshot["findings"],
+            "dispositions": findings_snapshot["dispositions"],
             "repairs": repairs,
-            "post_repair_findings": [
-                finding
-                for item in post_reviews
-                for finding in item.get("review_findings", [])
+            "post_repair_findings": findings_snapshot[
+                "post_repair_findings"
             ],
             "approval_result": approval,
             "commit_result": git_values,
@@ -922,8 +949,118 @@ class WorkflowCoordinator:
             "terminal_status": terminal_status,
             "failure_reason": failure_reason or run.get("failure_reason", ""),
         }
-        finalize_evidence(evidence, report)
+        index = finalize_evidence(evidence, report)
+        self._persist_evidence_finalization(
+            run_id, stored, report, evidence, index
+        )
         return report
+
+    def _persist_evidence_finalization(
+        self,
+        run_id: str,
+        stored: dict[str, Any],
+        report: dict[str, Any],
+        evidence: Path,
+        index: dict[str, Any],
+    ) -> None:
+        root = evidence.resolve()
+        files: list[dict[str, Any]] = []
+        for path in sorted(item for item in root.rglob("*") if item.is_file()):
+            if path.is_symlink():
+                raise PermissionError(
+                    "protected evidence cannot contain symbolic links"
+                )
+            resolved = path.resolve(strict=True)
+            if not resolved.is_relative_to(root):
+                raise PermissionError("protected evidence escapes the run root")
+            content = resolved.read_bytes()
+            files.append(
+                {
+                    "path": resolved.relative_to(root).as_posix(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                }
+            )
+        paths = {str(item["path"]) for item in files}
+        mandatory = {
+            "final-report.json",
+            "final-report.md",
+            "evidence-index.json",
+            "task-definition.json",
+            "verification-records.json",
+            "review-records.json",
+            "authorization-records.json",
+            "git-result.json",
+            "routing-records.json",
+        }
+        provider_attempts = _provider_records(root)
+        provider_paths = {
+            path.resolve(strict=True).relative_to(root).as_posix()
+            for path in root.glob(".ai-workflow/runs/*/run.json")
+        }
+        mandatory.update(provider_paths)
+        if not mandatory.issubset(paths):
+            raise RuntimeError("mandatory finalized evidence is incomplete")
+        index_paths = {
+            str(item.get("path"))
+            for item in index.get("files", [])
+            if isinstance(item, dict)
+        }
+        if index_paths != paths - {"evidence-index.json"}:
+            raise RuntimeError("finalized evidence manifest is incomplete")
+        critical_keys = (
+            "schema_version",
+            "run_id",
+            "task_id",
+            "terminal_status",
+            "provider_policy",
+            "provider_identities",
+            "routing_attempts",
+            "authorizations",
+            "approval_result",
+            "commit_result",
+            "push_result",
+        )
+        finalization_id = f"evidence-finalization:{run_id}:{uuid.uuid4().hex}"
+        protected: dict[str, Any] = {
+            "id": finalization_id,
+            "kind": "evidence_finalization",
+            "run_id": run_id,
+            "task_id": str(stored["id"]),
+            "final_status": report["terminal_status"],
+            "report_schema_version": report["schema_version"],
+            "files": files,
+            "mandatory_paths": sorted(mandatory),
+            "manifest_digest": hashlib.sha256(
+                (root / "evidence-index.json").read_bytes()
+            ).hexdigest(),
+            "provider_attempt_identities": [
+                {
+                    "run_id": item.get("run_id"),
+                    "task_id": item.get("task_id"),
+                    "role": item.get("role"),
+                    "provider_name": item.get("provider_name"),
+                    "provider_instance_id": item.get("provider_instance_id"),
+                }
+                for item in provider_attempts
+            ],
+            "authorization_outcomes": report["authorizations"],
+            "git_outcomes": {
+                "commit_result": report["commit_result"],
+                "push_result": report["push_result"],
+            },
+            "critical_report_fields": {
+                key: report.get(key) for key in critical_keys
+            },
+            "finalized_at": _now(),
+        }
+        self.store.insert_immutable(
+            "artifacts", finalization_id, protected
+        )
+        run = self._run(run_id)
+        run["evidence_finalization_id"] = finalization_id
+        run["evidence_manifest_digest"] = protected["manifest_digest"]
+        self.store.upsert("runs", run_id, run)
 
     def _record_routing_attempt(
         self,

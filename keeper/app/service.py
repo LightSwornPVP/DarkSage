@@ -14,7 +14,10 @@ from typing import Any
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.notifications import deliver_local_notification
-from keeper.app.reporting import finalize_evidence, verify_evidence
+from keeper.app.reporting import (
+    finalize_evidence,
+    verify_protected_evidence,
+)
 from keeper.app.path_safety import contained_path, validate_path_budget
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
@@ -713,12 +716,34 @@ class KeeperApplication:
         }
 
     def export_run_report(self, run_id: str, destination: Path) -> Path:
+        run = self.store.get("runs", run_id)
+        if run is None:
+            raise LookupError("run not found")
+        finalization_id = run.get("evidence_finalization_id")
+        if not isinstance(finalization_id, str):
+            raise PermissionError(
+                "run has no protected evidence finalization record"
+            )
+        protected = self.store.get("artifacts", finalization_id)
+        if (
+            protected is None
+            or protected.get("run_id") != run_id
+            or protected.get("task_id") != run.get("task_id")
+            or protected.get("manifest_digest")
+            != run.get("evidence_manifest_digest")
+        ):
+            raise PermissionError(
+                "protected evidence finalization binding is inconsistent"
+            )
         root = self.evidence_path(run_id, "folder")
-        verify_evidence(root)
-        source = self.evidence_path(run_id, "json")
-        report = json.loads(source.read_text(encoding="utf-8"))
-        if not isinstance(report, dict):
-            raise RuntimeError("final report is not a JSON object")
+        report = verify_protected_evidence(root, protected)
+        if (
+            str(report.get("terminal_status", "")).upper()
+            != str(protected.get("final_status", "")).upper()
+        ):
+            raise RuntimeError(
+                "final report status conflicts with protected finalization"
+            )
         finalize_evidence(destination, report)
         return destination
 
