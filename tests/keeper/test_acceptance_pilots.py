@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,6 +64,59 @@ def test_success_repair_and_no_repair_pilots_preserve_evidence(tmp_path: Path) -
         assert all(Path(str(item["output_path"])).is_file() for item in records)
     assert "repair_execution" in [item["to"] for item in repair["history"]]
     assert "repair_execution" not in [item["to"] for item in no_repair["history"]]
+    repair_report = json.loads(
+        (Path(str(repair["evidence_root"])) / "final-report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    clean_report = json.loads(
+        (Path(str(no_repair["evidence_root"])) / "final-report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    required = {
+        "schema_version",
+        "scope",
+        "provider_policy",
+        "provider_identities",
+        "routing_rationale",
+        "lifecycle_stages",
+        "authorizations",
+        "waivers",
+        "commands",
+        "verification_results",
+        "findings",
+        "dispositions",
+        "repairs",
+        "post_repair_findings",
+        "approval_result",
+        "commit_result",
+        "push_result",
+        "logs",
+        "artifacts",
+        "evidence_paths",
+        "evidence_hashes",
+        "unresolved_observations",
+        "terminal_status",
+    }
+    assert required <= repair_report.keys()
+    assert repair_report["findings"]
+    assert repair_report["dispositions"]
+    assert repair_report["repairs"]
+    assert clean_report["findings"] == []
+    assert clean_report["dispositions"] == []
+    assert clean_report["repairs"] == []
+    markdown = (
+        Path(str(repair["evidence_root"])) / "final-report.md"
+    ).read_text(encoding="utf-8")
+    assert "```json\nnull\n```" not in markdown
+    assert "## Dispositions" in markdown
+    exported = app.export_run_report(str(repair["id"]), tmp_path / "exported")
+    verify_evidence(exported)
+    exported_report = json.loads(
+        (exported / "final-report.json").read_text(encoding="utf-8")
+    )
+    assert exported_report == repair_report
 
 
 def test_same_identity_reviewer_pilot_blocks_without_approval(tmp_path: Path) -> None:
@@ -70,7 +124,11 @@ def test_same_identity_reviewer_pilot_blocks_without_approval(tmp_path: Path) ->
     run = app.execute_task(task(app, tmp_path / "repo", "blocked-reviewer"))
     assert run["stage"] == "blocked"
     assert run.get("outcome") != "approved"
-    assert not (Path(str(run["evidence_root"])) / "final-report.json").exists()
+    report_path = Path(str(run["evidence_root"])) / "final-report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["terminal_status"] == "BLOCKED"
+    assert report["approval_result"] == {}
 
 
 def test_history_filters_use_persisted_authoritative_fields(tmp_path: Path) -> None:
@@ -140,3 +198,4 @@ def test_scoped_waiver_is_persisted_executed_and_reported(tmp_path: Path) -> Non
         encoding="utf-8"
     )
     assert "waiver-task" in report
+    assert json.loads(report)["waivers"][0]["id"] == "waiver-task"

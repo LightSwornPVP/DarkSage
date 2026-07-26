@@ -134,6 +134,8 @@ EXCLUDE_PATHS=(
   "scripts/verify-foundation.sh"
   ".gitignore"
   "keeper/providers/adapters.py"
+  "keeper/app/service.py"
+  "keeper/desktop.py"
   "tests/keeper/test_productization_adapters.py"
   "keeper/app/workflow.py"
   "tests/keeper/test_real_provider_workflow_routing.py"

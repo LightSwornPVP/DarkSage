@@ -19,6 +19,7 @@ from keeper.agent_runner import AgentRunner
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence
+from keeper.app.path_safety import validate_path_budget
 from keeper.app.storage import KeeperStore
 from keeper.config import KeeperConfig
 from keeper.models.task import Task
@@ -76,6 +77,20 @@ class WorkflowCoordinator:
     ) -> dict[str, Any]:
         task = self._task(task_id)
         run_id = f"run-{uuid.uuid4().hex}"
+        validate_path_budget(
+            self.data_directory
+            / "evidence"
+            / run_id
+            / ".ai-workflow"
+            / "runs"
+            / "pr-p-00000000"
+            / "stderr.log",
+            purpose="workflow evidence path",
+        )
+        validate_path_budget(
+            self.data_directory / "worktrees" / run_id / str(task["id"]),
+            purpose="workflow worktree path",
+        )
         run = self.lifecycle.create(run_id, task_id)
         run.update(
             {
@@ -293,6 +308,13 @@ class WorkflowCoordinator:
             record["ended_at"] = _now()
             self._add_recovery(record)
             self.store.upsert("runs", run_id, record)
+            self._finalize_report(
+                run_id,
+                task,
+                None,
+                "BLOCKED",
+                failure_reason=str(error),
+            )
             self.notify("provider_failure", "Workflow blocked", f"Run {run_id}")
         finally:
             with self._lock:
@@ -387,7 +409,18 @@ class WorkflowCoordinator:
             self.lifecycle.transition(run_id, RunStage.BLOCKED)
             blocked = self._run(run_id)
             self._add_recovery(blocked)
+            blocked["ended_at"] = _now()
             self.store.upsert("runs", run_id, blocked)
+            semantic_records = self._persist_semantic_evidence(
+                run_id, str(stored["id"]), state
+            )
+            self._finalize_report(
+                run_id,
+                stored,
+                result,
+                "BLOCKED",
+                semantic_records=semantic_records,
+            )
             if result.status.value == "FAILED":
                 self.notify(
                     "verification_failed",
@@ -441,6 +474,13 @@ class WorkflowCoordinator:
                     {"status": "REJECTED", "outcome": "rejected", "ended_at": _now()}
                 )
                 self.store.upsert("runs", run_id, record)
+                self._finalize_report(
+                    run_id,
+                    stored,
+                    result,
+                    "REJECTED",
+                    semantic_records=semantic_records,
+                )
                 self.notify("run_rejected", "Run rejected", f"Run {run_id}")
                 return
             self.notify("run_approved", "Run approved", f"Run {run_id}")
@@ -494,34 +534,37 @@ class WorkflowCoordinator:
                     "authorizations", str(authorization["id"]), authorization
                 )
                 git_result.update(
-                    {"push_result": push_result, "remote_hash": commit_hash}
+                    {
+                        "push_result": {
+                            "remote": remote,
+                            "source_ref": source,
+                            "destination_ref": destination,
+                            "expected_commit": commit_hash,
+                            "output": push_result,
+                            "remote_hash": commit_hash,
+                        }
+                    }
                 )
-        report = {
-            **self._run(run_id),
-            "task": stored,
-            "orchestrator_task": result.to_dict(),
-            "terminal_status": "COMPLETED",
-            "end_time": _now(),
-            "evidence_paths": str(evidence),
-            "verification_records": semantic_records,
-            "verification_waivers": [
-                item
-                for item in self.store.list("authorizations")
-                if item.get("capability") == "verification_waiver"
-                and item.get("task_id") == stored["id"]
-                and item.get("run_id") in {None, run_id}
-            ],
-            "git_result": git_result,
-        }
-        finalize_evidence(evidence, report)
+        record = self._run(run_id)
+        record["ended_at"] = _now()
+        record["git_result"] = git_result
+        self.store.upsert("runs", run_id, record)
         self._advance(run_id, RunStage.EVIDENCE_FINALIZATION)
+        self._finalize_report(
+            run_id,
+            stored,
+            result,
+            "COMPLETED",
+            semantic_records=semantic_records,
+            git_result=git_result,
+        )
         self._advance(run_id, RunStage.CLOSED)
         record = self._run(run_id)
         record.update(
             {
                 "status": "COMPLETED",
                 "outcome": "approved",
-                "ended_at": _now(),
+                "ended_at": record.get("ended_at", _now()),
                 "evidence_root": str(evidence),
                 "report_markdown": str(evidence / "final-report.md"),
                 "report_json": str(evidence / "final-report.json"),
@@ -530,6 +573,165 @@ class WorkflowCoordinator:
         )
         self.store.upsert("runs", run_id, record)
         self.notify("run_completed", "Run completed", f"Run {run_id}")
+
+    def _finalize_report(
+        self,
+        run_id: str,
+        stored: dict[str, Any],
+        result: Task | None,
+        terminal_status: str,
+        *,
+        semantic_records: list[dict[str, Any]] | None = None,
+        git_result: dict[str, Any] | None = None,
+        failure_reason: str | None = None,
+    ) -> dict[str, Any]:
+        evidence = self.data_directory / "evidence" / run_id
+        evidence.mkdir(parents=True, exist_ok=True)
+        run = self._run(run_id)
+        records = _provider_records(evidence)
+        authorizations = [
+            item
+            for item in self.store.list("authorizations")
+            if item.get("task_id") == stored.get("id")
+            and item.get("run_id") in {None, run_id}
+        ]
+        waivers = [
+            item
+            for item in authorizations
+            if item.get("capability") == "verification_waiver"
+        ]
+        verifications = semantic_records
+        if verifications is None:
+            verifications = [
+                item
+                for item in self.store.list("verification_records")
+                if item.get("run_id") == run_id
+            ]
+        initial_reviews = [
+            item for item in records if item.get("role") == "reviewer"
+        ]
+        post_reviews = [
+            item
+            for item in records
+            if item.get("role") == "post_repair_reviewer"
+        ]
+        repairs = [
+            {
+                "provider_run_id": item.get("run_id"),
+                "provider_name": item.get("provider_name"),
+                "files_changed": item.get("files_changed", []),
+                "status": item.get("status"),
+                "start_time": item.get("start_time"),
+                "end_time": item.get("end_time"),
+            }
+            for item in records
+            if item.get("role") == "repairer"
+        ]
+        artifacts = _evidence_artifacts(evidence)
+        provider_identities = run.get("providers", {})
+        if not isinstance(provider_identities, dict):
+            provider_identities = {}
+        git_values = dict(git_result or run.get("git_result") or {})
+        push_result = git_values.pop("push_result", {})
+        approval = run.get("approval")
+        if not isinstance(approval, dict):
+            approving_records = [
+                item for item in records if item.get("final_approval_authority")
+            ]
+            approval = (
+                {
+                    "decision": "approved",
+                    "authority": approving_records[-1]["final_approval_authority"],
+                }
+                if approving_records
+                else {}
+            )
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "task_id": stored.get("id"),
+            "objective": stored.get("objective", ""),
+            "repository": stored.get("repository", ""),
+            "worktree": (
+                result.workspace_path
+                if result is not None and result.workspace_path
+                else run.get("worktree", run.get("workspace", ""))
+            ),
+            "branch": (
+                result.branch_name
+                if result is not None and result.branch_name
+                else run.get("worktree_branch", run.get("branch", ""))
+            ),
+            "baseline": stored.get("baseline", ""),
+            "scope": {
+                "included_paths": list(stored.get("included_paths", [])),
+                "excluded_paths": list(stored.get("excluded_paths", [])),
+                "completion_criteria": list(
+                    stored.get("completion_criteria", [])
+                ),
+                "required_validations": list(
+                    stored.get("required_validations", [])
+                ),
+                "risk": stored.get("risk", "low"),
+                "prohibited_actions": list(
+                    stored.get("prohibited_actions", [])
+                ),
+            },
+            "provider_policy": stored.get("provider_policy", "repository-default"),
+            "provider_identities": provider_identities,
+            "routing_rationale": list(run.get("routing_decisions", [])),
+            "lifecycle_stages": list(run.get("history", [])),
+            "authorizations": authorizations,
+            "waivers": waivers,
+            "commands": verifications,
+            "verification_results": verifications,
+            "findings": [
+                finding
+                for item in initial_reviews
+                for finding in item.get("review_findings", [])
+            ],
+            "dispositions": [
+                disposition
+                for item in post_reviews
+                for disposition in item.get("accepted_findings", [])
+            ],
+            "repairs": repairs,
+            "post_repair_findings": [
+                finding
+                for item in post_reviews
+                for finding in item.get("review_findings", [])
+            ],
+            "approval_result": approval,
+            "commit_result": git_values,
+            "push_result": push_result,
+            "logs": [
+                item
+                for item in artifacts
+                if str(item["path"]).endswith((".log", "prompt.md"))
+            ],
+            "artifacts": artifacts,
+            "evidence_paths": [
+                str(evidence.resolve()),
+                str((evidence / "final-report.json").resolve()),
+                str((evidence / "final-report.md").resolve()),
+                str((evidence / "evidence-index.json").resolve()),
+            ],
+            "evidence_hashes": [
+                {"path": item["path"], "sha256": item["sha256"]}
+                for item in artifacts
+            ],
+            "unresolved_observations": [
+                finding
+                for item in records
+                for finding in item.get("rejected_findings", [])
+            ],
+            "start_time": run.get("started_at", ""),
+            "end_time": run.get("ended_at", _now()),
+            "terminal_status": terminal_status,
+            "failure_reason": failure_reason or run.get("failure_reason", ""),
+        }
+        finalize_evidence(evidence, report)
+        return report
 
     @staticmethod
     def _add_recovery(record: dict[str, Any]) -> None:
@@ -1003,6 +1205,47 @@ def _mock_routes(
         for role, provider_id in routes.items()
     ]
     return providers, routes, rationale
+
+
+def _provider_records(evidence: Path) -> list[dict[str, Any]]:
+    root = evidence.resolve()
+    records: list[dict[str, Any]] = []
+    for path in sorted(root.glob(".ai-workflow/runs/*/run.json")):
+        if path.is_symlink():
+            raise PermissionError("provider evidence cannot be a symbolic link")
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(root):
+            raise PermissionError("provider evidence escapes the run root")
+        try:
+            value = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _evidence_artifacts(evidence: Path) -> list[dict[str, Any]]:
+    root = evidence.resolve()
+    artifacts: list[dict[str, Any]] = []
+    excluded = {"evidence-index.json", "final-report.json", "final-report.md"}
+    for path in sorted(root.rglob("*")):
+        if path.name in excluded or not path.is_file():
+            continue
+        if path.is_symlink():
+            raise PermissionError("evidence artifact cannot be a symbolic link")
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(root):
+            raise PermissionError("evidence artifact escapes the run root")
+        content = resolved.read_bytes()
+        artifacts.append(
+            {
+                "path": resolved.relative_to(root).as_posix(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        )
+    return artifacts
 
 
 def _now() -> str:

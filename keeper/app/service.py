@@ -14,7 +14,8 @@ from typing import Any
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.notifications import deliver_local_notification
-from keeper.app.reporting import finalize_evidence
+from keeper.app.reporting import finalize_evidence, verify_evidence
+from keeper.app.path_safety import contained_path, validate_path_budget
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.app.workflow import WorkflowCoordinator
@@ -79,6 +80,10 @@ class KeeperApplication:
 
     def add_project(self, repository: Path, name: str | None = None) -> dict[str, Any]:
         inspection = self.git.inspect(repository)
+        validate_path_budget(
+            Path(inspection.root) / ".git" / "objects" / "00" / ("0" * 38),
+            purpose="repository Git object path",
+        )
         identifier = uuid.uuid5(uuid.NAMESPACE_URL, inspection.root).hex
         project = {
             "id": identifier,
@@ -254,7 +259,10 @@ class KeeperApplication:
         root_value = run.get("evidence_root")
         if not isinstance(root_value, str):
             raise ValueError("run has no evidence root")
-        root = Path(root_value).resolve()
+        raw_root = Path(root_value)
+        if raw_root.is_symlink():
+            raise PermissionError("evidence root cannot be a symbolic link")
+        root = raw_root.resolve()
         allowed = (self.data_directory / "evidence").resolve()
         if not root.is_relative_to(allowed):
             raise PermissionError("evidence path is outside Keeper storage")
@@ -457,7 +465,10 @@ class KeeperApplication:
         root_value = run.get("evidence_root")
         if not isinstance(root_value, str):
             raise ValueError("run has no finalized evidence")
-        root = Path(root_value).resolve()
+        raw_root = Path(root_value)
+        if raw_root.is_symlink():
+            raise PermissionError("evidence root cannot be a symbolic link")
+        root = raw_root.resolve()
         allowed_root = (self.data_directory / "evidence").resolve()
         if not root.is_relative_to(allowed_root):
             raise PermissionError("evidence path is outside Keeper storage")
@@ -468,7 +479,7 @@ class KeeperApplication:
         }
         if kind not in choices or not choices[kind].exists():
             raise ValueError("requested evidence target is unavailable")
-        return choices[kind]
+        return contained_path(root, choices[kind], purpose="evidence target")
 
     def open_evidence(self, run_id: str, kind: str = "folder") -> Path:
         target = self.evidence_path(run_id, kind)
@@ -654,38 +665,22 @@ class KeeperApplication:
         }
 
     def export_run_report(self, run_id: str, destination: Path) -> Path:
-        run = self.store.get("runs", run_id)
-        if run is None:
-            raise LookupError("run not found")
-        report = {
-            "objective": run.get("objective"),
-            "repository": run.get("repository"),
-            "worktree": run.get("workspace"),
-            "branch": run.get("branch"),
-            "baseline": run.get("baseline"),
-            "scope": run.get("scope"),
-            "providers": run.get("providers"),
-            "routing_decisions": run.get("routing_decisions"),
-            "authorizations": run.get("authorizations"),
-            "commands": run.get("commands"),
-            "findings": run.get("findings"),
-            "repairs": run.get("repairs"),
-            "verification_results": run.get("verification_results"),
-            "test_totals": run.get("test_totals"),
-            "approval_result": run.get("approval_result"),
-            "git_result": run.get("git_result"),
-            "unresolved_observations": run.get("unresolved_observations"),
-            "evidence_paths": run.get("evidence_root"),
-            "start_time": run.get("start_time"),
-            "end_time": run.get("end_time"),
-            "terminal_status": run.get("status"),
-        }
+        root = self.evidence_path(run_id, "folder")
+        verify_evidence(root)
+        source = self.evidence_path(run_id, "json")
+        report = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise RuntimeError("final report is not a JSON object")
         finalize_evidence(destination, report)
         return destination
 
     def _demo_repository(self) -> Path:
         root = self.data_directory / "demonstrations" / f"demo-{uuid.uuid4().hex}"
         repository = root / "repository"
+        validate_path_budget(
+            repository / ".git" / "objects" / "00" / ("0" * 38),
+            purpose="demonstration repository path",
+        )
         repository.mkdir(parents=True)
         commands = (
             ("init",),

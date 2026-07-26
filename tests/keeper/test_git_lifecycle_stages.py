@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
@@ -90,3 +91,14 @@ def test_authorized_commit_and_push_are_lifecycle_stages(tmp_path: Path) -> None
     assert "authorized_commit" in transitions
     assert "authorized_push" in transitions
     assert git(remote, "rev-parse", f"refs/heads/{inspection.branch}") == commit_hash
+    report = json.loads(
+        (
+            Path(str(completed["evidence_root"])) / "final-report.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert {item["capability"] for item in report["authorizations"]} == {
+        "commit",
+        "push",
+    }
+    assert report["commit_result"]["commit_hash"] == commit_hash
+    assert report["push_result"]["remote"] == "local"

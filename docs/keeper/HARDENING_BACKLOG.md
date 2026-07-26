@@ -7,7 +7,9 @@ Nonblocking future work:
 - Rich diff/log widgets and accessibility testing with assistive technology.
 - Optional operating-system notification adapters beyond Windows toast.
 - Explicit evidence retention/deletion UI with preview and backup enforcement.
-- Authenticated real-provider qualification matrix in a disposable test repository.
+- Authenticated external-provider qualification matrix in a disposable test
+  repository; command-adapter and controlled-provider paths are covered, but
+  credentialed provider sessions are not claimed as release-verified.
 - Optional Discord notification-only integration with OS credential storage.
-- Qualify authenticated provider execution in disposable repositories.
-- Add rendered Windows Tk automation in a runtime that includes Tcl/Tk.
+- Expand the completed rendered Windows Tk smoke into broader accessibility and
+  long-duration interaction coverage.

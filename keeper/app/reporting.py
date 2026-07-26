@@ -46,31 +46,67 @@ def verify_evidence(directory: Path) -> None:
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    sections = ["# Keeper Run Report", ""]
+    sections = [
+        "# Keeper Run Report",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+    ]
     for key in (
+        "schema_version",
+        "run_id",
+        "task_id",
         "objective",
         "repository",
         "worktree",
         "branch",
         "baseline",
-        "scope",
-        "providers",
-        "routing_decisions",
-        "authorizations",
-        "commands",
-        "findings",
-        "repairs",
-        "verification_results",
-        "test_totals",
-        "approval_result",
-        "git_result",
-        "unresolved_observations",
-        "evidence_paths",
+        "provider_policy",
         "start_time",
         "end_time",
         "terminal_status",
+        "failure_reason",
     ):
+        value = report.get(key, "")
+        if value is None:
+            value = ""
+        display = str(value).replace("|", "\\|")
+        sections.append(f"| {key.replace('_', ' ').title()} | {display} |")
+    sections.append("")
+    defaults: dict[str, object] = {
+        "scope": {},
+        "provider_identities": {},
+        "routing_rationale": [],
+        "lifecycle_stages": [],
+        "authorizations": [],
+        "waivers": [],
+        "commands": [],
+        "verification_results": [],
+        "findings": [],
+        "dispositions": [],
+        "repairs": [],
+        "post_repair_findings": [],
+        "approval_result": {},
+        "commit_result": {},
+        "push_result": {},
+        "logs": [],
+        "artifacts": [],
+        "evidence_paths": [],
+        "evidence_hashes": [],
+        "unresolved_observations": [],
+    }
+    for key, default in defaults.items():
+        value = report.get(key, default)
+        if value is None:
+            value = default
         sections.extend(
-            [f"## {key.replace('_', ' ').title()}", "", "```json", json.dumps(report.get(key), indent=2), "```", ""]
+            [
+                f"## {key.replace('_', ' ').title()}",
+                "",
+                "```json",
+                json.dumps(value, indent=2, sort_keys=True),
+                "```",
+                "",
+            ]
         )
     return "\n".join(sections)

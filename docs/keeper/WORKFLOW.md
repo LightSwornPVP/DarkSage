@@ -33,7 +33,15 @@ python -m keeper list-tasks
 python -m keeper show-task TASK_ID
 ```
 
-Keeper does not merge, push, or deploy work.
+Keeper never merges, rebases, resets, stashes, cleans, force-pushes, or deploys
+work. Commit and normal push are optional lifecycle stages. Each requires a
+separate, run-scoped, one-time authorization bound to current repository,
+worktree, branch, HEAD, and Git scope. A commit authorization does not grant push
+authority.
+
+On Windows, Keeper validates generated evidence and worktree paths against a
+240-character safety budget before provider launch. Use a shorter Keeper data
+directory or repository path when the diagnostic reports an over-budget path.
 
 ## Reasoning tiers
 

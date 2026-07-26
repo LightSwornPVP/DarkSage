@@ -10,6 +10,7 @@ from keeper.models.task import Task, now_iso
 from keeper.providers.base import AgentProvider, AgentRequest
 from keeper.provider_output import validate_provider_output
 from keeper.recovery import atomic_write_json
+from keeper.app.path_safety import validate_path_budget
 
 
 class AgentRunner:
@@ -35,8 +36,15 @@ class AgentRunner:
         retry: int = 0,
         reasoning_level: str = "medium",
     ) -> RunRecord:
-        run_id = f"{task.id}-{role}-{uuid.uuid4().hex[:12]}"
+        role_label = {
+            "builder": "b",
+            "reviewer": "v",
+            "repairer": "r",
+            "post_repair_reviewer": "p",
+        }.get(role, "x")
+        run_id = f"pr-{role_label}-{uuid.uuid4().hex[:8]}"
         directory = self.runs_directory / run_id
+        validate_path_budget(directory / "stderr.log", purpose="provider evidence path")
         directory.mkdir(parents=True, exist_ok=False)
         prompt_path = directory / "prompt.md"
         stdout_path = directory / "stdout.log"
