@@ -150,7 +150,7 @@ def test_exact_push_to_local_bare_remote_succeeds_once(tmp_path: Path) -> None:
 
 def test_verification_waiver_must_be_exact_current_and_unrevoked() -> None:
     spec = VerificationSpec(
-        "tests", ["python", "-m", "pytest"], "pytest", waiver_id="waiver-1"
+        "tests", ["{python}", "-m", "pytest"], "pytest", waiver_id="waiver-1"
     )
     valid = VerificationWaiver(
         "waiver-1",

@@ -91,7 +91,7 @@ def test_lifecycle_rejects_skips_and_corrupt_state(tmp_path: Path) -> None:
 
 
 def test_semantic_binding_rejects_forgery_duplicates_and_missing() -> None:
-    python = "python.exe"
+    python = "{python}"
     valid = VerificationSpec("tests", [python, "-m", "pytest", "tests/keeper"], "pytest")
     validate_semantic_bindings([valid], ["tests"])
     with pytest.raises(ValueError, match="cannot satisfy"):

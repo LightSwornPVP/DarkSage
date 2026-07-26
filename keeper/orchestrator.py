@@ -181,6 +181,16 @@ class Keeper:
                     waiver_id=(
                         str(item["waiver_id"]) if item.get("waiver_id") is not None else None
                     ),
+                    registration_id=(
+                        str(item["registration_id"])
+                        if item.get("registration_id") is not None
+                        else None
+                    ),
+                    expected_sha256=(
+                        str(item["expected_sha256"])
+                        if item.get("expected_sha256") is not None
+                        else None
+                    ),
                 )
                 for item in raw_specs
             ]
@@ -210,7 +220,13 @@ class Keeper:
                 spec for spec in semantic_specs if spec.waiver_id is None
             ]
             commands = [
-                VerificationCommand(arguments=spec.arguments, required=spec.required)
+                VerificationCommand(
+                    arguments=spec.arguments,
+                    required=spec.required,
+                    validator=spec.validator,
+                    registration_id=spec.registration_id,
+                    expected_sha256=spec.expected_sha256,
+                )
                 for spec in executable_specs
             ]
         else:
@@ -290,8 +306,8 @@ class Keeper:
                         "environment": environment_summary(
                             filtered_environment(dict(os.environ))
                         ),
-                        "start_time": now_iso(),
-                        "end_time": now_iso(),
+                        "start_time": result.started_at,
+                        "end_time": result.ended_at,
                         "timed_out": result.timed_out,
                         "exit_code": result.exit_code,
                         "output_path": str(output_path),
@@ -300,6 +316,7 @@ class Keeper:
                         "evidence_hash": hashlib.sha256(
                             output_path.read_bytes()
                         ).hexdigest(),
+                        "validator_identity": result.validator_identity,
                     }
                 )
             evidence["semantic_commands"] = command_evidence

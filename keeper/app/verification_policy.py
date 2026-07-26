@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import hashlib
 from pathlib import Path
 from typing import Iterable
 
@@ -13,6 +14,8 @@ class VerificationSpec:
     validator: str
     required: bool = True
     waiver_id: str | None = None
+    registration_id: str | None = None
+    expected_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,15 +119,31 @@ def environment_summary(environment: dict[str, str]) -> dict[str, object]:
 
 def _validate_command_pattern(spec: VerificationSpec) -> None:
     args = [item.lower().replace("\\", "/") for item in spec.arguments]
-    if spec.validator == "pytest" and not _module_command(args, "pytest"):
+    if spec.validator == "pytest" and not _trusted_module_command(args, "pytest"):
         raise ValueError("pytest category requires a Python pytest module command")
-    if spec.validator == "mypy" and not _module_command(args, "mypy"):
+    if spec.validator == "mypy" and not _trusted_module_command(args, "mypy"):
         raise ValueError("typing category requires a Python mypy module command")
-    if spec.validator == "compileall" and not _module_command(args, "compileall"):
+    if spec.validator == "compileall" and not _trusted_module_command(args, "compileall"):
         raise ValueError("compilation category requires Python compileall")
     if spec.validator == "foundation-script":
-        if not any(item.endswith("scripts/verify-foundation.sh") for item in args):
+        matches = [
+            Path(original)
+            for original, normalized in zip(spec.arguments, args, strict=True)
+            if normalized.endswith("scripts/verify-foundation.sh")
+        ]
+        if len(matches) != 1:
             raise ValueError("foundation category requires the registered foundation script")
+        script = matches[0]
+        if (
+            spec.expected_sha256 is None
+            or not script.is_absolute()
+            or script.is_symlink()
+            or not script.is_file()
+        ):
+            raise ValueError("foundation script requires an absolute pinned regular file")
+        actual = hashlib.sha256(script.read_bytes()).hexdigest()
+        if actual != spec.expected_sha256:
+            raise PermissionError("foundation script hash does not match its registration")
     if spec.validator == "file-equals" and args[0] != "keeper:file-equals":
         raise ValueError("file-equals validator requires the Keeper registered command")
     if spec.validator == "registered-command":
@@ -133,5 +152,9 @@ def _validate_command_pattern(spec: VerificationSpec) -> None:
             raise ValueError("generic shell commands cannot be registered verification commands")
 
 
-def _module_command(arguments: list[str], module: str) -> bool:
-    return len(arguments) >= 3 and arguments[1:3] == ["-m", module]
+def _trusted_module_command(arguments: list[str], module: str) -> bool:
+    return (
+        len(arguments) >= 3
+        and arguments[0] == "{python}"
+        and arguments[1:3] == ["-m", module]
+    )
