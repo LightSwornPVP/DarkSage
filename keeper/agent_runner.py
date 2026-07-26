@@ -4,6 +4,7 @@ import json
 import uuid
 import re
 from pathlib import Path
+from typing import Any, Callable
 
 from keeper.models.run import RunRecord
 from keeper.models.task import Task, now_iso
@@ -20,11 +21,15 @@ class AgentRunner:
         runs_directory: Path,
         timeout_seconds: int,
         maximum_output_bytes: int = 1_048_576,
+        keeper_run_id: str | None = None,
+        ownership_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.provider = provider
         self.runs_directory = runs_directory
         self.timeout_seconds = timeout_seconds
         self.maximum_output_bytes = maximum_output_bytes
+        self.keeper_run_id = keeper_run_id
+        self.ownership_sink = ownership_sink
 
     def run(
         self,
@@ -74,6 +79,7 @@ class AgentRunner:
         def process_owned(ownership: dict[str, object]) -> None:
             record.process_ownership = {
                 **ownership,
+                "keeper_run_id": self.keeper_run_id,
                 "task_id": task.id,
                 "provider_run_id": run_id,
                 "stage_id": task.active_run_stage,
@@ -82,6 +88,8 @@ class AgentRunner:
                 "role": role,
                 "evidence_path": str(directory.resolve()),
             }
+            if self.ownership_sink is not None:
+                self.ownership_sink(dict(record.process_ownership))
             atomic_write_json(record_path, record.to_dict())
 
         result = self.provider.run(

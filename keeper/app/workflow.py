@@ -42,6 +42,7 @@ from keeper.recovery import (
     process_exists,
     process_identity,
     process_identity_matches,
+    ownership_records_match,
 )
 
 
@@ -131,7 +132,24 @@ class WorkflowCoordinator:
             if not run_id:
                 continue
             stage = str(record.get("stage", ""))
-            ownership = _active_provider_ownership(record)
+            provider_record = _active_provider_record(record)
+            ownership = (
+                provider_record.get("process_ownership")
+                if isinstance(provider_record, dict)
+                else None
+            )
+            if not isinstance(ownership, dict):
+                ownership = None
+            authority_records = self._process_ownership_records(
+                run_id,
+                (
+                    str(provider_record.get("run_id"))
+                    if isinstance(provider_record, dict)
+                    and provider_record.get("run_id")
+                    else None
+                ),
+            )
+            authority = authority_records[0] if len(authority_records) == 1 else None
             pid = record.get("process_id")
             if not isinstance(pid, int) and isinstance(ownership, dict):
                 pid = ownership.get("pid")
@@ -140,10 +158,11 @@ class WorkflowCoordinator:
             running = isinstance(pid, int) and process_exists(pid)
             terminated = False
             identity_verified = False
+            binding_verified = ownership_records_match(authority, ownership)
             if running and isinstance(pid, int):
                 current_identity = process_identity(pid)
-                identity_verified = process_identity_matches(
-                    ownership, current_identity
+                identity_verified = binding_verified and process_identity_matches(
+                    authority, current_identity
                 )
                 if identity_verified:
                     terminated = _terminate_attributable_tree(pid)
@@ -160,20 +179,38 @@ class WorkflowCoordinator:
                     "recovery": {
                         "classification": (
                             "uncertain"
-                            if running and not identity_verified
+                            if (
+                                (running and not identity_verified)
+                                or (
+                                    isinstance(provider_record, dict)
+                                    and not binding_verified
+                                )
+                            )
                             else "recoverable"
                         ),
                         "previous_process_running": running,
                         "provider_process_id": pid,
                         "attributable_tree_terminated": terminated,
                         "identity_verified": identity_verified,
+                        "ownership_binding_verified": binding_verified,
+                        "authoritative_ownership": authority,
+                        "authoritative_ownership_record_count": len(
+                            authority_records
+                        ),
                         "recorded_ownership": ownership,
-                        "retry_safe": not running and stage
+                        "retry_safe": (
+                            not running
+                            and (
+                                not isinstance(provider_record, dict)
+                                or binding_verified
+                            )
+                            and stage
                         not in {
                             RunStage.AUTHORIZED_COMMIT.value,
                             RunStage.AUTHORIZED_PUSH.value,
                             RunStage.EVIDENCE_FINALIZATION.value,
-                        },
+                        }
+                        ),
                         "detected_at": _now(),
                     },
                 }
@@ -389,7 +426,13 @@ class WorkflowCoordinator:
         )
         engine = Keeper(
             config,
-            AgentRunner(providers["builder"], state / "runs", 30),
+            AgentRunner(
+                providers["builder"],
+                state / "runs",
+                30,
+                keeper_run_id=run_id,
+                ownership_sink=self._persist_process_ownership,
+            ),
             WorkspaceManager(repository, config.workspace_root, state / "ownership"),
             router,
             observer,
@@ -732,6 +775,40 @@ class WorkflowCoordinator:
         }
         finalize_evidence(evidence, report)
         return report
+
+    def _persist_process_ownership(self, ownership: dict[str, Any]) -> None:
+        keeper_run_id = str(ownership.get("keeper_run_id") or "")
+        provider_run_id = str(ownership.get("provider_run_id") or "")
+        task_id = str(ownership.get("task_id") or "")
+        if not keeper_run_id or not provider_run_id or not task_id:
+            raise PermissionError("process ownership binding is incomplete")
+        run = self._run(keeper_run_id)
+        if run.get("task_id") != task_id:
+            raise PermissionError("process ownership task binding is inconsistent")
+        evidence_root = Path(str(run.get("evidence_root", ""))).resolve()
+        evidence_path = Path(str(ownership.get("evidence_path", ""))).resolve()
+        if not evidence_path.is_relative_to(evidence_root):
+            raise PermissionError("process ownership evidence path escapes the run")
+        value = {
+            **ownership,
+            "id": f"process-ownership:{keeper_run_id}:{provider_run_id}",
+            "kind": "process_ownership",
+            "recorded_at": _now(),
+        }
+        self.store.insert_immutable("artifacts", str(value["id"]), value)
+
+    def _process_ownership_records(
+        self, keeper_run_id: str, provider_run_id: str | None
+    ) -> list[dict[str, Any]]:
+        if not provider_run_id:
+            return []
+        return [
+            item
+            for item in self.store.list("artifacts")
+            if item.get("kind") == "process_ownership"
+            and item.get("keeper_run_id") == keeper_run_id
+            and item.get("provider_run_id") == provider_run_id
+        ]
 
     @staticmethod
     def _add_recovery(record: dict[str, Any]) -> None:
@@ -1271,9 +1348,9 @@ def _active_provider_pid(record: dict[str, Any]) -> int | None:
     return None
 
 
-def _active_provider_ownership(
+def _active_provider_record(
     record: dict[str, Any],
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     root = record.get("evidence_root")
     if not isinstance(root, str):
         return None
@@ -1286,9 +1363,8 @@ def _active_provider_ownership(
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        ownership = value.get("process_ownership")
-        if value.get("status") == "running" and isinstance(ownership, dict):
-            return ownership
+        if value.get("status") == "running" and isinstance(value, dict):
+            return value
     return None
 
 

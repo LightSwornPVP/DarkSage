@@ -67,7 +67,14 @@ class Keeper:
         runner = self.runner
         if self.router is not None:
             provider = self.router.for_role(role)
-            runner = AgentRunner(provider, self.config.state_root / "runs", self.config.process_timeout_seconds)
+            runner = AgentRunner(
+                provider,
+                self.config.state_root / "runs",
+                self.config.process_timeout_seconds,
+                self.runner.maximum_output_bytes,
+                self.runner.keeper_run_id,
+                self.runner.ownership_sink,
+            )
         reasoning = select_reasoning_level(
             important_file_count=len(task.allowed_paths),
             changes_architecture_or_workflow=task.component.lower() in {"architecture", "workflow", "keeper"},

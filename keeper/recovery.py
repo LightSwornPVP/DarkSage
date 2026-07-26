@@ -213,10 +213,16 @@ def process_identity_matches(
         "command_line_hash",
         "parent_pid",
         "launch_nonce",
+        "ownership_token",
+        "keeper_run_id",
+        "task_id",
+        "stage_id",
         "provider_run_id",
         "provider_name",
+        "provider_instance_id",
         "role",
         "evidence_path",
+        "job_or_group_identity",
     )
     if any(ownership.get(key) in {None, ""} for key in required):
         return False
@@ -230,3 +236,35 @@ def process_identity_matches(
             "parent_pid",
         )
     )
+
+
+def ownership_records_match(
+    authority: object, evidence: object
+) -> bool:
+    if not isinstance(authority, dict) or not isinstance(evidence, dict):
+        return False
+    required = (
+        "keeper_run_id",
+        "task_id",
+        "stage_id",
+        "provider_name",
+        "provider_instance_id",
+        "provider_run_id",
+        "role",
+        "ownership_token",
+        "launch_nonce",
+        "evidence_path",
+        "pid",
+        "creation_time",
+        "executable",
+        "command_line_hash",
+        "parent_pid",
+        "job_or_group_identity",
+        "started_at",
+    )
+    if any(
+        authority.get(key) in {None, ""} or evidence.get(key) in {None, ""}
+        for key in required
+    ):
+        return False
+    return all(authority.get(key) == evidence.get(key) for key in required)

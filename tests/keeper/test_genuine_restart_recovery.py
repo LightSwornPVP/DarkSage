@@ -106,9 +106,12 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
         ownership_records.append(
             {
                 **ownership,
+                "keeper_run_id": run_id,
                 "task_id": "task-interrupted",
                 "provider_run_id": "provider-active",
                 "provider_name": "controlled-command",
+                "provider_instance_id": provider.instance_id,
+                "stage_id": "BUILDING",
                 "role": "builder",
                 "evidence_path": str(provider_directory.resolve()),
             }
@@ -116,6 +119,15 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
         value = json.loads(provider_record.read_text(encoding="utf-8"))
         value["process_ownership"] = ownership_records[-1]
         provider_record.write_text(json.dumps(value), encoding="utf-8")
+        first.store.insert_immutable(
+            "artifacts",
+            f"process-ownership:{run_id}:provider-active",
+            {
+                **ownership_records[-1],
+                "id": f"process-ownership:{run_id}:provider-active",
+                "kind": "process_ownership",
+            },
+        )
 
     provider = CliProvider((str(slow), "{prompt}"), "controlled-command")
     thread = threading.Thread(

@@ -89,6 +89,33 @@ class KeeperStore:
                 (identifier, SCHEMA_VERSION, timestamp, timestamp, serialized, digest),
             )
 
+    def insert_immutable(
+        self, table: str, identifier: str, payload: dict[str, Any]
+    ) -> None:
+        _require_table(table)
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest = _sha256(serialized.encode("utf-8"))
+        timestamp = _now()
+        try:
+            with self.connect() as connection:
+                connection.execute(
+                    f'INSERT INTO "{table}" '
+                    "(id, schema_version, created_at, updated_at, payload, payload_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        identifier,
+                        SCHEMA_VERSION,
+                        timestamp,
+                        timestamp,
+                        serialized,
+                        digest,
+                    ),
+                )
+        except sqlite3.IntegrityError as error:
+            raise PermissionError(
+                f"immutable {table} record already exists: {identifier}"
+            ) from error
+
     def get(self, table: str, identifier: str) -> dict[str, Any] | None:
         _require_table(table)
         with self.connect() as connection:

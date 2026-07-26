@@ -111,6 +111,7 @@ class CliProvider(AgentProvider):
                         {
                             **identity,
                             "launch_nonce": uuid.uuid4().hex,
+                            "ownership_token": uuid.uuid4().hex,
                             "job_or_group_identity": (
                                 f"windows-job:{job}"
                                 if os.name == "nt"
