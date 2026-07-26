@@ -445,6 +445,8 @@ def _mock_routes(
             },
         ),
     }
+    if scenario == "blocked-reviewer":
+        providers["reviewer"] = providers["builder"]
     routes = {
         "builder": "builder",
         "reviewer": "reviewer",
