@@ -28,6 +28,9 @@ connections. Executable race tests pause after validation and retained-handle
 acquisition but before `CreateProcess`, then attempt same-path, same-size, and
 junction retarget attacks. Directory symlinks are used when the current token
 permits them; otherwise the integration uses an unprivileged Windows junction.
+Linux fallback execution uses a sealed in-memory file descriptor and has a
+capability-gated substitution regression; other non-Windows kernels fail closed
+when sealed descriptor execution is unavailable.
 
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and

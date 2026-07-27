@@ -145,7 +145,7 @@ def test_same_path_same_size_replacement_is_blocked_after_validation(
     assert original.stat().st_size == replacement.stat().st_size
     replacement_errors: list[OSError] = []
 
-    def attack() -> None:
+    def attack(_launch_path: Path) -> None:
         try:
             os.replace(replacement, original)
         except OSError as error:
@@ -225,7 +225,7 @@ def test_reparse_retarget_after_validation_cannot_change_resolved_script(
                 f"also failed: {symlink_error}; {created.stderr}"
             )
 
-    def retarget() -> None:
+    def retarget(_launch_path: Path) -> None:
         if link_kind == "junction":
             os.rmdir(link)
             result = subprocess.run(
@@ -265,6 +265,51 @@ def test_reparse_retarget_after_validation_cannot_change_resolved_script(
     )
     assert result.exit_code == 0
     assert marker.read_text(encoding="utf-8").strip() == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sealed descriptor fallback is non-Windows")
+def test_sealed_fallback_cannot_be_replaced_before_launch(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "sealed-marker.txt"
+    executable = tmp_path / "provider.sh"
+    executable.write_text(
+        f"#!/bin/sh\nprintf original > {marker}\n", encoding="utf-8"
+    )
+    executable.chmod(0o700)
+    attacks: list[OSError] = []
+
+    def attack(launch_path: Path) -> None:
+        try:
+            launch_path.write_bytes(b"#!/bin/sh\nprintf replaced\n")
+        except OSError as error:
+            attacks.append(error)
+
+    provider = CliProvider(
+        (str(executable), "{prompt}"),
+        "controlled-command",
+        expected_executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        expected_executable_size=executable.stat().st_size,
+        registration_id="sealed-provider",
+        registration_version="1",
+        configuration_digest="c" * 64,
+        before_process_create=attack,
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("controlled", encoding="utf-8")
+    result = provider.run(
+        AgentRequest(
+            "builder",
+            prompt,
+            tmp_path,
+            10,
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+        )
+    )
+    assert result.exit_code == 0
+    assert attacks
+    assert marker.read_text(encoding="utf-8") == "original"
 
 
 @pytest.mark.parametrize("command", ["start", "run-next"])

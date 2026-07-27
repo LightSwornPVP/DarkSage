@@ -30,7 +30,7 @@ class CliProvider(AgentProvider):
         registration_id: str | None = None,
         registration_version: str | None = None,
         configuration_digest: str | None = None,
-        before_process_create: Callable[[], None] | None = None,
+        before_process_create: Callable[[Path], None] | None = None,
     ) -> None:
         self.command_script: Path | None = None
         if (
@@ -106,6 +106,7 @@ class CliProvider(AgentProvider):
         registered_path, registered_content = self._validated_executable()
         request.stdout_path.parent.mkdir(parents=True, exist_ok=True)
         retained_executable_handles: list[int] = []
+        protected_executable_fd: int | None = None
         protected_path = registered_path
         if os.name == "nt":
             retained_executable_handles.append(
@@ -124,31 +125,9 @@ class CliProvider(AgentProvider):
                     "retained provider executable failed identity verification"
                 )
         else:
-            protected_directory = request.stdout_path.parent / ".protected-executables"
-            protected_directory.mkdir(parents=True, exist_ok=True)
-            suffix = registered_path.suffix
-            protected_path = (
-                protected_directory
-                / f"{str(self.expected_executable_sha256)[:16]}-{uuid.uuid4().hex[:8]}{suffix}"
+            protected_executable_fd, protected_path = _sealed_executable(
+                registered_content
             )
-            descriptor = os.open(
-                protected_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o500
-            )
-            try:
-                with os.fdopen(descriptor, "wb") as protected:
-                    protected.write(registered_content)
-                    protected.flush()
-                    os.fsync(protected.fileno())
-            except BaseException:
-                protected_path.unlink(missing_ok=True)
-                raise
-            os.chmod(protected_path, 0o500)
-            if hashlib.sha256(protected_path.read_bytes()).hexdigest() != (
-                self.expected_executable_sha256
-            ):
-                raise PermissionError(
-                    "protected provider executable failed identity verification"
-                )
         environment = filtered_environment(dict(os.environ))
         environment["KEEPER_PROVIDER_ROLE"] = request.role
         environment["PATH"] = (
@@ -172,7 +151,10 @@ class CliProvider(AgentProvider):
             else:
                 command[0] = str(protected_path)
             if self.before_process_create is not None:
-                self.before_process_create()
+                self.before_process_create(protected_path)
+            popen_options: dict[str, Any] = {}
+            if protected_executable_fd is not None:
+                popen_options["pass_fds"] = (protected_executable_fd,)
             process = subprocess.Popen(
                 command,
                 cwd=request.workspace,
@@ -184,6 +166,7 @@ class CliProvider(AgentProvider):
                 shell=False,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
                 start_new_session=os.name != "nt",
+                **popen_options,
             )
             if process.stdout is None or process.stderr is None:
                 process.kill()
@@ -266,6 +249,8 @@ class CliProvider(AgentProvider):
                     self._active_job = None
                 for handle in retained_executable_handles:
                     _close_windows_handle(handle)
+                if protected_executable_fd is not None:
+                    os.close(protected_executable_fd)
     def cancel(self) -> None:
         if self._active_process and self._active_process.poll() is None:
             self._terminate_tree(self._active_process, self._active_job)
@@ -342,3 +327,42 @@ def _close_windows_handle(handle: int) -> None:
     kernel32.CloseHandle.restype = ctypes.c_int
     if not kernel32.CloseHandle(ctypes.c_void_p(handle)):
         raise OSError(ctypes.get_last_error(), "unable to close retained file handle")
+
+
+def _sealed_executable(content: bytes) -> tuple[int, Path]:
+    if not hasattr(os, "memfd_create") or not Path("/proc/self/fd").is_dir():
+        raise RuntimeError(
+            "secure protected executable launch is unavailable on this platform"
+        )
+    import importlib
+
+    fcntl: Any = importlib.import_module("fcntl")
+    memfd_create: Any = getattr(os, "memfd_create")
+
+    descriptor = memfd_create(
+        "keeper-provider",
+        int(getattr(os, "MFD_CLOEXEC", 1))
+        | int(getattr(os, "MFD_ALLOW_SEALING", 2)),
+    )
+    try:
+        view = memoryview(content)
+        written = 0
+        while written < len(view):
+            written += os.write(descriptor, view[written:])
+        os.fchmod(descriptor, 0o500)
+        os.fsync(descriptor)
+        fcntl.fcntl(
+            descriptor,
+            int(getattr(fcntl, "F_ADD_SEALS", 1033)),
+            int(getattr(fcntl, "F_SEAL_SEAL", 1))
+            | int(getattr(fcntl, "F_SEAL_SHRINK", 2))
+            | int(getattr(fcntl, "F_SEAL_GROW", 4))
+            | int(getattr(fcntl, "F_SEAL_WRITE", 8)),
+        )
+        path = Path(f"/proc/self/fd/{descriptor}")
+        if hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(content).digest():
+            raise PermissionError("sealed provider executable digest mismatch")
+        return descriptor, path
+    except BaseException:
+        os.close(descriptor)
+        raise
