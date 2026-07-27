@@ -19,6 +19,10 @@ PROVIDER_ACCOUNT_RIGHTS = (
     "SeDenyInteractiveLogonRight",
     "SeDenyRemoteInteractiveLogonRight",
 )
+AUTHORITY_SERVICE_PROCESS_RIGHTS = (
+    "SeAssignPrimaryTokenPrivilege",
+    "SeIncreaseQuotaPrivilege",
+)
 
 _NERR_SUCCESS = 0
 _NERR_USER_NOT_FOUND = 2221
@@ -134,6 +138,14 @@ def create_provider_account(
 def grant_provider_account_rights(
     account_name: str = PROVIDER_ACCOUNT_NAME,
 ) -> tuple[str, ...]:
+    return grant_account_rights(account_name, PROVIDER_ACCOUNT_RIGHTS)
+
+
+def grant_account_rights(
+    account_name: str, account_rights: tuple[str, ...]
+) -> tuple[str, ...]:
+    if not account_rights:
+        raise ValueError("account rights cannot be empty")
     _, sid_buffer = _lookup_account_sid(account_name)
     attributes = _LsaObjectAttributes()
     attributes.Length = ctypes.sizeof(attributes)
@@ -145,7 +157,7 @@ def grant_provider_account_rights(
         ctypes.byref(policy),
     )
     _raise_lsa(status, "provider account policy could not be opened")
-    buffers = [ctypes.create_unicode_buffer(value) for value in PROVIDER_ACCOUNT_RIGHTS]
+    buffers = [ctypes.create_unicode_buffer(value) for value in account_rights]
     rights = (_LsaUnicodeString * len(buffers))(
         *(
             _LsaUnicodeString(
@@ -164,7 +176,7 @@ def grant_provider_account_rights(
         _raise_lsa(status, "provider account rights could not be applied")
     finally:
         _advapi32().LsaClose(policy)
-    return PROVIDER_ACCOUNT_RIGHTS
+    return account_rights
 
 
 def protect_provider_password(password: str, destination: Path) -> None:

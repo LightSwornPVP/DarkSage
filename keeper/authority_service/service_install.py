@@ -14,10 +14,12 @@ from typing import Any, Sequence
 
 from keeper.authority_service.client import AuthorityServiceClient
 from keeper.authority_service.provider_identity import (
+    AUTHORITY_SERVICE_PROCESS_RIGHTS,
     PROVIDER_ACCOUNT_NAME,
     PROVIDER_ACCOUNT_RIGHTS,
     create_provider_account,
     generate_provider_password,
+    grant_account_rights,
     grant_provider_account_rights,
     protect_provider_password,
     provider_account_sid,
@@ -189,6 +191,7 @@ class AuthorityServiceInstaller:
                 ],
                 manifest,
             )
+        _ensure_service_process_rights(manifest)
         protected_acl = [
             "icacls",
             str(SERVICE_ROOT),
@@ -430,6 +433,7 @@ def provision_provider_identity() -> dict[str, Any]:
             "KeeperAuthority must be stopped before provider identity migration"
         )
     provider_sid = _ensure_provider_identity(manifest)
+    service_rights = _ensure_service_process_rights(manifest)
     config = SERVICE_ROOT / "config" / "service.json"
     if not config.is_file() or not _recorded_file_matches(manifest, config):
         raise PermissionError(
@@ -510,6 +514,7 @@ def provision_provider_identity() -> dict[str, Any]:
         "provider_account_rights": list(PROVIDER_ACCOUNT_RIGHTS),
         "provider_credential_path": str(PROVIDER_CREDENTIAL_PATH),
         "configuration_schema": 2,
+        "service_process_rights": list(service_rights),
         "permissions": result,
     }
 
@@ -885,6 +890,26 @@ def _ensure_provider_identity(manifest: dict[str, Any]) -> str:
     _persist_manifest(manifest)
     password = "\0" * len(password)
     return actual_sid
+
+
+def _ensure_service_process_rights(
+    manifest: dict[str, Any],
+) -> tuple[str, ...]:
+    if not _service_exists():
+        raise PermissionError(
+            "KeeperAuthority service registration is unavailable"
+        )
+    account_name = rf"NT SERVICE\{SERVICE_NAME}"
+    rights = grant_account_rights(
+        account_name, AUTHORITY_SERVICE_PROCESS_RIGHTS
+    )
+    manifest["service_process_rights"] = {
+        "account_name": account_name,
+        "rights": list(rights),
+        "applied_at": _now(),
+    }
+    _persist_manifest(manifest)
+    return rights
 
 
 def _load_incomplete_manifest() -> dict[str, Any]:
