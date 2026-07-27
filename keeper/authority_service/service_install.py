@@ -436,7 +436,17 @@ def _sid_directory(sid: str) -> str:
 
 
 def _git_head(root: Path) -> str:
-    result = _run(["git", "-C", str(root), "rev-parse", "HEAD"])
+    result = _run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={root.as_posix()}",
+            "-C",
+            str(root),
+            "rev-parse",
+            "HEAD",
+        ]
+    )
     return result.stdout.strip()
 
 
