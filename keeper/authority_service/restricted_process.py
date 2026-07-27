@@ -17,9 +17,8 @@ from typing import Any, Callable, Iterator
 _TOKEN_ALL_ACCESS = 0x000F01FF
 _DISABLE_MAX_PRIVILEGE = 0x1
 _TOKEN_INTEGRITY_LEVEL = 25
-_TOKEN_GROUPS = 2
+_TOKEN_USER = 1
 _SE_GROUP_INTEGRITY = 0x20
-_SE_GROUP_LOGON_ID = 0xC0000000
 _SECURITY_IMPERSONATION = 2
 _TOKEN_PRIMARY = 1
 _CREATE_SUSPENDED = 0x00000004
@@ -90,11 +89,8 @@ class _TokenMandatoryLabel(ctypes.Structure):
     _fields_ = [("Label", _SidAndAttributes)]
 
 
-class _TokenGroups(ctypes.Structure):
-    _fields_ = [
-        ("GroupCount", wintypes.DWORD),
-        ("Groups", _SidAndAttributes * 1),
-    ]
+class _TokenUser(ctypes.Structure):
+    _fields_ = [("User", _SidAndAttributes)]
 
 
 class _JobBasicLimitInformation(ctypes.Structure):
@@ -219,61 +215,55 @@ def impersonate_token(token: int) -> Iterator[None]:
 def create_restricted_primary_token(token: int) -> int:
     restricted_source = wintypes.HANDLE()
     administrators_sid = wintypes.LPVOID()
+    users_sid = wintypes.LPVOID()
     needed = wintypes.DWORD()
     _advapi32().GetTokenInformation(
-        token, _TOKEN_GROUPS, None, 0, ctypes.byref(needed)
+        token, _TOKEN_USER, None, 0, ctypes.byref(needed)
     )
     if not needed.value:
-        raise PermissionError(
-            "provider token group identities are unavailable"
-        )
-    group_buffer = ctypes.create_string_buffer(needed.value)
+        raise PermissionError("provider token user identity is unavailable")
+    user_buffer = ctypes.create_string_buffer(needed.value)
     if not _advapi32().GetTokenInformation(
         token,
-        _TOKEN_GROUPS,
-        group_buffer,
+        _TOKEN_USER,
+        user_buffer,
         needed,
         ctypes.byref(needed),
     ):
         raise PermissionError(
-            f"provider token groups failed: {ctypes.get_last_error()}"
+            f"provider token user identity failed: {ctypes.get_last_error()}"
         )
-    groups = ctypes.cast(
-        group_buffer, ctypes.POINTER(_TokenGroups)
+    token_user = ctypes.cast(
+        user_buffer, ctypes.POINTER(_TokenUser)
     ).contents
-    group_array = ctypes.cast(
-        ctypes.addressof(group_buffer) + _TokenGroups.Groups.offset,
-        ctypes.POINTER(_SidAndAttributes),
-    )
-    logon_sid = next(
-        (
-            group_array[index].Sid
-            for index in range(int(groups.GroupCount))
-            if group_array[index].Attributes & _SE_GROUP_LOGON_ID
-            == _SE_GROUP_LOGON_ID
-        ),
-        None,
-    )
-    if not logon_sid:
-        raise PermissionError("provider token logon SID is unavailable")
+    if not _advapi32().ConvertStringSidToSidW(
+        "S-1-5-32-545", ctypes.byref(users_sid)
+    ):
+        raise PermissionError(
+            f"users SID creation failed: {ctypes.get_last_error()}"
+        )
     if not _advapi32().ConvertStringSidToSidW(
         "S-1-5-32-544", ctypes.byref(administrators_sid)
     ):
+        _kernel32().LocalFree(users_sid)
         raise PermissionError(
             f"administrators SID creation failed: {ctypes.get_last_error()}"
         )
-    disabled_sids = (_SidAndAttributes * 2)(
-        _SidAndAttributes(administrators_sid, 0),
-        _SidAndAttributes(logon_sid, 0),
+    disabled_sids = (_SidAndAttributes * 1)(
+        _SidAndAttributes(administrators_sid, 0)
+    )
+    restricting_sids = (_SidAndAttributes * 2)(
+        _SidAndAttributes(token_user.User.Sid, 0),
+        _SidAndAttributes(users_sid, 0),
     )
     try:
         if not _advapi32().CreateRestrictedToken(
             wintypes.HANDLE(token),
             _DISABLE_MAX_PRIVILEGE,
-            2,
+            1,
             ctypes.byref(disabled_sids),
-            0,
-            None,
+            2,
+            ctypes.byref(restricting_sids),
             0,
             None,
             ctypes.byref(restricted_source),
@@ -306,6 +296,7 @@ def create_restricted_primary_token(token: int) -> int:
         if restricted_source.value:
             _kernel32().CloseHandle(restricted_source)
         _kernel32().LocalFree(administrators_sid)
+        _kernel32().LocalFree(users_sid)
 
 
 def run_restricted_process(
