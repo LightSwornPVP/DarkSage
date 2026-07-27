@@ -39,6 +39,14 @@ match the registered invocation.
 For batch providers, Keeper canonicalizes the standalone script command to the
 registered `cmd.exe` launcher plus script component before comparison.
 
+On Windows, Keeper creates both standard executable and registered launcher/script
+providers suspended. It configures a kill-on-close Job Object first, inherits only
+the explicit standard I/O handles, assigns and confirms the suspended process,
+then resumes the retained primary thread. Descendants remain in the same Job and
+are terminated before executable, script, Job, process, thread, or authority
+protections are released. Systems that reject nested Job assignment or any other
+confinement step fail closed.
+
 The Codex adapter uses non-interactive execution, ephemeral session state,
 workspace-write sandboxing, and an output schema. Its command contract was checked
 against current official documentation; authenticated task execution was not

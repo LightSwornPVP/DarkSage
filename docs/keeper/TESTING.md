@@ -62,6 +62,15 @@ and missing protected references fail closed. Secret-isolation tests confirm the
 authority key is outside provider roots and absent from inherited environment
 state.
 
+Windows suspended-launch regressions delay Job assignment and prove the provider's
+first instruction cannot run, inject configuration/creation/assignment/resume
+failures, check retained-handle cleanup, and exercise immediate cancellation,
+timeouts, standard executables, registered batch launchers, and nested descendants.
+The nested fixture confirms descendant start, parent exit, full Job termination,
+no surviving process, and no post-lifecycle authority-blob access. Authority-key
+tests race independent first-installation processes and interrupt publication to
+prove one valid no-overwrite winner and no partial final key.
+
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and
 writes structured evidence beneath the selected data directory when Tcl/Tk is

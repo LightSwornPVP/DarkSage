@@ -32,11 +32,21 @@ cryptographic random source. On Windows the stored key blob is protected with
 current-user DPAPI and kept under the Keeper data directory's dedicated
 `authority/` folder, outside repositories, worktrees, provider evidence, and
 qualification working directories. On non-Windows systems the key file must have
-mode `0600`; broader permissions fail closed. The plaintext key exists only in the
-trusted Keeper process. On Windows, Keeper also retains a non-inheritable,
-exclusive read handle on the protected blob for each provider-execution window,
-so the launched provider cannot reopen it. A concurrent launch fails closed
-instead of sharing the key file.
+mode `0600`; broader permissions fail closed. Current-user DPAPI protects key
+material at rest from other Windows accounts and offline access according to
+DPAPI's guarantees. DPAPI alone does not isolate the key from arbitrary processes
+running as the same user.
+
+Keeper's same-user provider isolation therefore also depends on process
+confinement. Before any provider instruction can execute, Keeper creates and
+configures a Job Object with kill-on-close and no breakaway allowance, creates
+the exact retained provider process suspended, assigns and confirms the process
+in that Job, and only then resumes its retained primary thread. Only the explicit
+standard-stream handles are inherited. The non-inheritable exclusive authority
+blob handle remains held until the Job has terminated every descendant and all
+process, thread, and Job handles are closed. Assignment, confirmation, or resume
+failure terminates the suspended process or Job without executing provider code.
+If atomic confinement cannot be established, provider execution fails closed.
 
 The key is never placed in configuration, environment variables, command lines,
 stdin, logs, reports, or provider working directories. Provider children receive
@@ -51,6 +61,9 @@ blocks qualification and completion. There is no unkeyed fallback. Automatic key
 rotation is intentionally disabled for the MVP. Rotation requires retaining the
 old DPAPI-protected key for records that must remain verifiable; deleting or
 replacing it makes old records unverifiable and therefore non-retry-safe.
+Initial key publication writes and flushes a unique same-directory temporary
+file, then atomically links it to the final path without overwrite. A concurrent
+winner is loaded and validated; partial or corrupt final files fail closed.
 
 Commit authorization and mutation are separate operating-system and Git
 operations. Keeper revalidates the authorized staged-content digest immediately

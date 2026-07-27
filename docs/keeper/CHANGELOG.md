@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.7
+
+- Create Windows provider processes suspended and assign them to a configured
+  kill-on-close Job Object before resuming the primary thread.
+- Restrict inherited handles to the explicit standard streams and retain the
+  process, primary-thread, Job, executable, script, and authority handles through
+  descendant termination.
+- Publish first-installation authority keys through a flushed same-directory
+  temporary file and atomic no-overwrite hard link, loading a concurrent winner.
+- Add pre-assignment, failure-cleanup, nested-descendant, cancellation,
+  authority-access, and concurrent key-initialization regressions.
+
 ## 0.5.6
 
 - Authenticate qualification and completion authority with installation-local
