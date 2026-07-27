@@ -576,6 +576,7 @@ def repair_permissions() -> dict[str, Any]:
     for command in commands:
         _run_recorded(command, manifest)
     _record_diagnostic_artifacts(manifest, exchange_root)
+    _record_runtime_artifacts(manifest)
     manifest.setdefault("permission_repairs", []).append(
         {
             "repaired_at": _now(),
@@ -802,6 +803,28 @@ def _record_diagnostic_artifacts(
                 _record(manifest, "diagnostic-directory", path)
             elif path.is_file():
                 _record_file(manifest, path)
+
+
+def _record_runtime_artifacts(manifest: dict[str, Any]) -> None:
+    data_root = SERVICE_ROOT / "data"
+    if not data_root.is_dir():
+        return
+    immutable_suffixes = {".bin"}
+    for path in (data_root, *sorted(data_root.rglob("*"))):
+        if _artifact_recorded(manifest, path):
+            continue
+        if path.is_dir():
+            _record(manifest, "protected-runtime-directory", path)
+        elif path.is_file() and path.suffix.casefold() in immutable_suffixes:
+            _record_file(manifest, path)
+        elif path.is_file():
+            manifest["artifacts"].append(
+                {
+                    "kind": "protected-mutable-runtime-file",
+                    "path": str(path.resolve()),
+                    "recorded_at": _now(),
+                }
+            )
 
 
 def _ensure_provider_identity(manifest: dict[str, Any]) -> str:
