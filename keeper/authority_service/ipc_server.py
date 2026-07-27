@@ -17,7 +17,7 @@ from keeper.authority_service.protocol import (
     parse_request,
     success_response,
 )
-from keeper.authority_service.windows_identity import process_sid
+from keeper.authority_service.windows_identity import named_pipe_client_sid
 
 
 _PIPE_ACCESS_DUPLEX = 0x00000003
@@ -142,14 +142,7 @@ class NamedPipeAuthorityServer:
             self._threads.discard(threading.current_thread())
 
     def _authenticated_client_sid(self, pipe: int) -> str:
-        process_id = wintypes.ULONG()
-        if not _kernel32().GetNamedPipeClientProcessId(
-            pipe, ctypes.byref(process_id)
-        ):
-            raise PermissionError(
-                f"authority client process identity unavailable: {ctypes.get_last_error()}"
-            )
-        sid = process_sid(int(process_id.value))
+        sid = named_pipe_client_sid(pipe)
         if sid != self.authorized_client_sid:
             raise PermissionError("authority client identity is unauthorized")
         return sid
@@ -277,11 +270,6 @@ def _kernel32() -> Any:
     kernel32.ConnectNamedPipe.restype = wintypes.BOOL
     kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
     kernel32.DisconnectNamedPipe.restype = wintypes.BOOL
-    kernel32.GetNamedPipeClientProcessId.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(wintypes.ULONG),
-    ]
-    kernel32.GetNamedPipeClientProcessId.restype = wintypes.BOOL
     kernel32.ReadFile.argtypes = [
         wintypes.HANDLE,
         wintypes.LPVOID,

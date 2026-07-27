@@ -337,6 +337,60 @@ def backup(destination: Path) -> Path:
     return destination
 
 
+def upgrade_package(source_root: Path) -> dict[str, Any]:
+    _require_admin()
+    installer = AuthorityServiceInstaller(source_root)
+    manifest = _load_completed_manifest()
+    query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
+    if "RUNNING" in query.stdout or "START_PENDING" in query.stdout:
+        raise PermissionError(
+            "KeeperAuthority must be stopped before package upgrade"
+        )
+    package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
+    if not package.is_file() or not _recorded_file_matches(manifest, package):
+        raise PermissionError(
+            "installed Authority Service package does not match its manifest"
+        )
+    old_digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    backup_path = (
+        SERVICE_ROOT / "backups" / f"keeper-authority-{old_digest}.pyz"
+    )
+    if not backup_path.exists():
+        shutil.copy2(package, backup_path)
+        _record_file(manifest, backup_path)
+    temporary = package.with_suffix(".pyz.upgrade")
+    if temporary.exists():
+        raise PermissionError(
+            "Authority Service upgrade staging file already exists"
+        )
+    try:
+        installer._build_package(temporary)
+        new_digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+        os.replace(temporary, package)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    _record_file(manifest, package)
+    source_commit = _git_head(installer.source_root)
+    manifest.setdefault("upgrades", []).append(
+        {
+            "upgraded_at": _now(),
+            "previous_package_sha256": old_digest,
+            "package_sha256": new_digest,
+            "source_commit": source_commit,
+            "backup_path": str(backup_path),
+        }
+    )
+    manifest["source_commit"] = source_commit
+    _persist_manifest(manifest)
+    return {
+        "package": str(package),
+        "package_sha256": new_digest,
+        "backup": str(backup_path),
+        "source_commit": source_commit,
+    }
+
+
 def uninstall_preserving_history() -> dict[str, Any]:
     _require_admin()
     if not MANIFEST_PATH.exists():
@@ -365,6 +419,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("install")
     commands.add_parser("resume-install")
+    commands.add_parser("upgrade-package")
     commands.add_parser("start")
     commands.add_parser("stop")
     commands.add_parser("restart")
@@ -387,6 +442,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             value = AuthorityServiceInstaller(options.source_root).install(
                 resume=True
             )
+        elif options.command == "upgrade-package":
+            value = upgrade_package(options.source_root)
         elif options.command == "start":
             start()
             value = {"started": True}
@@ -544,6 +601,30 @@ def _load_incomplete_manifest() -> dict[str, Any]:
     ):
         raise PermissionError(
             "Authority Service install is not safely resumable"
+        )
+    return manifest
+
+
+def _load_completed_manifest() -> dict[str, Any]:
+    if not MANIFEST_PATH.is_file():
+        raise PermissionError(
+            "Authority Service manifest is unavailable"
+        )
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError(
+            "Authority Service manifest is invalid"
+        ) from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("service_name") != SERVICE_NAME
+        or not isinstance(manifest.get("installation_completed_at"), str)
+        or not isinstance(manifest.get("artifacts"), list)
+    ):
+        raise PermissionError(
+            "Authority Service installation is not complete"
         )
     return manifest
 

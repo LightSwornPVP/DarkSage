@@ -45,6 +45,37 @@ def process_sid(process_id: int) -> str:
         kernel32.CloseHandle(process)
 
 
+def named_pipe_client_sid(pipe: int) -> str:
+    if os.name != "nt":
+        raise RuntimeError("Windows identity is unavailable")
+    advapi32 = _advapi32()
+    if not advapi32.ImpersonateNamedPipeClient(pipe):
+        raise PermissionError(
+            f"authority client impersonation failed: {ctypes.get_last_error()}"
+        )
+    token = wintypes.HANDLE()
+    try:
+        if not advapi32.OpenThreadToken(
+            _kernel32().GetCurrentThread(),
+            TOKEN_QUERY,
+            True,
+            ctypes.byref(token),
+        ):
+            raise PermissionError(
+                "authority client token cannot be opened: "
+                f"{ctypes.get_last_error()}"
+            )
+        return _token_sid(_handle_value(token))
+    finally:
+        if token.value:
+            _kernel32().CloseHandle(token)
+        if not advapi32.RevertToSelf():
+            raise PermissionError(
+                "authority client impersonation could not be reverted: "
+                f"{ctypes.get_last_error()}"
+            )
+
+
 def process_image(process_id: int) -> Path:
     kernel32 = _kernel32()
     process = kernel32.OpenProcess(
@@ -76,21 +107,28 @@ def _process_sid(process: int) -> str:
             f"Windows process token cannot be opened: {ctypes.get_last_error()}"
         )
     try:
-        needed = wintypes.DWORD()
-        advapi32.GetTokenInformation(token, TOKEN_USER, None, 0, ctypes.byref(needed))
-        if not needed.value:
-            raise PermissionError("Windows process token identity is unavailable")
-        buffer = ctypes.create_string_buffer(needed.value)
-        if not advapi32.GetTokenInformation(
-            token, TOKEN_USER, buffer, needed, ctypes.byref(needed)
-        ):
-            raise PermissionError(
-                f"Windows process identity cannot be read: {ctypes.get_last_error()}"
-            )
-        user = ctypes.cast(buffer, ctypes.POINTER(_TokenUser)).contents
-        return _sid_string(user.User.Sid)
+        return _token_sid(_handle_value(token))
     finally:
         _kernel32().CloseHandle(token)
+
+
+def _token_sid(token: int) -> str:
+    advapi32 = _advapi32()
+    needed = wintypes.DWORD()
+    advapi32.GetTokenInformation(
+        token, TOKEN_USER, None, 0, ctypes.byref(needed)
+    )
+    if not needed.value:
+        raise PermissionError("Windows token identity is unavailable")
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetTokenInformation(
+        token, TOKEN_USER, buffer, needed, ctypes.byref(needed)
+    ):
+        raise PermissionError(
+            f"Windows token identity cannot be read: {ctypes.get_last_error()}"
+        )
+    user = ctypes.cast(buffer, ctypes.POINTER(_TokenUser)).contents
+    return _sid_string(user.User.Sid)
 
 
 def _sid_string(sid: int) -> str:
@@ -109,6 +147,7 @@ def _sid_string(sid: int) -> str:
 def _kernel32() -> Any:
     kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentThread.restype = wintypes.HANDLE
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -133,6 +172,16 @@ def _advapi32() -> Any:
         ctypes.POINTER(wintypes.HANDLE),
     ]
     advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.OpenThreadToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.BOOL,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenThreadToken.restype = wintypes.BOOL
+    advapi32.ImpersonateNamedPipeClient.argtypes = [wintypes.HANDLE]
+    advapi32.ImpersonateNamedPipeClient.restype = wintypes.BOOL
+    advapi32.RevertToSelf.restype = wintypes.BOOL
     advapi32.GetTokenInformation.argtypes = [
         wintypes.HANDLE,
         ctypes.c_int,
