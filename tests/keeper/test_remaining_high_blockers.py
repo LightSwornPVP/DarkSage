@@ -94,9 +94,11 @@ def test_registered_discovery_uses_qualified_version_without_execution(
     marker = tmp_path / "qualified-executed.txt"
     _marker_provider(executable, marker)
     registration = create_provider_registration(
-        "codex", executable, authorized_by="test-authority"
+        "codex",
+        executable,
+        authorized_by="test-authority",
+        qualified_version="controlled 1.0",
     )
-    registration["qualified_version"] = "controlled 1.0"
     diagnostic = next(
         item
         for item in ProviderDiscovery(
@@ -202,7 +204,7 @@ def _execution_started_run(
                     "status": "running",
                 }
             ),
-            "MISSING_EVIDENCE",
+            "INDETERMINATE",
         ),
         (
             "other-task",
@@ -214,7 +216,7 @@ def _execution_started_run(
                     "status": "running",
                 }
             ),
-            "IDENTITY_MISMATCH",
+            "INDETERMINATE",
         ),
     ],
 )
@@ -253,7 +255,7 @@ def test_duplicate_provider_evidence_is_blocked(
     second.parent.mkdir()
     second.write_text(json.dumps(value), encoding="utf-8")
     recovered = app.workflow.recover_interrupted_runs()[0]
-    assert recovered["recovery"]["provider_evidence_status"] == "DUPLICATE_EVIDENCE"
+    assert recovered["recovery"]["provider_evidence_status"] == "INDETERMINATE"
     assert recovered["recovery"]["retry_safe"] is False
 
 

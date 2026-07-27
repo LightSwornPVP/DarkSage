@@ -16,6 +16,7 @@ from keeper.app.storage import KeeperStore
 from keeper.cli import main
 from keeper.providers.base import AgentRequest
 from keeper.providers.codex_cli import CliProvider
+from keeper.providers.adapters import create_provider_registration
 from keeper.recovery import ProcessState, _classify_windows_open_failure
 
 
@@ -339,21 +340,17 @@ def test_standalone_commands_accept_complete_current_registration(
     workflow = tmp_path / ".ai-workflow"
     workflow.mkdir()
     provider_command = [str(executable), "/d", "/c", "exit", "0", "{prompt}"]
+    registration = create_provider_registration(
+        "codex",
+        executable,
+        authorized_by="standalone-test",
+        invocation_shape=provider_command,
+    )
     (workflow / "config.json").write_text(
         json.dumps(
             {
                 "provider_command": provider_command,
-                "provider_registration": {
-                    "id": "standalone-test",
-                    "version": "1",
-                    "executable_sha256": hashlib.sha256(
-                        executable.read_bytes()
-                    ).hexdigest(),
-                    "executable_size": executable.stat().st_size,
-                    "configuration_digest": hashlib.sha256(
-                        json.dumps(provider_command).encode("utf-8")
-                    ).hexdigest(),
-                },
+                "provider_registration": registration,
             }
         ),
         encoding="utf-8",

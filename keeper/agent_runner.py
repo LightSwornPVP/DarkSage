@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 import re
 from pathlib import Path
@@ -24,6 +25,7 @@ class AgentRunner:
         keeper_run_id: str | None = None,
         ownership_sink: Callable[[dict[str, Any]], None] | None = None,
         execution_sink: Callable[[dict[str, Any]], None] | None = None,
+        execution_authority: dict[str, Any] | None = None,
     ) -> None:
         self.provider = provider
         self.runs_directory = runs_directory
@@ -32,6 +34,7 @@ class AgentRunner:
         self.keeper_run_id = keeper_run_id
         self.ownership_sink = ownership_sink
         self.execution_sink = execution_sink
+        self.execution_authority = execution_authority or {}
 
     def run(
         self,
@@ -70,8 +73,48 @@ class AgentRunner:
             stdout_log_path=str(stdout_path),
             stderr_log_path=str(stderr_path),
             retry_count=retry,
+            keeper_run_id=self.keeper_run_id,
+            stage_id=task.active_run_stage,
+            attempt_number=self.execution_authority.get("attempt_number"),
+            retry_parent=self.execution_authority.get("retry_parent"),
         )
         record_path = directory / "run.json"
+        registration = getattr(self.provider, "registration", None)
+        if isinstance(registration, dict):
+            record.stable_registration_digest = hashlib.sha256(
+                json.dumps(
+                    registration, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
+            record.provider_logical_id = str(
+                registration.get("logical_provider_id") or ""
+            )
+            record.executable_path = str(
+                registration.get("canonical_executable_path") or ""
+            )
+            record.executable_sha256 = str(
+                registration.get("executable_sha256") or ""
+            )
+            record.configuration_digest = str(
+                registration.get("configuration_digest") or ""
+            )
+            record.endpoint_identity = str(
+                registration.get("endpoint_identity") or ""
+            )
+            record.authentication_mode = str(
+                registration.get("authentication_mode") or ""
+            )
+            capabilities = registration.get("capability_set")
+            record.capability_set = (
+                dict(capabilities) if isinstance(capabilities, dict) else None
+            )
+            record.provider_policy = str(
+                registration.get("provider_policy") or ""
+            )
+            record.independence_classification = str(
+                registration.get("independence_classification") or ""
+            )
+        record.evidence_path = str(record_path.resolve())
         atomic_write_json(record_path, record.to_dict())
         if self.execution_sink is not None:
             self.execution_sink(
@@ -94,6 +137,8 @@ class AgentRunner:
             atomic_write_json(record_path, record.to_dict())
 
         def process_owned(ownership: dict[str, object]) -> None:
+            record.launch_nonce = str(ownership.get("launch_nonce") or "")
+            record.ownership_token = str(ownership.get("ownership_token") or "")
             record.process_ownership = {
                 **ownership,
                 "keeper_run_id": self.keeper_run_id,

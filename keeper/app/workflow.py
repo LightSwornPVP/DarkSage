@@ -178,7 +178,7 @@ class WorkflowCoordinator:
                 pid = ownership.get("pid")
             if not isinstance(pid, int) and isinstance(authority, dict):
                 pid = authority.get("pid")
-            if not isinstance(pid, int):
+            if not isinstance(pid, int) and execution_attempt is None:
                 pid = _active_provider_pid(record)
             if process_exists is not _ORIGINAL_PROCESS_EXISTS:
                 probe = ProcessProbe(
@@ -274,8 +274,12 @@ class WorkflowCoordinator:
                                 )
                             else:
                                 descendant_state = "root-only"
-                                fresh_provider = _active_provider_record(record)
-                                if execution_attempt is None:
+                                if execution_attempt is not None:
+                                    fresh_resolution = _resolve_execution_evidence(
+                                        self._run(run_id), execution_attempt
+                                    )
+                                    fresh_provider = fresh_resolution.get("record")
+                                else:
                                     fresh_provider = _legacy_active_provider_record(
                                         record
                                     )
@@ -773,6 +777,7 @@ class WorkflowCoordinator:
         observer = _LifecycleObserver(
             self.lifecycle, run_id, cancel, pause, self.notify
         )
+        latest_routing_attempt = self._run(run_id).get("routing_attempts", [])[-1]
         engine = Keeper(
             config,
             AgentRunner(
@@ -784,6 +789,10 @@ class WorkflowCoordinator:
                 execution_sink=lambda event: self._record_provider_execution(
                     run_id, event
                 ),
+                execution_authority={
+                    "attempt_number": latest_routing_attempt.get("attempt_number"),
+                    "retry_parent": latest_routing_attempt.get("retry_of"),
+                },
             ),
             WorkspaceManager(repository, config.workspace_root, state / "ownership"),
             router,
@@ -2081,6 +2090,7 @@ def _routing_decision(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    setattr(provider, "registration", dict(generated_registration))
     registration_digest = hashlib.sha256(
         json.dumps(
             generated_registration, sort_keys=True, separators=(",", ":")
@@ -2431,67 +2441,153 @@ def _resolve_execution_evidence(
             "detail": "durable execution attempt has no provider run id",
         }
     root_value = record.get("evidence_root")
-    if not isinstance(root_value, str):
+    evidence_value = attempt.get("evidence_path")
+    if not isinstance(root_value, str) or not isinstance(evidence_value, str):
         return {
             "status": "MISSING_EVIDENCE",
-            "detail": "run has no provider evidence root",
+            "detail": "protected evidence root or canonical evidence path is missing",
         }
-    root = Path(root_value).resolve()
-    candidates = list(root.glob(".ai-workflow/runs/*/run.json"))
-    matches: list[dict[str, Any]] = []
-    malformed = False
-    inaccessible = False
-    for path in candidates:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            malformed = True
-            continue
-        except OSError:
-            inaccessible = True
-            continue
-        if isinstance(value, dict) and value.get("run_id") == provider_run_id:
-            matches.append(value)
-    if len(matches) > 1:
+    try:
+        root = Path(root_value).resolve(strict=True)
+        declared = Path(evidence_value)
+        path = declared.resolve(strict=True)
+    except FileNotFoundError:
         return {
-            "status": "DUPLICATE_EVIDENCE",
-            "detail": "multiple provider evidence records match the durable attempt",
+            "status": "MISSING_EVIDENCE",
+            "detail": "exact protected provider evidence path does not exist",
         }
-    if not matches:
-        status = (
-            "MALFORMED_EVIDENCE"
-            if malformed
-            else "INACCESSIBLE_EVIDENCE"
-            if inaccessible
-            else "MISSING_EVIDENCE"
-        )
+    except OSError:
         return {
-            "status": status,
-            "detail": "provider evidence could not be uniquely resolved",
+            "status": "INACCESSIBLE_EVIDENCE",
+            "detail": "exact protected provider evidence path is inaccessible",
         }
-    value = matches[0]
+    expected_parent = root / ".ai-workflow" / "runs" / provider_run_id
     if (
-        value.get("task_id") != attempt.get("task_id")
-        or value.get("role") != attempt.get("role")
-        or (
-            attempt.get("stage_id") is not None
-            and value.get("stage_id") not in {None, attempt.get("stage_id")}
-        )
+        not path.is_relative_to(root)
+        or path != expected_parent / "run.json"
+        or str(path) != evidence_value
+        or path.is_symlink()
+        or any(parent.is_symlink() for parent in path.parents if parent != root.parent)
     ):
         return {
             "status": "IDENTITY_MISMATCH",
-            "detail": "provider evidence identity differs from protected execution state",
+            "detail": "protected provider evidence path is noncanonical or escapes its run",
+        }
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {
+            "status": "MALFORMED_EVIDENCE",
+            "detail": "exact protected provider evidence is malformed",
+        }
+    except OSError:
+        return {
+            "status": "INACCESSIBLE_EVIDENCE",
+            "detail": "exact protected provider evidence is inaccessible",
+        }
+    if not isinstance(value, dict):
+        return {
+            "status": "MALFORMED_EVIDENCE",
+            "detail": "exact protected provider evidence is not an object",
+        }
+    registration = attempt.get("stable_registration")
+    if not isinstance(registration, dict):
+        return {
+            "status": "INDETERMINATE",
+            "detail": "durable attempt has no complete stable registration",
+            "record": value,
+        }
+    expected = {
+        "run_id": provider_run_id,
+        "keeper_run_id": record.get("id"),
+        "task_id": attempt.get("task_id"),
+        "stage_id": attempt.get("stage_id"),
+        "role": attempt.get("role"),
+        "attempt_number": attempt.get("attempt_number"),
+        "retry_parent": attempt.get("retry_parent"),
+        "provider_name": attempt.get("provider_name"),
+        "provider_logical_id": registration.get("logical_provider_id"),
+        "provider_instance_id": attempt.get("provider_instance_id"),
+        "stable_registration_digest": attempt.get("stable_registration_digest"),
+        "executable_path": attempt.get("executable"),
+        "executable_sha256": attempt.get("executable_sha256"),
+        "configuration_digest": registration.get("configuration_digest"),
+        "endpoint_identity": registration.get("endpoint_identity"),
+        "authentication_mode": registration.get("authentication_mode"),
+        "capability_set": registration.get("capability_set"),
+        "provider_policy": registration.get("provider_policy"),
+        "independence_classification": registration.get(
+            "independence_classification"
+        ),
+        "evidence_path": evidence_value,
+        "launch_nonce": attempt.get("launch_nonce"),
+        "ownership_token": attempt.get("ownership_token"),
+    }
+    mismatches = [
+        key
+        for key, expected_value in expected.items()
+        if expected_value is None or value.get(key) != expected_value
+    ]
+    if mismatches:
+        return {
+            "status": "IDENTITY_MISMATCH",
+            "detail": (
+                "provider evidence differs from protected execution fields: "
+                + ", ".join(mismatches)
+            ),
+            "record": value,
+        }
+    status_value = value.get("status")
+    if not isinstance(status_value, str):
+        return {
+            "status": "INDETERMINATE",
+            "detail": "provider evidence status is missing or malformed",
+            "record": value,
+        }
+    canonical_status = status_value.upper()
+    nonterminal = {"CREATED", "STARTING", "RUNNING", "EXECUTION_STARTED"}
+    terminal = {
+        "COMPLETED",
+        "FAILED",
+        "REJECTED",
+        "BLOCKED",
+        "CANCELLED",
+        "TERMINATED",
+    }
+    if canonical_status not in nonterminal | terminal:
+        return {
+            "status": "INDETERMINATE",
+            "detail": "provider evidence status is not a supported state",
+            "record": value,
+        }
+    if canonical_status in terminal and not _terminal_evidence_complete(
+        value, canonical_status
+    ):
+        return {
+            "status": "INDETERMINATE",
+            "detail": "terminal provider evidence disposition is incomplete",
             "record": value,
         }
     return {
         "status": (
-            "RESOLVED_ACTIVE"
-            if value.get("status") == "running"
-            else "RESOLVED_TERMINAL"
+            "RESOLVED_ACTIVE" if canonical_status in nonterminal else "RESOLVED_TERMINAL"
         ),
         "detail": "provider evidence resolved against protected execution state",
         "record": value,
     }
+
+
+def _terminal_evidence_complete(value: dict[str, Any], status: str) -> bool:
+    if not isinstance(value.get("end_time"), str) or not value["end_time"]:
+        return False
+    exit_code = value.get("process_exit_code")
+    if not isinstance(exit_code, int):
+        return False
+    if status == "COMPLETED":
+        return exit_code == 0 and value.get("failure_reason") is None
+    return exit_code != 0 and isinstance(value.get("failure_reason"), str) and bool(
+        value["failure_reason"]
+    )
 
 
 def _windows_process_tree(root_process_id: int) -> list[int] | None:

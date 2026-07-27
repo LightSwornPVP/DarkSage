@@ -14,6 +14,23 @@ class RunRecord:
     role: str
     provider_name: str = ""
     provider_instance_id: str = ""
+    provider_logical_id: str | None = None
+    keeper_run_id: str | None = None
+    stage_id: str | None = None
+    attempt_number: int | None = None
+    retry_parent: str | None = None
+    stable_registration_digest: str | None = None
+    executable_path: str | None = None
+    executable_sha256: str | None = None
+    configuration_digest: str | None = None
+    endpoint_identity: str | None = None
+    authentication_mode: str | None = None
+    capability_set: dict[str, Any] | None = None
+    provider_policy: str | None = None
+    independence_classification: str | None = None
+    launch_nonce: str | None = None
+    ownership_token: str | None = None
+    evidence_path: str | None = None
     reasoning_level: str = "medium"
     start_time: str = field(default_factory=now_iso)
     end_time: str | None = None

@@ -9,6 +9,7 @@ from keeper.agent_runner import AgentRunner
 from keeper.config import KeeperConfig
 from keeper.orchestrator import Keeper
 from keeper.providers.codex_cli import CliProvider
+from keeper.providers.adapters import validate_provider_registration
 from keeper.providers.mock import MockProvider
 from keeper.providers.ollama import OllamaProvider
 from keeper.providers.routing import ProviderRouter
@@ -21,13 +22,32 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
     config = KeeperConfig.load(root)
     registration = config.provider_registration or {}
     def command_provider() -> CliProvider:
+        if not config.provider_command:
+            raise PermissionError("provider command is missing")
+        executable = config.provider_command[0]
+        provider_id = str(registration.get("logical_provider_id") or "")
+        valid, detail = validate_provider_registration(
+            provider_id, executable, registration
+        )
+        if not valid:
+            raise PermissionError(f"provider registration is invalid: {detail}")
+        if list(config.provider_command) != registration.get("invocation_shape"):
+            raise PermissionError(
+                "provider command differs from canonical registration invocation"
+            )
         provider = CliProvider(
             config.provider_command,
-            expected_executable_sha256=registration.get("executable_sha256"),
-            expected_executable_size=registration.get("executable_size"),
-            registration_id=registration.get("id"),
-            registration_version=registration.get("version"),
+            expected_executable_sha256=registration.get("launcher_sha256"),
+            expected_executable_size=registration.get("launcher_size"),
+            registration_id=registration.get("trusted_registration_id"),
+            registration_version=registration.get("registration_version"),
             configuration_digest=registration.get("configuration_digest"),
+            expected_script_sha256=registration.get("script_sha256"),
+            expected_script_size=registration.get("script_size"),
+            script_registration_id=registration.get("script_registration_id"),
+            script_registration_version=registration.get(
+                "script_registration_version"
+            ),
         )
         provider.validate()
         return provider

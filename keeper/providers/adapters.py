@@ -13,6 +13,54 @@ from typing import Any
 from keeper.providers.base import AgentRequest, ProcessResult
 from keeper.providers.codex_cli import CliProvider
 
+REGISTRATION_SCHEMA_VERSION = 2
+_SHA256_LENGTH = 64
+_REGISTRATION_FIELDS = {
+    "registration_schema_version",
+    "trusted_registration_id",
+    "registration_version",
+    "logical_provider_id",
+    "provider_name",
+    "provider_type",
+    "canonical_executable_path",
+    "executable_sha256",
+    "executable_size",
+    "executable_registration_id",
+    "executable_registration_version",
+    "launcher_path",
+    "launcher_sha256",
+    "launcher_size",
+    "launcher_registration_id",
+    "launcher_registration_version",
+    "script_path",
+    "script_sha256",
+    "script_size",
+    "script_registration_id",
+    "script_registration_version",
+    "invocation_shape",
+    "working_directory_policy",
+    "allowed_environment",
+    "endpoint_identity",
+    "authentication_mode",
+    "authentication_profile",
+    "capability_set",
+    "provider_policy",
+    "independence_classification",
+    "role_eligibility",
+    "model_or_service_identity",
+    "qualified_version",
+    "qualification_timestamp",
+    "qualification_method",
+    "qualification_result",
+    "qualifying_component_digests",
+    "registration_status",
+    "authorized_by",
+    "authorized_at",
+    "revoked_at",
+    "expires_at",
+    "configuration_digest",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
@@ -295,6 +343,8 @@ def create_provider_registration(
     executable: Path,
     *,
     authorized_by: str,
+    qualified_version: str | None = None,
+    invocation_shape: list[str] | None = None,
 ) -> dict[str, Any]:
     configured = executable.resolve(strict=True)
     capabilities = asdict(ProviderCapabilities())
@@ -305,18 +355,25 @@ def create_provider_registration(
         launcher = Path(os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")).resolve(
             strict=True
         )
+    executable_content = configured.read_bytes()
     launcher_content = launcher.read_bytes()
-    invocation = (
+    invocation = invocation_shape or (
         [str(launcher), "/d", "/c", str(script), "{prompt}"]
         if script is not None
         else [str(launcher), "{prompt}"]
     )
     registration: dict[str, Any] = {
+        "registration_schema_version": REGISTRATION_SCHEMA_VERSION,
         "trusted_registration_id": f"keeper-provider:{provider_id}:v1",
         "registration_version": "1",
         "logical_provider_id": provider_id,
         "provider_name": f"{provider_id}-command",
+        "provider_type": "local-command",
         "canonical_executable_path": str(configured),
+        "executable_sha256": hashlib.sha256(executable_content).hexdigest(),
+        "executable_size": len(executable_content),
+        "executable_registration_id": f"keeper-executable:{provider_id}:v1",
+        "executable_registration_version": "1",
         "launcher_path": str(launcher),
         "launcher_sha256": hashlib.sha256(launcher_content).hexdigest(),
         "launcher_size": len(launcher_content),
@@ -336,16 +393,39 @@ def create_provider_registration(
         "allowed_environment": "keeper-filtered",
         "endpoint_identity": "local-process",
         "authentication_mode": "external-cli-session",
+        "authentication_profile": f"external-session:{provider_id}",
         "capability_set": capabilities,
         "provider_policy": "registered-command",
         "independence_classification": "role-enforced",
+        "role_eligibility": sorted(
+            key for key, enabled in capabilities.items() if enabled is True
+        ),
+        "model_or_service_identity": provider_id,
+        "qualified_version": qualified_version,
+        "qualification_timestamp": (
+            datetime.now(UTC).isoformat() if qualified_version is not None else None
+        ),
+        "qualification_method": (
+            "protected-registered-launch" if qualified_version is not None else "none"
+        ),
+        "qualification_result": (
+            "qualified" if qualified_version is not None else "not-qualified"
+        ),
+        "qualifying_component_digests": {
+            "executable": hashlib.sha256(executable_content).hexdigest(),
+            "launcher": hashlib.sha256(launcher_content).hexdigest(),
+            "script": (
+                hashlib.sha256(script.read_bytes()).hexdigest()
+                if script is not None
+                else None
+            ),
+        },
         "registration_status": "active",
         "authorized_by": authorized_by,
         "authorized_at": datetime.now(UTC).isoformat(),
         "revoked_at": None,
+        "expires_at": None,
     }
-    registration["executable_sha256"] = registration["launcher_sha256"]
-    registration["executable_size"] = registration["launcher_size"]
     registration["configuration_digest"] = _registration_configuration_digest(
         registration
     )
@@ -361,20 +441,15 @@ def _validate_discovery_registration(
         return False, "Executable was not found; configure its full path in Settings."
     if not isinstance(registration, dict):
         return False, "Configured provider has no immutable registration."
-    required = {
-        "trusted_registration_id", "registration_version", "logical_provider_id",
-        "provider_name", "canonical_executable_path", "launcher_path",
-        "launcher_sha256", "launcher_size", "configuration_digest",
-        "authentication_mode", "capability_set", "provider_policy",
-        "independence_classification", "registration_status", "authorized_by",
-        "authorized_at",
-    }
-    if any(key not in registration for key in required):
+    if set(registration) != _REGISTRATION_FIELDS:
         return False, "Provider registration is malformed or incomplete."
+    if not _registration_types_valid(registration):
+        return False, "Provider registration field types or values are invalid."
     if (
         registration.get("logical_provider_id") != provider_id
         or registration.get("registration_status") != "active"
         or registration.get("revoked_at") is not None
+        or _registration_expired(registration)
     ):
         return False, "Provider registration is stale, revoked, or mismatched."
     if registration.get("configuration_digest") != _registration_configuration_digest(
@@ -383,11 +458,23 @@ def _validate_discovery_registration(
         return False, "Provider registration configuration digest is stale."
     try:
         configured = Path(executable).resolve(strict=True)
-        if configured != Path(str(registration["canonical_executable_path"])).resolve(
-            strict=True
+        registered_executable = Path(
+            str(registration["canonical_executable_path"])
+        ).resolve(strict=True)
+        if configured != registered_executable or str(configured) != str(
+            registration["canonical_executable_path"]
         ):
             return False, "Configured provider path differs from registration."
+        executable_content = configured.read_bytes()
+        if (
+            hashlib.sha256(executable_content).hexdigest()
+            != registration["executable_sha256"]
+            or len(executable_content) != registration["executable_size"]
+        ):
+            return False, "Registered provider executable identity changed."
         launcher = Path(str(registration["launcher_path"])).resolve(strict=True)
+        if str(launcher) != str(registration["launcher_path"]):
+            return False, "Registered provider launcher path is not canonical."
         launcher_content = launcher.read_bytes()
         if (
             hashlib.sha256(launcher_content).hexdigest()
@@ -411,23 +498,205 @@ def _validate_discovery_registration(
     return True, "Immutable registration validated; discovery did not execute provider code."
 
 
+def validate_provider_registration(
+    provider_id: str,
+    executable: str,
+    registration: dict[str, Any],
+) -> tuple[bool, str]:
+    """Validate the one canonical provider-registration schema without execution."""
+    return _validate_discovery_registration(provider_id, executable, registration)
+
+
+def canonical_provider_registration_digest(
+    registration: dict[str, Any],
+) -> str:
+    """Return the deterministic digest over every authoritative schema field."""
+    return _registration_configuration_digest(registration)
+
+
 def _registration_configuration_digest(registration: dict[str, Any]) -> str:
+    authority = {
+        key: registration.get(key)
+        for key in sorted(_REGISTRATION_FIELDS - {"configuration_digest"})
+    }
     return hashlib.sha256(
-        json.dumps(
-            {
-                "provider_id": registration.get("logical_provider_id"),
-                "invocation_shape": registration.get("invocation_shape"),
-                "launcher_sha256": registration.get("launcher_sha256"),
-                "script_sha256": registration.get("script_sha256"),
-                "working_directory_policy": registration.get(
-                    "working_directory_policy"
-                ),
-                "allowed_environment": registration.get("allowed_environment"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _registration_types_valid(registration: dict[str, Any]) -> bool:
+    string_fields = {
+        "trusted_registration_id",
+        "registration_version",
+        "logical_provider_id",
+        "provider_name",
+        "provider_type",
+        "canonical_executable_path",
+        "executable_registration_id",
+        "executable_registration_version",
+        "launcher_path",
+        "launcher_registration_id",
+        "launcher_registration_version",
+        "working_directory_policy",
+        "allowed_environment",
+        "endpoint_identity",
+        "authentication_mode",
+        "authentication_profile",
+        "provider_policy",
+        "independence_classification",
+        "model_or_service_identity",
+        "qualification_method",
+        "qualification_result",
+        "registration_status",
+        "authorized_by",
+        "authorized_at",
+        "configuration_digest",
+    }
+    if registration.get("registration_schema_version") != REGISTRATION_SCHEMA_VERSION:
+        return False
+    if any(
+        not isinstance(registration.get(key), str) or not registration[key]
+        for key in string_fields
+    ):
+        return False
+    if registration["provider_type"] != "local-command":
+        return False
+    if registration["endpoint_identity"] != "local-process":
+        return False
+    if registration["authentication_mode"] != "external-cli-session":
+        return False
+    if registration["provider_policy"] != "registered-command":
+        return False
+    if registration["independence_classification"] != "role-enforced":
+        return False
+    if registration["registration_status"] not in {"active", "revoked"}:
+        return False
+    if registration["qualification_result"] not in {"qualified", "not-qualified"}:
+        return False
+    if registration["qualification_method"] not in {
+        "protected-registered-launch",
+        "none",
+    }:
+        return False
+    for key in ("executable_sha256", "launcher_sha256", "configuration_digest"):
+        value = registration.get(key)
+        if (
+            not isinstance(value, str)
+            or len(value) != _SHA256_LENGTH
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            return False
+    if any(
+        not isinstance(registration.get(key), int) or registration[key] < 0
+        for key in ("executable_size", "launcher_size")
+    ):
+        return False
+    capabilities = registration.get("capability_set")
+    if (
+        not isinstance(capabilities, dict)
+        or set(capabilities) != set(asdict(ProviderCapabilities()))
+        or any(type(value) is not bool for value in capabilities.values())
+    ):
+        return False
+    roles = registration.get("role_eligibility")
+    if (
+        not isinstance(roles, list)
+        or any(not isinstance(item, str) or not item for item in roles)
+        or roles != sorted(set(roles))
+    ):
+        return False
+    invocation = registration.get("invocation_shape")
+    if (
+        not isinstance(invocation, list)
+        or not invocation
+        or any(not isinstance(item, str) or not item for item in invocation)
+    ):
+        return False
+    digests = registration.get("qualifying_component_digests")
+    if not isinstance(digests, dict) or set(digests) != {
+        "executable",
+        "launcher",
+        "script",
+    }:
+        return False
+    if (
+        digests.get("executable") != registration.get("executable_sha256")
+        or digests.get("launcher") != registration.get("launcher_sha256")
+        or digests.get("script") != registration.get("script_sha256")
+    ):
+        return False
+    script_path = registration.get("script_path")
+    script_fields = (
+        registration.get("script_sha256"),
+        registration.get("script_size"),
+        registration.get("script_registration_id"),
+        registration.get("script_registration_version"),
+    )
+    if script_path is None:
+        if any(value is not None for value in script_fields):
+            return False
+        if invocation[0] != registration.get("launcher_path"):
+            return False
+    elif (
+        not isinstance(script_path, str)
+        or not script_path
+        or not isinstance(script_fields[0], str)
+        or len(script_fields[0]) != _SHA256_LENGTH
+        or not isinstance(script_fields[1], int)
+        or script_fields[1] < 0
+        or not isinstance(script_fields[2], str)
+        or not script_fields[2]
+        or not isinstance(script_fields[3], str)
+        or not script_fields[3]
+    ):
+        return False
+    elif invocation[:4] != [
+        registration.get("launcher_path"),
+        "/d",
+        "/c",
+        script_path,
+    ]:
+        return False
+    qualified = registration.get("qualification_result") == "qualified"
+    qualification_values = (
+        registration.get("qualified_version"),
+        registration.get("qualification_timestamp"),
+    )
+    if qualified != all(isinstance(value, str) and value for value in qualification_values):
+        return False
+    for key in ("revoked_at", "expires_at"):
+        if registration.get(key) is not None and not isinstance(
+            registration.get(key), str
+        ):
+            return False
+    try:
+        authorized = datetime.fromisoformat(str(registration["authorized_at"]))
+        if authorized.tzinfo is None:
+            return False
+        if registration.get("qualification_timestamp"):
+            qualified_at = datetime.fromisoformat(
+                str(registration["qualification_timestamp"])
+            )
+            if qualified_at.tzinfo is None:
+                return False
+        if registration.get("expires_at"):
+            datetime.fromisoformat(str(registration["expires_at"]))
+    except ValueError:
+        return False
+    return True
+
+
+def _registration_expired(registration: dict[str, Any]) -> bool:
+    expires_at = registration.get("expires_at")
+    if not isinstance(expires_at, str):
+        return False
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    if expiry.tzinfo is None:
+        return True
+    return expiry <= datetime.now(UTC)
 
 
 def _cli_registration_arguments(registration: dict[str, Any]) -> dict[str, Any]:
