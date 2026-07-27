@@ -213,6 +213,8 @@ class AgentRunner:
                     "provider_instance_id": self.provider.instance_id,
                     "finish_time": record.end_time,
                     "result": record.status,
+                    "process_exit_code": record.process_exit_code,
+                    "failure_reason": record.failure_reason,
                     "evidence_path": str(record_path.resolve()),
                 }
             )

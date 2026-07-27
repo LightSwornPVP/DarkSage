@@ -35,6 +35,7 @@ class CliProvider(AgentProvider):
         script_registration_id: str | None = None,
         script_registration_version: str | None = None,
         before_process_create: Callable[[Path], None] | None = None,
+        require_prompt_placeholder: bool = True,
     ) -> None:
         self.command_script: Path | None = None
         if (
@@ -57,6 +58,7 @@ class CliProvider(AgentProvider):
         self.script_registration_id = script_registration_id
         self.script_registration_version = script_registration_version
         self.before_process_create = before_process_create
+        self.require_prompt_placeholder = require_prompt_placeholder
         self.instance_id = uuid.uuid4().hex
         self._active_process: subprocess.Popen[str] | None = None
         self._active_job: int | None = None
@@ -119,7 +121,7 @@ class CliProvider(AgentProvider):
                 raise PermissionError(
                     "provider batch script changed after registration"
                 )
-        if "{prompt}" not in self.command_template:
+        if self.require_prompt_placeholder and "{prompt}" not in self.command_template:
             raise RuntimeError("provider_command must include the {prompt} argument placeholder")
         return resolved, content
 

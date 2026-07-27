@@ -27,11 +27,34 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
         executable = config.provider_command[0]
         provider_id = str(registration.get("logical_provider_id") or "")
         valid, detail = validate_provider_registration(
-            provider_id, executable, registration
+            provider_id,
+            executable,
+            registration,
+            (
+                {
+                    str(config.provider_qualification_evidence["id"]):
+                    config.provider_qualification_evidence
+                }
+                if isinstance(config.provider_qualification_evidence, dict)
+                and isinstance(config.provider_qualification_evidence.get("id"), str)
+                else {}
+            ),
         )
         if not valid:
             raise PermissionError(f"provider registration is invalid: {detail}")
-        if list(config.provider_command) != registration.get("invocation_shape"):
+        if registration.get("registration_lifecycle") != "QUALIFIED":
+            raise PermissionError("standalone command provider is not qualified")
+        expected_invocation = registration.get("invocation_shape")
+        actual_invocation = list(config.provider_command)
+        if registration.get("script_path") is not None:
+            actual_invocation = [
+                str(registration.get("launcher_path")),
+                "/d",
+                "/c",
+                str(registration.get("script_path")),
+                *actual_invocation[1:],
+            ]
+        if actual_invocation != expected_invocation:
             raise PermissionError(
                 "provider command differs from canonical registration invocation"
             )

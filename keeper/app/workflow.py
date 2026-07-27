@@ -144,6 +144,9 @@ class WorkflowCoordinator:
                 record, execution_attempt
             )
             provider_record = evidence_resolution.get("record")
+            completion_resolution = self._resolve_protected_completion(
+                record, execution_attempt, provider_record
+            )
             if execution_attempt is None:
                 provider_record = _legacy_active_provider_record(record)
             ownership = (
@@ -202,6 +205,7 @@ class WorkflowCoordinator:
             safe_terminal_finalization = bool(
                 execution_attempt
                 and evidence_resolution.get("status") == "RESOLVED_TERMINAL"
+                and completion_resolution.get("status") == "VERIFIED"
                 and isinstance(pid, int)
                 and probe.state is ProcessState.CONFIRMED_ABSENT
                 and isinstance(authority, dict)
@@ -406,6 +410,13 @@ class WorkflowCoordinator:
                         "provider_evidence_detail": evidence_resolution.get(
                             "detail"
                         ),
+                        "protected_completion_status": completion_resolution.get(
+                            "status"
+                        ),
+                        "protected_completion_detail": completion_resolution.get(
+                            "detail"
+                        ),
+                        "protected_completion": completion_resolution.get("record"),
                         "ownership_binding_verified": binding_verified,
                         "authoritative_ownership": authority,
                         "authoritative_ownership_record_count": len(
@@ -996,6 +1007,12 @@ class WorkflowCoordinator:
         paths["__registrations__"] = dict(
             self.store.get("settings", "provider_registrations") or {}
         )
+        paths["__qualification_evidence__"] = {
+            str(item["id"]): item
+            for item in self.store.list("artifacts")
+            if item.get("kind") == "provider_qualification"
+            and isinstance(item.get("id"), str)
+        }
         return paths
 
     def _finalize_report(
@@ -1502,8 +1519,54 @@ class WorkflowCoordinator:
             current = dict(executions[matches[0]])
             if current.get("status") != "EXECUTION_STARTED":
                 raise PermissionError("provider execution was already finalized")
+            evidence_path = Path(str(event.get("evidence_path", ""))).resolve(
+                strict=True
+            )
+            evidence_content = evidence_path.read_bytes()
+            completion: dict[str, Any] = {
+                "id": f"provider-completion:{run_id}:{provider_run_id}",
+                "kind": "provider_completion",
+                "keeper_run_id": run_id,
+                "task_id": current.get("task_id"),
+                "stage_id": current.get("stage_id"),
+                "role": current.get("role"),
+                "attempt_number": current.get("attempt_number"),
+                "provider_run_id": provider_run_id,
+                "provider_instance_id": current.get("provider_instance_id"),
+                "stable_registration_digest": current.get(
+                    "stable_registration_digest"
+                ),
+                "executable": current.get("executable"),
+                "executable_sha256": current.get("executable_sha256"),
+                "configuration_digest": (
+                    current.get("stable_registration", {}).get(
+                        "configuration_digest"
+                    )
+                    if isinstance(current.get("stable_registration"), dict)
+                    else None
+                ),
+                "start_time": current.get("start_time"),
+                "end_time": event.get("finish_time"),
+                "exit_status": event.get("process_exit_code"),
+                "normalized_result": event.get("result"),
+                "provider_evidence_digest": hashlib.sha256(
+                    evidence_content
+                ).hexdigest(),
+                "terminal_disposition": str(
+                    event.get("result", "failed")
+                ).upper(),
+                "completion_event_id": uuid.uuid4().hex,
+                "trusted_writer": "keeper-agent-runner",
+                "transaction_recorded_at": _now(),
+            }
+            completion["integrity_digest"] = _protected_record_digest(completion)
+            self.store.insert_immutable(
+                "artifacts", str(completion["id"]), completion
+            )
             current.update(event)
             current["status"] = str(event.get("result", "failed")).upper()
+            current["completion_record_id"] = completion["id"]
+            current["completion_integrity_digest"] = completion["integrity_digest"]
             executions[matches[0]] = current
         else:
             raise PermissionError("unknown provider execution lifecycle event")
@@ -1564,6 +1627,96 @@ class WorkflowCoordinator:
             and item.get("keeper_run_id") == keeper_run_id
             and item.get("provider_run_id") == provider_run_id
         ]
+
+    def _resolve_protected_completion(
+        self,
+        run: dict[str, Any],
+        attempt: dict[str, Any] | None,
+        evidence: object,
+    ) -> dict[str, Any]:
+        if not isinstance(attempt, dict):
+            return {"status": "NOT_REQUIRED", "detail": ""}
+        matches = [
+            item
+            for item in self.store.list("artifacts")
+            if item.get("kind") == "provider_completion"
+            and item.get("keeper_run_id") == run.get("id")
+            and item.get("provider_run_id") == attempt.get("provider_run_id")
+        ]
+        if len(matches) != 1:
+            return {
+                "status": "MISSING" if not matches else "INDETERMINATE",
+                "detail": "protected completion record is missing or duplicated",
+            }
+        completion = matches[0]
+        expected = {
+            "keeper_run_id": run.get("id"),
+            "task_id": attempt.get("task_id"),
+            "stage_id": attempt.get("stage_id"),
+            "role": attempt.get("role"),
+            "attempt_number": attempt.get("attempt_number"),
+            "provider_run_id": attempt.get("provider_run_id"),
+            "provider_instance_id": attempt.get("provider_instance_id"),
+            "stable_registration_digest": attempt.get(
+                "stable_registration_digest"
+            ),
+            "executable": attempt.get("executable"),
+            "executable_sha256": attempt.get("executable_sha256"),
+            "configuration_digest": (
+                attempt.get("stable_registration", {}).get(
+                    "configuration_digest"
+                )
+                if isinstance(attempt.get("stable_registration"), dict)
+                else None
+            ),
+        }
+        if any(
+            value is None or completion.get(key) != value
+            for key, value in expected.items()
+        ):
+            return {
+                "status": "IDENTITY_MISMATCH",
+                "detail": "protected completion identity differs from attempt",
+                "record": completion,
+            }
+        if completion.get("integrity_digest") != _protected_record_digest(
+            completion
+        ):
+            return {
+                "status": "INTEGRITY_MISMATCH",
+                "detail": "protected completion integrity digest is invalid",
+                "record": completion,
+            }
+        if not isinstance(evidence, dict):
+            return {
+                "status": "INDETERMINATE",
+                "detail": "provider evidence is unavailable for completion reconciliation",
+                "record": completion,
+            }
+        try:
+            content = Path(str(attempt["evidence_path"])).read_bytes()
+        except OSError:
+            return {
+                "status": "INDETERMINATE",
+                "detail": "provider evidence digest cannot be reconciled",
+                "record": completion,
+            }
+        if (
+            completion.get("provider_evidence_digest")
+            != hashlib.sha256(content).hexdigest()
+            or completion.get("terminal_disposition")
+            != str(evidence.get("status", "")).upper()
+        ):
+            return {
+                "status": "INTEGRITY_MISMATCH",
+                "detail": "provider evidence differs from protected completion",
+                "record": completion,
+            }
+        return {
+            "status": "VERIFIED",
+            "detail": "protected completion record verified",
+            "record": completion,
+        }
 
     @staticmethod
     def _add_recovery(record: dict[str, Any]) -> None:
@@ -1821,10 +1974,11 @@ def _select_routes(
             raise PermissionError("mock routing is restricted to explicit demonstrations")
         return _mock_routes(str(stored.get("mock_scenario", "repair")))
     registrations = configured_paths.get("__registrations__", {})
+    qualification_evidence = configured_paths.get("__qualification_evidence__", {})
     paths = {
         str(key): str(value)
         for key, value in configured_paths.items()
-        if key != "__registrations__"
+        if key not in {"__registrations__", "__qualification_evidence__"}
     }
     diagnostics = ProviderDiscovery(
         paths,
@@ -1837,8 +1991,22 @@ def _select_routes(
             if isinstance(registrations, dict)
             else {}
         ),
+        (
+            {
+                str(key): dict(value)
+                for key, value in qualification_evidence.items()
+                if isinstance(value, dict)
+            }
+            if isinstance(qualification_evidence, dict)
+            else {}
+        ),
     ).discover()
-    real_diagnostics = [item for item in diagnostics if item.provider_id != "mock"]
+    real_diagnostics = [
+        item
+        for item in diagnostics
+        if item.provider_id != "mock"
+        and item.discovery_state == "qualified"
+    ]
     if policy == "local-only":
         author_pool = [
             item for item in real_diagnostics if item.capabilities.local_only
@@ -2074,7 +2242,12 @@ def _routing_decision(
         "endpoint_identity": endpoint_identity,
         "capability_set": capabilities,
         "selected_capability": capability,
-        "independence_classification": independence,
+        "independence_classification": (
+            "independent-capable"
+            if role in {"reviewer", "post_repair_reviewer"}
+            else "authoring-only"
+        ),
+        "role_eligibility": [role],
         "provider_policy": policy,
         "authentication_mode": authentication_mode,
         "registration_version": 1,
@@ -2255,6 +2428,11 @@ def _validate_routing_decisions(
     if set(by_role) != required_roles or len(decisions) != len(required_roles):
         raise PermissionError("routing decisions are incomplete or duplicated")
     for role, item in by_role.items():
+        if policy != "mock" and (
+            str(item.get("provider_id", "")).startswith("mock")
+            or str(item.get("provider", "")).startswith("mock")
+        ):
+            raise PermissionError("retry cannot downgrade routing to mock")
         registration = item.get("stable_registration")
         registration_digest = item.get("stable_registration_digest")
         registration_required = (
@@ -2301,13 +2479,28 @@ def _validate_routing_decisions(
             or item.get("provider") != registration.get("provider_name")
             or registration.get("registration_status", "active") != "active"
             or registration.get("revoked_at") is not None
+            or (
+                policy != "mock"
+                and (
+                    role not in registration.get("role_eligibility", [])
+                    or not isinstance(registration.get("capability_set"), dict)
+                    or registration["capability_set"].get(
+                        "author"
+                        if role == "builder"
+                        else "repairer"
+                        if role == "repairer"
+                        else "reviewer"
+                    )
+                    is not True
+                    or (
+                        role in {"reviewer", "post_repair_reviewer"}
+                        and registration.get("independence_classification")
+                        != "independent-capable"
+                    )
+                )
+            )
         ):
             raise PermissionError("routing decision identity is malformed")
-        if policy != "mock" and (
-            str(item.get("provider_id", "")).startswith("mock")
-            or str(item.get("provider", "")).startswith("mock")
-        ):
-            raise PermissionError("retry cannot downgrade routing to mock")
     if (
         by_role["reviewer"]["provider_id"]
         == by_role["builder"]["provider_id"]
@@ -2588,6 +2781,15 @@ def _terminal_evidence_complete(value: dict[str, Any], status: str) -> bool:
     return exit_code != 0 and isinstance(value.get("failure_reason"), str) and bool(
         value["failure_reason"]
     )
+
+
+def _protected_record_digest(value: dict[str, Any]) -> str:
+    protected = {
+        key: item for key, item in value.items() if key != "integrity_digest"
+    }
+    return hashlib.sha256(
+        json.dumps(protected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _windows_process_tree(root_process_id: int) -> list[int] | None:

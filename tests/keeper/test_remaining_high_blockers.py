@@ -83,11 +83,13 @@ def test_discovery_registration_mismatch_fails_without_execution(
         if item.provider_id == "codex"
     )
     assert not diagnostic.available
-    assert diagnostic.discovery_state == "blocked"
+    assert diagnostic.discovery_state == (
+        "revoked" if mutation == "revoked" else "blocked"
+    )
     assert not marker.exists()
 
 
-def test_registered_discovery_uses_qualified_version_without_execution(
+def test_registration_remains_unqualified_without_execution(
     tmp_path: Path,
 ) -> None:
     executable = tmp_path / "provider.cmd"
@@ -97,7 +99,6 @@ def test_registered_discovery_uses_qualified_version_without_execution(
         "codex",
         executable,
         authorized_by="test-authority",
-        qualified_version="controlled 1.0",
     )
     diagnostic = next(
         item
@@ -107,8 +108,8 @@ def test_registered_discovery_uses_qualified_version_without_execution(
         if item.provider_id == "codex"
     )
     assert diagnostic.available
-    assert diagnostic.version == "controlled 1.0"
-    assert diagnostic.discovery_state == "qualified"
+    assert diagnostic.version is None
+    assert diagnostic.discovery_state == "registered-unqualified"
     assert not marker.exists()
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -8,13 +9,15 @@ from typing import Any
 
 import pytest
 
-from keeper.app.workflow import _resolve_execution_evidence
+from keeper.app.workflow import _protected_record_digest, _resolve_execution_evidence
 from keeper.app.lifecycle import RunStage
 from keeper.app.service import KeeperApplication
 from keeper.providers.adapters import (
     ProviderDiscovery,
+    apply_protected_qualification,
     canonical_provider_registration_digest,
     create_provider_registration,
+    qualification_evidence_digest,
 )
 
 
@@ -179,9 +182,14 @@ def test_exact_complete_terminal_evidence_resolves(tmp_path: Path) -> None:
     assert _resolve_execution_evidence(record, attempt)["status"] == "RESOLVED_TERMINAL"
 
 
-def test_exact_terminal_evidence_and_absent_owned_process_finalize_safely(
+@pytest.mark.parametrize(
+    "completion_case",
+    ["missing", "valid", "forged-digest", "wrong-instance", "wrong-attempt"],
+)
+def test_terminal_recovery_requires_protected_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    completion_case: str,
 ) -> None:
     app = KeeperApplication(tmp_path / "terminal-recovery")
     run_id = "keeper-run"
@@ -226,13 +234,66 @@ def test_exact_terminal_evidence_and_absent_owned_process_finalize_safely(
     )
     app.store.upsert("runs", run_id, stored)
     app.store.insert_immutable("artifacts", ownership["id"], ownership)
+    if completion_case != "missing":
+        completion: dict[str, Any] = {
+            "id": f"provider-completion:{run_id}:provider-run",
+            "kind": "provider_completion",
+            "keeper_run_id": run_id,
+            "task_id": attempt["task_id"],
+            "stage_id": attempt["stage_id"],
+            "role": attempt["role"],
+            "attempt_number": attempt["attempt_number"],
+            "provider_run_id": attempt["provider_run_id"],
+            "provider_instance_id": attempt["provider_instance_id"],
+            "stable_registration_digest": attempt["stable_registration_digest"],
+            "executable": attempt["executable"],
+            "executable_sha256": attempt["executable_sha256"],
+            "configuration_digest": attempt["stable_registration"][
+                "configuration_digest"
+            ],
+            "start_time": "2026-07-26T00:00:00+00:00",
+            "end_time": evidence["end_time"],
+            "exit_status": 0,
+            "normalized_result": "completed",
+            "provider_evidence_digest": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "terminal_disposition": "COMPLETED",
+            "completion_event_id": "completion-event",
+            "trusted_writer": "keeper-agent-runner",
+            "transaction_recorded_at": "2026-07-26T00:01:01+00:00",
+        }
+        completion["integrity_digest"] = _protected_record_digest(completion)
+        if completion_case == "forged-digest":
+            completion["integrity_digest"] = "f" * 64
+        elif completion_case == "wrong-instance":
+            completion["provider_instance_id"] = "other-instance"
+            completion["integrity_digest"] = _protected_record_digest(completion)
+        elif completion_case == "wrong-attempt":
+            completion["attempt_number"] = 999
+            completion["integrity_digest"] = _protected_record_digest(completion)
+        app.store.insert_immutable(
+            "artifacts", str(completion["id"]), completion
+        )
     monkeypatch.setattr("keeper.app.workflow.process_exists", lambda pid: False)
 
     recovered = app.workflow.recover_interrupted_runs()[0]
 
     assert recovered["recovery"]["provider_evidence_status"] == "RESOLVED_TERMINAL"
-    assert recovered["recovery"]["retry_safe"] is True
-    assert recovered["provider_execution_attempts"][0]["status"] == "RECOVERED_TERMINAL"
+    verified = completion_case == "valid"
+    assert recovered["recovery"]["retry_safe"] is verified
+    assert recovered["recovery"]["protected_completion_status"] == (
+        "VERIFIED"
+        if verified
+        else "MISSING"
+        if completion_case == "missing"
+        else "INTEGRITY_MISMATCH"
+        if completion_case == "forged-digest"
+        else "IDENTITY_MISMATCH"
+    )
+    assert recovered["provider_execution_attempts"][0]["status"] == (
+        "RECOVERED_TERMINAL"
+        if verified
+        else "EXECUTION_STARTED"
+    )
 
 
 def test_missing_exact_path_never_falls_back_to_wrong_instance(
@@ -264,15 +325,44 @@ def test_protected_evidence_path_must_be_canonical(tmp_path: Path) -> None:
     assert _resolve_execution_evidence(record, attempt)["status"] == "IDENTITY_MISMATCH"
 
 
-def _qualified_registration(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+def _qualified_registration(
+    tmp_path: Path,
+) -> tuple[Path, dict[str, Any], dict[str, dict[str, Any]]]:
     executable = tmp_path / "provider.exe"
     executable.write_bytes(b"registered provider")
-    return executable, create_provider_registration(
+    registration = create_provider_registration(
         "codex",
         executable,
         authorized_by="test-authority",
-        qualified_version="1.2.3",
     )
+    evidence: dict[str, Any] = {
+        "id": "qualification:test",
+        "kind": "provider_qualification",
+        "registration_id": registration["trusted_registration_id"],
+        "registration_version": registration["registration_version"],
+        "provider_id": "codex",
+        "provider_instance_id": "qualification-instance",
+        "provider_run_id": "qualification-run",
+        "executable_sha256": registration["executable_sha256"],
+        "launcher_sha256": registration["launcher_sha256"],
+        "script_sha256": registration["script_sha256"],
+        "qualification_command": [str(executable), "--version"],
+        "command_digest": hashlib.sha256(
+            json.dumps([str(executable), "--version"]).encode("utf-8")
+        ).hexdigest(),
+        "started_at": "2026-07-26T00:00:00+00:00",
+        "finished_at": "2026-07-26T00:00:01+00:00",
+        "exit_status": 0,
+        "raw_version_output": "1.2.3",
+        "normalized_version": "1.2.3",
+        "qualification_method": "protected-registered-launch",
+        "qualification_result": "qualified",
+        "authorized_by": "test-authority",
+        "ownership": {"launch_nonce": "qualification"},
+    }
+    evidence["evidence_digest"] = qualification_evidence_digest(evidence)
+    qualified = apply_protected_qualification(registration, evidence)
+    return executable, qualified, {str(evidence["id"]): evidence}
 
 
 @pytest.mark.parametrize(
@@ -304,11 +394,11 @@ def test_any_authoritative_registration_mutation_blocks_discovery(
     field: str,
     value: object,
 ) -> None:
-    executable, registration = _qualified_registration(tmp_path)
+    executable, registration, evidence = _qualified_registration(tmp_path)
     registration[field] = value
 
     diagnostic = ProviderDiscovery(
-        {"codex": str(executable)}, {"codex": registration}
+        {"codex": str(executable)}, {"codex": registration}, evidence
     ).discover()[0]
 
     assert diagnostic.available is False
@@ -318,7 +408,7 @@ def test_any_authoritative_registration_mutation_blocks_discovery(
 def test_registration_rejects_unknown_missing_and_wrong_type_fields(
     tmp_path: Path,
 ) -> None:
-    executable, original = _qualified_registration(tmp_path)
+    executable, original, evidence = _qualified_registration(tmp_path)
     variants = []
     unknown = copy.deepcopy(original)
     unknown["unsigned_authority"] = "fabricated"
@@ -335,13 +425,13 @@ def test_registration_rejects_unknown_missing_and_wrong_type_fields(
 
     for registration in variants:
         diagnostic = ProviderDiscovery(
-            {"codex": str(executable)}, {"codex": registration}
+            {"codex": str(executable)}, {"codex": registration}, evidence
         ).discover()[0]
         assert diagnostic.available is False
 
 
 def test_every_canonical_registration_field_is_digest_bound(tmp_path: Path) -> None:
-    executable, original = _qualified_registration(tmp_path)
+    executable, original, evidence = _qualified_registration(tmp_path)
     for field, original_value in original.items():
         if field == "configuration_digest":
             continue
@@ -362,13 +452,13 @@ def test_every_canonical_registration_field_is_digest_bound(tmp_path: Path) -> N
             raise AssertionError(f"unhandled registration field: {field}")
         registration[field] = changed
         diagnostic = ProviderDiscovery(
-            {"codex": str(executable)}, {"codex": registration}
+            {"codex": str(executable)}, {"codex": registration}, evidence
         ).discover()[0]
         assert diagnostic.available is False, field
 
 
 def test_audit_registration_metadata_fabrication_is_rejected(tmp_path: Path) -> None:
-    executable, registration = _qualified_registration(tmp_path)
+    executable, registration, evidence = _qualified_registration(tmp_path)
     registration.update(
         {
             "endpoint_identity": "fabricated-endpoint",
@@ -381,7 +471,7 @@ def test_audit_registration_metadata_fabrication_is_rejected(tmp_path: Path) -> 
     )
 
     diagnostic = ProviderDiscovery(
-        {"codex": str(executable)}, {"codex": registration}
+        {"codex": str(executable)}, {"codex": registration}, evidence
     ).discover()[0]
 
     assert diagnostic.available is False
@@ -389,7 +479,7 @@ def test_audit_registration_metadata_fabrication_is_rejected(tmp_path: Path) -> 
 
 
 def test_registration_rejects_revoked_and_expired_authority(tmp_path: Path) -> None:
-    executable, original = _qualified_registration(tmp_path)
+    executable, original, evidence = _qualified_registration(tmp_path)
     revoked = copy.deepcopy(original)
     revoked["registration_status"] = "revoked"
     revoked["revoked_at"] = datetime.now(UTC).isoformat()
@@ -400,7 +490,7 @@ def test_registration_rejects_revoked_and_expired_authority(tmp_path: Path) -> N
 
     for registration in (revoked, expired):
         diagnostic = ProviderDiscovery(
-            {"codex": str(executable)}, {"codex": registration}
+            {"codex": str(executable)}, {"codex": registration}, evidence
         ).discover()[0]
         assert diagnostic.available is False
 
@@ -408,7 +498,7 @@ def test_registration_rejects_revoked_and_expired_authority(tmp_path: Path) -> N
 def test_canonical_registration_serialization_is_stable_and_qualified(
     tmp_path: Path,
 ) -> None:
-    executable, registration = _qualified_registration(tmp_path)
+    executable, registration, evidence = _qualified_registration(tmp_path)
     reordered = dict(reversed(list(registration.items())))
     reordered["capability_set"] = dict(
         reversed(list(registration["capability_set"].items()))
@@ -418,7 +508,7 @@ def test_canonical_registration_serialization_is_stable_and_qualified(
         canonical_provider_registration_digest(reordered)
     )
     diagnostic = ProviderDiscovery(
-        {"codex": str(executable)}, {"codex": reordered}
+        {"codex": str(executable)}, {"codex": reordered}, evidence
     ).discover()[0]
     assert diagnostic.available is True
     assert diagnostic.discovery_state == "qualified"

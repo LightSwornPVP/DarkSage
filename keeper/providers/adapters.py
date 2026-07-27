@@ -52,6 +52,9 @@ _REGISTRATION_FIELDS = {
     "qualification_timestamp",
     "qualification_method",
     "qualification_result",
+    "registration_lifecycle",
+    "qualification_evidence_id",
+    "qualification_evidence_digest",
     "qualifying_component_digests",
     "registration_status",
     "authorized_by",
@@ -86,6 +89,9 @@ class ProviderDiagnostic:
     detail: str = ""
     registration: dict[str, Any] | None = None
     discovery_state: str = "unavailable"
+    role_eligibility: tuple[str, ...] = ()
+    independence_classification: str = ""
+    provider_policy: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -195,9 +201,11 @@ class ProviderDiscovery:
         self,
         configured_paths: dict[str, str] | None = None,
         registrations: dict[str, dict[str, Any]] | None = None,
+        qualification_evidence: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.configured_paths = configured_paths or {}
         self.registrations = registrations or {}
+        self.qualification_evidence = qualification_evidence or {}
 
     def discover(self) -> list[ProviderDiagnostic]:
         return [
@@ -242,8 +250,33 @@ class ProviderDiscovery:
             )
         registration = self.registrations.get(identifier)
         valid, detail = _validate_discovery_registration(
-            identifier, executable, registration
+            identifier, executable, registration, self.qualification_evidence
         )
+        capabilities = (
+            ProviderCapabilities(**dict(registration["capability_set"]))
+            if valid and registration
+            else ProviderCapabilities(
+                author=False,
+                reviewer=False,
+                repairer=False,
+                structured_output=False,
+                streaming=False,
+                cancellation=False,
+                usage_reporting=False,
+                local_only=False,
+            )
+        )
+        lifecycle = "BLOCKED"
+        if isinstance(registration, dict):
+            if (
+                registration.get("registration_status") == "revoked"
+                or registration.get("revoked_at") is not None
+            ):
+                lifecycle = "REVOKED"
+            elif _registration_expired(registration):
+                lifecycle = "EXPIRED"
+            elif valid:
+                lifecycle = str(registration.get("registration_lifecycle"))
         return ProviderDiagnostic(
             identifier,
             display_name,
@@ -256,11 +289,21 @@ class ProviderDiscovery:
                 else None
             ),
             verification if valid else "blocked",
-            ProviderCapabilities(),
+            capabilities,
             detail,
             dict(registration) if valid and registration else None,
-            "qualified" if valid and registration and registration.get("qualified_version")
-            else "registered" if valid else "blocked" if executable else "unavailable",
+            lifecycle.casefold().replace("_", "-")
+            if registration is not None
+            else "blocked" if executable else "unavailable",
+            tuple(registration.get("role_eligibility", ()))
+            if valid and registration
+            else (),
+            str(registration.get("independence_classification", ""))
+            if valid and registration
+            else "",
+            str(registration.get("provider_policy", ""))
+            if valid and registration
+            else "",
         )
 
     def _ollama(self) -> ProviderDiagnostic:
@@ -306,7 +349,20 @@ def route_provider(
         provider
         for provider in available
         if provider.provider_id not in request.previous_provider_ids
-        and _supports_role(provider.capabilities, request.role)
+        and (
+            provider.registration is None
+            or provider.discovery_state == "qualified"
+        )
+        and _supports_role(provider, request.role)
+        and (
+            request.role not in {"reviewer", "post_repair_reviewer"}
+            or provider.registration is None
+            or provider.independence_classification == "independent-capable"
+        )
+        and not (
+            provider.provider_id == "mock"
+            and request.role in {"reviewer", "post_repair_reviewer"}
+        )
     ]
     if request.role in {"reviewer", "post_repair_reviewer"} and not candidates:
         raise RuntimeError("no independent reviewer is available")
@@ -328,7 +384,10 @@ def route_provider(
     return RoutingDecision(chosen.provider_id, reasons)
 
 
-def _supports_role(capabilities: ProviderCapabilities, role: str) -> bool:
+def _supports_role(provider: ProviderDiagnostic, role: str) -> bool:
+    if provider.registration is not None and role not in provider.role_eligibility:
+        return False
+    capabilities = provider.capabilities
     if role == "builder":
         return capabilities.author
     if role in {"reviewer", "post_repair_reviewer"}:
@@ -343,11 +402,19 @@ def create_provider_registration(
     executable: Path,
     *,
     authorized_by: str,
-    qualified_version: str | None = None,
     invocation_shape: list[str] | None = None,
+    capabilities: ProviderCapabilities | None = None,
+    role_eligibility: list[str] | None = None,
+    independence_classification: str = "independent-capable",
 ) -> dict[str, Any]:
     configured = executable.resolve(strict=True)
-    capabilities = asdict(ProviderCapabilities())
+    capability_values = asdict(capabilities or ProviderCapabilities())
+    roles = role_eligibility if role_eligibility is not None else [
+        "builder",
+        "post_repair_reviewer",
+        "repairer",
+        "reviewer",
+    ]
     launcher = configured
     script: Path | None = None
     if configured.suffix.casefold() in {".cmd", ".bat"}:
@@ -394,23 +461,18 @@ def create_provider_registration(
         "endpoint_identity": "local-process",
         "authentication_mode": "external-cli-session",
         "authentication_profile": f"external-session:{provider_id}",
-        "capability_set": capabilities,
+        "capability_set": capability_values,
         "provider_policy": "registered-command",
-        "independence_classification": "role-enforced",
-        "role_eligibility": sorted(
-            key for key, enabled in capabilities.items() if enabled is True
-        ),
+        "independence_classification": independence_classification,
+        "role_eligibility": roles,
         "model_or_service_identity": provider_id,
-        "qualified_version": qualified_version,
-        "qualification_timestamp": (
-            datetime.now(UTC).isoformat() if qualified_version is not None else None
-        ),
-        "qualification_method": (
-            "protected-registered-launch" if qualified_version is not None else "none"
-        ),
-        "qualification_result": (
-            "qualified" if qualified_version is not None else "not-qualified"
-        ),
+        "qualified_version": None,
+        "qualification_timestamp": None,
+        "qualification_method": "none",
+        "qualification_result": "not-qualified",
+        "registration_lifecycle": "REGISTERED_UNQUALIFIED",
+        "qualification_evidence_id": None,
+        "qualification_evidence_digest": None,
         "qualifying_component_digests": {
             "executable": hashlib.sha256(executable_content).hexdigest(),
             "launcher": hashlib.sha256(launcher_content).hexdigest(),
@@ -436,6 +498,7 @@ def _validate_discovery_registration(
     provider_id: str,
     executable: str | None,
     registration: dict[str, Any] | None,
+    qualification_evidence: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[bool, str]:
     if executable is None:
         return False, "Executable was not found; configure its full path in Settings."
@@ -456,6 +519,10 @@ def _validate_discovery_registration(
         registration
     ):
         return False, "Provider registration configuration digest is stale."
+    if not _qualification_is_consistent(
+        registration, qualification_evidence or {}
+    ):
+        return False, "Provider qualification authority is missing or inconsistent."
     try:
         configured = Path(executable).resolve(strict=True)
         registered_executable = Path(
@@ -502,9 +569,12 @@ def validate_provider_registration(
     provider_id: str,
     executable: str,
     registration: dict[str, Any],
+    qualification_evidence: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[bool, str]:
     """Validate the one canonical provider-registration schema without execution."""
-    return _validate_discovery_registration(provider_id, executable, registration)
+    return _validate_discovery_registration(
+        provider_id, executable, registration, qualification_evidence
+    )
 
 
 def canonical_provider_registration_digest(
@@ -512,6 +582,138 @@ def canonical_provider_registration_digest(
 ) -> str:
     """Return the deterministic digest over every authoritative schema field."""
     return _registration_configuration_digest(registration)
+
+
+def qualification_evidence_digest(evidence: dict[str, Any]) -> str:
+    value = {key: item for key, item in evidence.items() if key != "evidence_digest"}
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def apply_protected_qualification(
+    registration: dict[str, Any],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    updated = dict(registration)
+    if updated.get("registration_lifecycle") != "REGISTERED_UNQUALIFIED":
+        raise PermissionError("registration is not eligible for qualification")
+    digest = qualification_evidence_digest(evidence)
+    try:
+        started_at = datetime.fromisoformat(str(evidence.get("started_at")))
+        finished_at = datetime.fromisoformat(str(evidence.get("finished_at")))
+    except ValueError as error:
+        raise PermissionError("qualification chronology is invalid") from error
+    if (
+        started_at.tzinfo is None
+        or finished_at.tzinfo is None
+        or finished_at < started_at
+        or not isinstance(evidence.get("id"), str)
+        or not evidence["id"]
+        or evidence.get("qualification_method") != "protected-registered-launch"
+        or evidence.get("qualification_command")
+        != [updated.get("canonical_executable_path"), "--version"]
+        or evidence.get("command_digest")
+        != hashlib.sha256(
+            json.dumps(
+                [updated.get("canonical_executable_path"), "--version"]
+            ).encode("utf-8")
+        ).hexdigest()
+        or not isinstance(evidence.get("provider_instance_id"), str)
+        or not evidence["provider_instance_id"]
+        or not isinstance(evidence.get("provider_run_id"), str)
+        or not evidence["provider_run_id"]
+        or not isinstance(evidence.get("authorized_by"), str)
+        or not evidence["authorized_by"]
+        or not isinstance(evidence.get("ownership"), dict)
+        or not evidence["ownership"].get("launch_nonce")
+        or evidence.get("evidence_digest") != digest
+        or evidence.get("registration_id") != updated.get("trusted_registration_id")
+        or evidence.get("registration_version") != updated.get("registration_version")
+        or evidence.get("provider_id") != updated.get("logical_provider_id")
+        or evidence.get("executable_sha256") != updated.get("executable_sha256")
+        or evidence.get("launcher_sha256") != updated.get("launcher_sha256")
+        or evidence.get("script_sha256") != updated.get("script_sha256")
+        or evidence.get("exit_status") != 0
+        or evidence.get("qualification_result") != "qualified"
+        or not isinstance(evidence.get("normalized_version"), str)
+        or not evidence["normalized_version"]
+    ):
+        raise PermissionError("protected qualification evidence is inconsistent")
+    updated.update(
+        {
+            "qualified_version": evidence["normalized_version"],
+            "qualification_timestamp": evidence["finished_at"],
+            "qualification_method": "protected-registered-launch",
+            "qualification_result": "qualified",
+            "registration_lifecycle": "QUALIFIED",
+            "qualification_evidence_id": evidence["id"],
+            "qualification_evidence_digest": digest,
+        }
+    )
+    updated["configuration_digest"] = _registration_configuration_digest(updated)
+    return updated
+
+
+def _qualification_is_consistent(
+    registration: dict[str, Any],
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    if registration.get("registration_lifecycle") == "QUALIFICATION_FAILED":
+        evidence_id = registration.get("qualification_evidence_id")
+        evidence = evidence_by_id.get(str(evidence_id))
+        return bool(
+            isinstance(evidence, dict)
+            and evidence.get("evidence_digest")
+            == qualification_evidence_digest(evidence)
+            == registration.get("qualification_evidence_digest")
+            and evidence.get("registration_id")
+            == registration.get("trusted_registration_id")
+            and evidence.get("provider_id")
+            == registration.get("logical_provider_id")
+            and evidence.get("qualification_result") == "failed"
+            and evidence.get("exit_status") != 0
+        )
+    if registration.get("registration_lifecycle") != "QUALIFIED":
+        return registration.get("qualification_result") in {
+            "not-qualified",
+            "pending",
+        }
+    evidence_id = registration.get("qualification_evidence_id")
+    if not isinstance(evidence_id, str):
+        return False
+    evidence = evidence_by_id.get(evidence_id)
+    if not isinstance(evidence, dict):
+        return False
+    try:
+        expected = apply_protected_qualification(
+            {
+                **registration,
+                "qualified_version": None,
+                "qualification_timestamp": None,
+                "qualification_method": "none",
+                "qualification_result": "not-qualified",
+                "registration_lifecycle": "REGISTERED_UNQUALIFIED",
+                "qualification_evidence_id": None,
+                "qualification_evidence_digest": None,
+                "configuration_digest": "",
+            },
+            evidence,
+        )
+    except (KeyError, PermissionError, TypeError):
+        return False
+    return all(
+        expected.get(key) == registration.get(key)
+        for key in (
+            "qualified_version",
+            "qualification_timestamp",
+            "qualification_method",
+            "qualification_result",
+            "registration_lifecycle",
+            "qualification_evidence_id",
+            "qualification_evidence_digest",
+        )
+    )
 
 
 def _registration_configuration_digest(registration: dict[str, Any]) -> str:
@@ -567,11 +769,19 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
         return False
     if registration["provider_policy"] != "registered-command":
         return False
-    if registration["independence_classification"] != "role-enforced":
+    if registration["independence_classification"] not in {
+        "authoring-only",
+        "independent-capable",
+    }:
         return False
     if registration["registration_status"] not in {"active", "revoked"}:
         return False
-    if registration["qualification_result"] not in {"qualified", "not-qualified"}:
+    if registration["qualification_result"] not in {
+        "qualified",
+        "not-qualified",
+        "failed",
+        "pending",
+    }:
         return False
     if registration["qualification_method"] not in {
         "protected-registered-launch",
@@ -602,8 +812,34 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
     if (
         not isinstance(roles, list)
         or any(not isinstance(item, str) or not item for item in roles)
-        or roles != sorted(set(roles))
+        or roles != sorted(roles)
+        or len(roles) != len(set(roles))
+        or any(
+            item
+            not in {
+                "builder",
+                "reviewer",
+                "repairer",
+                "post_repair_reviewer",
+            }
+            for item in roles
+        )
     ):
+        return False
+    required_capability = {
+        "builder": "author",
+        "reviewer": "reviewer",
+        "repairer": "repairer",
+        "post_repair_reviewer": "reviewer",
+    }
+    if any(
+        capabilities[required_capability[role]] is not True for role in roles
+    ):
+        return False
+    if any(
+        role in {"reviewer", "post_repair_reviewer"}
+        for role in roles
+    ) and registration["independence_classification"] != "independent-capable":
         return False
     invocation = registration.get("invocation_shape")
     if (
@@ -663,6 +899,27 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
         registration.get("qualification_timestamp"),
     )
     if qualified != all(isinstance(value, str) and value for value in qualification_values):
+        return False
+    lifecycle = registration.get("registration_lifecycle")
+    expected_lifecycle = {
+        "qualified": "QUALIFIED",
+        "not-qualified": "REGISTERED_UNQUALIFIED",
+        "pending": "QUALIFICATION_PENDING",
+        "failed": "QUALIFICATION_FAILED",
+    }.get(str(registration.get("qualification_result")))
+    if lifecycle != expected_lifecycle:
+        return False
+    evidence_values = (
+        registration.get("qualification_evidence_id"),
+        registration.get("qualification_evidence_digest"),
+    )
+    evidence_required = registration.get("qualification_result") in {
+        "qualified",
+        "failed",
+    }
+    if evidence_required != all(
+        isinstance(value, str) and value for value in evidence_values
+    ):
         return False
     for key in ("revoked_at", "expires_at"):
         if registration.get(key) is not None and not isinstance(

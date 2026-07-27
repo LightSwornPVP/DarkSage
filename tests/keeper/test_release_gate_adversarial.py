@@ -16,7 +16,11 @@ from keeper.app.storage import KeeperStore
 from keeper.cli import main
 from keeper.providers.base import AgentRequest
 from keeper.providers.codex_cli import CliProvider
-from keeper.providers.adapters import create_provider_registration
+from keeper.providers.adapters import (
+    apply_protected_qualification,
+    create_provider_registration,
+    qualification_evidence_digest,
+)
 from keeper.recovery import ProcessState, _classify_windows_open_failure
 
 
@@ -346,11 +350,39 @@ def test_standalone_commands_accept_complete_current_registration(
         authorized_by="standalone-test",
         invocation_shape=provider_command,
     )
+    qualification: dict[str, Any] = {
+        "id": "qualification:standalone-test",
+        "kind": "provider_qualification",
+        "registration_id": registration["trusted_registration_id"],
+        "registration_version": registration["registration_version"],
+        "provider_id": registration["logical_provider_id"],
+        "provider_instance_id": "standalone-qualification",
+        "provider_run_id": "standalone-qualification-run",
+        "executable_sha256": registration["executable_sha256"],
+        "launcher_sha256": registration["launcher_sha256"],
+        "script_sha256": registration["script_sha256"],
+        "qualification_command": [str(executable), "--version"],
+        "command_digest": hashlib.sha256(
+            json.dumps([str(executable), "--version"]).encode("utf-8")
+        ).hexdigest(),
+        "started_at": "2026-07-26T00:00:00+00:00",
+        "finished_at": "2026-07-26T00:00:01+00:00",
+        "exit_status": 0,
+        "raw_version_output": "controlled 1.0",
+        "normalized_version": "controlled 1.0",
+        "qualification_method": "protected-registered-launch",
+        "qualification_result": "qualified",
+        "authorized_by": "standalone-test",
+        "ownership": {"launch_nonce": "standalone-qualification"},
+    }
+    qualification["evidence_digest"] = qualification_evidence_digest(qualification)
+    registration = apply_protected_qualification(registration, qualification)
     (workflow / "config.json").write_text(
         json.dumps(
             {
                 "provider_command": provider_command,
                 "provider_registration": registration,
+                "provider_qualification_evidence": qualification,
             }
         ),
         encoding="utf-8",

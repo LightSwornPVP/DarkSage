@@ -84,6 +84,8 @@ def test_controlled_command_adapters_complete_full_repair_workflow(
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
     app.register_provider("codex", codex, "test-authority")
     app.register_provider("claude", claude, "test-authority")
+    app.qualify_provider("codex", "test-authority")
+    app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
     task = app.create_task(
         {
@@ -141,6 +143,8 @@ def test_selected_provider_stage_retry_does_not_repeat_verified_stages(
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
     app.register_provider("codex", codex, "test-authority")
     app.register_provider("claude", claude, "test-authority")
+    app.qualify_provider("codex", "test-authority")
+    app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
     task = app.create_task(
         {
@@ -232,6 +236,8 @@ def test_selected_verification_retry_does_not_repeat_provider_stages(
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
     app.register_provider("codex", codex, "test-authority")
     app.register_provider("claude", claude, "test-authority")
+    app.qualify_provider("codex", "test-authority")
+    app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
     task = app.create_task(
         {
@@ -286,6 +292,8 @@ def test_author_stage_retry_after_timeout_or_cancellation(
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
     app.register_provider("codex", codex, "test-authority")
     app.register_provider("claude", claude, "test-authority")
+    app.qualify_provider("codex", "test-authority")
+    app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
     task = app.create_task(
         {

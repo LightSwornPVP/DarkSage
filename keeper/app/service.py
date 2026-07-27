@@ -22,7 +22,15 @@ from keeper.app.path_safety import contained_path, validate_path_budget
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.app.workflow import WorkflowCoordinator
-from keeper.providers.adapters import ProviderDiscovery, create_provider_registration
+from keeper.providers.adapters import (
+    ProviderDiscovery,
+    apply_protected_qualification,
+    canonical_provider_registration_digest,
+    create_provider_registration,
+    qualification_evidence_digest,
+)
+from keeper.providers.base import AgentRequest
+from keeper.providers.codex_cli import CliProvider
 from keeper.recovery import atomic_write_json, load_json
 from keeper.version import VERSION
 
@@ -40,7 +48,9 @@ class KeeperApplication:
         providers = [
             item.to_dict()
             for item in ProviderDiscovery(
-                self.provider_paths(), self.provider_registrations()
+                self.provider_paths(),
+                self.provider_registrations(),
+                self.qualification_evidence(),
             ).discover()
         ]
         writable = _writable(self.data_directory)
@@ -94,6 +104,14 @@ class KeeperApplication:
             if isinstance(key, str) and isinstance(registration, dict)
         }
 
+    def qualification_evidence(self) -> dict[str, dict[str, Any]]:
+        return {
+            str(item["id"]): item
+            for item in self.store.list("artifacts")
+            if item.get("kind") == "provider_qualification"
+            and isinstance(item.get("id"), str)
+        }
+
     def register_provider(
         self, provider_id: str, executable: Path, authorizer: str
     ) -> dict[str, Any]:
@@ -110,6 +128,133 @@ class KeeperApplication:
             "settings", "provider_registrations", registrations
         )
         return registration
+
+    def qualify_provider(
+        self, provider_id: str, authorizer: str
+    ) -> dict[str, Any]:
+        registrations = self.provider_registrations()
+        registration = registrations.get(provider_id)
+        if not isinstance(registration, dict) or not authorizer.strip():
+            raise PermissionError("qualification requires registration and authorization")
+        valid = ProviderDiscovery(
+            {provider_id: str(registration["canonical_executable_path"])},
+            {provider_id: registration},
+            self.qualification_evidence(),
+        ).discover()
+        diagnostic = next(item for item in valid if item.provider_id == provider_id)
+        if not diagnostic.available or diagnostic.discovery_state != "registered-unqualified":
+            raise PermissionError("provider registration is not eligible for qualification")
+        qualification_token = uuid.uuid4().hex
+        qualification_id = f"provider-qualification:{qualification_token}"
+        started_at = _now()
+        self.store.insert_immutable(
+            "artifacts",
+            f"{qualification_id}:started",
+            {
+                "id": f"{qualification_id}:started",
+                "kind": "provider_qualification_started",
+                "registration_id": registration["trusted_registration_id"],
+                "provider_id": provider_id,
+                "authorized_by": authorizer,
+                "started_at": started_at,
+            },
+        )
+        pending = {
+            **registration,
+            "qualification_method": "protected-registered-launch",
+            "qualification_result": "pending",
+            "registration_lifecycle": "QUALIFICATION_PENDING",
+        }
+        pending["configuration_digest"] = canonical_provider_registration_digest(
+            pending
+        )
+        registrations[provider_id] = pending
+        self.store.upsert("settings", "provider_registrations", registrations)
+        executable = str(registration["canonical_executable_path"])
+        provider = CliProvider(
+            (executable, "--version"),
+            provider_name=str(registration["provider_name"]),
+            expected_executable_sha256=registration["launcher_sha256"],
+            expected_executable_size=registration["launcher_size"],
+            registration_id=registration["trusted_registration_id"],
+            registration_version=registration["registration_version"],
+            configuration_digest=registration["configuration_digest"],
+            expected_script_sha256=registration["script_sha256"],
+            expected_script_size=registration["script_size"],
+            script_registration_id=registration["script_registration_id"],
+            script_registration_version=registration["script_registration_version"],
+            require_prompt_placeholder=False,
+        )
+        directory = self.data_directory / "qualification" / qualification_token
+        directory.mkdir(parents=True, exist_ok=False)
+        prompt = directory / "unused"
+        prompt.write_text("", encoding="utf-8")
+        ownership: dict[str, Any] = {}
+        result = provider.run(
+            AgentRequest(
+                "qualification",
+                prompt,
+                directory,
+                15,
+                directory / "stdout.log",
+                directory / "stderr.log",
+                on_process_owned=lambda value: ownership.update(value),
+            )
+        )
+        raw = result.stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+        normalized = raw.splitlines()[0].strip()[:200] if raw else ""
+        finished_at = _now()
+        evidence: dict[str, Any] = {
+            "id": qualification_id,
+            "kind": "provider_qualification",
+            "registration_id": registration["trusted_registration_id"],
+            "registration_version": registration["registration_version"],
+            "provider_id": provider_id,
+            "provider_instance_id": provider.instance_id,
+            "provider_run_id": qualification_id,
+            "executable_sha256": registration["executable_sha256"],
+            "launcher_sha256": registration["launcher_sha256"],
+            "script_sha256": registration["script_sha256"],
+            "qualification_command": [executable, "--version"],
+            "command_digest": hashlib.sha256(
+                json.dumps([executable, "--version"]).encode("utf-8")
+            ).hexdigest(),
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "exit_status": result.exit_code,
+            "raw_version_output": raw,
+            "normalized_version": normalized,
+            "qualification_method": "protected-registered-launch",
+            "qualification_result": (
+                "qualified" if result.exit_code == 0 and normalized else "failed"
+            ),
+            "authorized_by": authorizer,
+            "ownership": ownership,
+        }
+        evidence["evidence_digest"] = qualification_evidence_digest(evidence)
+        self.store.insert_immutable("artifacts", qualification_id, evidence)
+        if evidence["qualification_result"] != "qualified":
+            failed = {
+                **registration,
+                "qualification_timestamp": finished_at,
+                "qualification_method": "protected-registered-launch",
+                "qualification_result": "failed",
+                "registration_lifecycle": "QUALIFICATION_FAILED",
+                "qualification_evidence_id": qualification_id,
+                "qualification_evidence_digest": evidence["evidence_digest"],
+            }
+            failed["configuration_digest"] = (
+                canonical_provider_registration_digest(failed)
+            )
+            registrations[provider_id] = failed
+            self.store.upsert(
+                "settings", "provider_registrations", registrations
+            )
+            raise PermissionError("protected provider qualification failed")
+        updated = apply_protected_qualification(registration, evidence)
+        registrations[provider_id] = updated
+        self.store.upsert("settings", "provider_registrations", registrations)
+        return updated
 
     def add_project(self, repository: Path, name: str | None = None) -> dict[str, Any]:
         inspection = self.git.inspect(repository)

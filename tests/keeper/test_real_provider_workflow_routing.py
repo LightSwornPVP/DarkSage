@@ -30,6 +30,14 @@ def diagnostic(identifier: str, root: Path) -> ProviderDiagnostic:
             authorized_by="routing-test",
         ),
         discovery_state="qualified",
+        role_eligibility=(
+            "builder",
+            "post_repair_reviewer",
+            "repairer",
+            "reviewer",
+        ),
+        independence_classification="independent-capable",
+        provider_policy="registered-command",
     )
 
 

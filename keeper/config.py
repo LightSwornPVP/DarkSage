@@ -13,6 +13,7 @@ class KeeperConfig:
     workspace_root: Path
     provider_command: tuple[str, ...]
     provider_registration: dict[str, Any] | None = None
+    provider_qualification_evidence: dict[str, Any] | None = None
     ollama_endpoint: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3-coder:30b"
     provider_routes: tuple[tuple[str, str], ...] = (
@@ -45,6 +46,11 @@ class KeeperConfig:
             provider_registration=(
                 dict(data["provider_registration"])
                 if isinstance(data.get("provider_registration"), dict)
+                else None
+            ),
+            provider_qualification_evidence=(
+                dict(data["provider_qualification_evidence"])
+                if isinstance(data.get("provider_qualification_evidence"), dict)
                 else None
             ),
             ollama_endpoint=str(data.get("ollama_endpoint", "http://127.0.0.1:11434")),
