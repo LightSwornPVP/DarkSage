@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ENTITY_TABLES = (
     "projects",
     "worktrees",
@@ -28,6 +28,16 @@ ENTITY_TABLES = (
     "approvals",
     "notifications",
     "settings",
+    "executive_projects",
+    "project_charters",
+    "executive_workflows",
+    "executive_tasks",
+    "executive_approvals",
+    "project_memories",
+    "project_decisions",
+    "project_assumptions",
+    "project_conversations",
+    "specialist_assignments",
 )
 
 
@@ -73,6 +83,32 @@ class KeeperStore:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (1, _now()),
+                )
+                current = 1
+            if current < 2:
+                for table in ENTITY_TABLES:
+                    connection.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{table}" ('
+                        "id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                        "payload TEXT NOT NULL, payload_hash TEXT NOT NULL)"
+                    )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS executive_relationships ("
+                    "relationship_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+                    "parent_kind TEXT NOT NULL, parent_id TEXT NOT NULL, "
+                    "child_kind TEXT NOT NULL, child_id TEXT NOT NULL, "
+                    "created_at TEXT NOT NULL, "
+                    "FOREIGN KEY(project_id) REFERENCES executive_projects(id), "
+                    "UNIQUE(parent_kind, parent_id, child_kind, child_id))"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS ix_executive_relationship_project "
+                    "ON executive_relationships(project_id)"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (2, _now()),
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reroute_reservations ("
