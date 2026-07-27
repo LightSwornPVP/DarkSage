@@ -10,12 +10,93 @@ import subprocess
 import threading
 import uuid
 from contextlib import AbstractContextManager, nullcontext
+from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Protocol, TextIO
 
 from keeper.policies import filtered_environment
 from keeper.providers.base import AgentProvider, AgentRequest, ProcessResult
 from keeper.recovery import process_identity
+
+
+_CREATE_SUSPENDED = 0x00000004
+_CREATE_UNICODE_ENVIRONMENT = 0x00000400
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+
+class _ProviderProcess(Protocol):
+    pid: int
+    stdout: TextIO | None
+    stderr: TextIO | None
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+    def poll(self) -> int | None: ...
+
+    def kill(self) -> None: ...
+
+
+@dataclass
+class _WindowsSuspendedProcess:
+    command: str
+    process_handle: int
+    thread_handle: int
+    pid: int
+    stdout: TextIO | None
+    stderr: TextIO | None
+
+    def resume(self) -> None:
+        kernel32 = _windows_kernel32()
+        previous_count = int(kernel32.ResumeThread(self.thread_handle))
+        if previous_count != 1:
+            raise RuntimeError("provider primary thread could not be resumed exactly once")
+
+    def wait(self, timeout: float | None = None) -> int:
+        winapi: Any = __import__("_winapi")
+        milliseconds = (
+            int(winapi.INFINITE)
+            if timeout is None
+            else max(0, int(timeout * 1000))
+        )
+        result = int(winapi.WaitForSingleObject(self.process_handle, milliseconds))
+        if result == int(winapi.WAIT_TIMEOUT):
+            raise subprocess.TimeoutExpired(self.command, float(timeout or 0))
+        if result != int(winapi.WAIT_OBJECT_0):
+            raise OSError("waiting for the confined provider process failed")
+        return int(winapi.GetExitCodeProcess(self.process_handle))
+
+    def poll(self) -> int | None:
+        winapi: Any = __import__("_winapi")
+        exit_code = int(winapi.GetExitCodeProcess(self.process_handle))
+        return None if exit_code == int(winapi.STILL_ACTIVE) else exit_code
+
+    def kill(self) -> None:
+        winapi: Any = __import__("_winapi")
+        if self.poll() is None:
+            try:
+                winapi.TerminateProcess(self.process_handle, 124)
+            except OSError as error:
+                raise OSError(
+                    "unable to terminate confined provider process"
+                ) from error
+
+    def close(self) -> None:
+        errors: list[BaseException] = []
+        for stream in (self.stdout, self.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException as error:
+                    errors.append(error)
+        for handle in (self.thread_handle, self.process_handle):
+            try:
+                _close_windows_handle(handle)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise RuntimeError("provider process handles were not fully closed") from errors[0]
 
 
 class CliProvider(AgentProvider):
@@ -63,7 +144,7 @@ class CliProvider(AgentProvider):
         self.require_prompt_placeholder = require_prompt_placeholder
         self.launch_guard = launch_guard
         self.instance_id = uuid.uuid4().hex
-        self._active_process: subprocess.Popen[str] | None = None
+        self._active_process: _ProviderProcess | None = None
         self._active_job: int | None = None
 
     def build_command(self, request: AgentRequest) -> list[str]:
@@ -191,25 +272,62 @@ class CliProvider(AgentProvider):
                 command[0] = str(protected_path)
             if self.before_process_create is not None:
                 self.before_process_create(protected_path)
-            popen_options: dict[str, Any] = {}
-            if protected_executable_fd is not None:
-                popen_options["pass_fds"] = (protected_executable_fd,)
-            process = subprocess.Popen(
-                command,
-                cwd=request.workspace,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                shell=False,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
-                start_new_session=os.name != "nt",
-                **popen_options,
-            )
+            job: int | None = None
+            if os.name == "nt":
+                try:
+                    job = _create_configured_windows_job()
+                except BaseException:
+                    _release_launch_protections(
+                        retained_executable_handles, protected_executable_fd
+                    )
+                    raise
+                try:
+                    process: Any = _create_windows_process_suspended(
+                        command,
+                        protected_path,
+                        request.workspace,
+                        environment,
+                    )
+                except BaseException:
+                    _close_windows_handle(job)
+                    _release_launch_protections(
+                        retained_executable_handles, protected_executable_fd
+                    )
+                    raise
+                try:
+                    _assign_process_to_windows_job(job, process)
+                except BaseException:
+                    _abort_suspended_windows_launch(
+                        process,
+                        job,
+                        retained_executable_handles,
+                        protected_executable_fd,
+                    )
+                    raise
+            else:
+                popen_options: dict[str, Any] = {}
+                if protected_executable_fd is not None:
+                    popen_options["pass_fds"] = (protected_executable_fd,)
+                process = subprocess.Popen(
+                    command,
+                    cwd=request.workspace,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    shell=False,
+                    start_new_session=True,
+                    **popen_options,
+                )
             if process.stdout is None or process.stderr is None:
                 process.kill()
                 process.wait()
+                if job:
+                    _close_windows_handle(job)
+                _release_launch_protections(
+                    retained_executable_handles, protected_executable_fd
+                )
                 raise RuntimeError("provider output streams were not created")
             pumps = [
                 threading.Thread(
@@ -225,20 +343,8 @@ class CliProvider(AgentProvider):
             ]
             for pump in pumps:
                 pump.start()
-            job: int | None = None
-            if os.name == "nt":
-                job_kernel32: Any = ctypes.windll.kernel32
-                job = int(job_kernel32.CreateJobObjectW(None, None))
-                if not job or not job_kernel32.AssignProcessToJobObject(
-                    job, int(process._handle)  # type: ignore[attr-defined]
-                ):
-                    if job:
-                        job_kernel32.CloseHandle(job)
-                    process.kill()
-                    process.wait()
-                    raise RuntimeError("unable to place provider in an isolated Windows Job Object")
-                self._active_job = job
             self._active_process = process
+            self._active_job = job
             try:
                 if request.on_process_started is not None:
                     request.on_process_started(process.pid)
@@ -281,6 +387,8 @@ class CliProvider(AgentProvider):
                             "started_at": identity.get("creation_time"),
                         }
                     )
+                if isinstance(process, _WindowsSuspendedProcess):
+                    process.resume()
                 exit_code = process.wait(timeout=request.timeout_seconds)
                 self._terminate_remaining_group(process, job)
                 return ProcessResult(exit_code, request.stdout_path, request.stderr_path, process.pid)
@@ -295,14 +403,16 @@ class CliProvider(AgentProvider):
                     pump.join(timeout=5)
                 self._active_process = None
                 if job and self._active_job == job:
-                    ctypes.windll.kernel32.CloseHandle(job)
                     self._active_job = None
-                for handle in retained_executable_handles:
-                    _close_windows_handle(handle)
-                if protected_executable_fd is not None:
-                    os.close(protected_executable_fd)
+                _close_execution_resources(
+                    process,
+                    job,
+                    retained_executable_handles,
+                    protected_executable_fd,
+                )
+
     def cancel(self) -> None:
-        if self._active_process and self._active_process.poll() is None:
+        if self._active_process:
             self._terminate_tree(self._active_process, self._active_job)
 
     @staticmethod
@@ -320,11 +430,13 @@ class CliProvider(AgentProvider):
 
     @staticmethod
     def _terminate_remaining_group(
-        process: subprocess.Popen[str], job: int | None = None
+        process: _ProviderProcess, job: int | None = None
     ) -> None:
         if os.name == "nt":
-            if not job or not ctypes.windll.kernel32.TerminateJobObject(job, 0):
+            kernel32 = _windows_kernel32()
+            if not job or not kernel32.TerminateJobObject(job, 0):
                 raise RuntimeError("unable to confirm provider descendant termination")
+            process.wait(timeout=10)
             return
         killpg = getattr(os, "killpg")
         try:
@@ -334,13 +446,14 @@ class CliProvider(AgentProvider):
             return
 
     @staticmethod
-    def _terminate_tree(process: subprocess.Popen[str], job: int | None = None) -> None:
-        if process.poll() is not None:
-            return
+    def _terminate_tree(process: _ProviderProcess, job: int | None = None) -> None:
         if os.name == "nt":
-            if not job or not ctypes.windll.kernel32.TerminateJobObject(job, 124):
+            kernel32 = _windows_kernel32()
+            if not job or not kernel32.TerminateJobObject(job, 124):
                 raise RuntimeError("unable to terminate provider Windows Job Object")
         else:
+            if process.poll() is not None:
+                return
             killpg = getattr(os, "killpg")
             killpg(process.pid, signal.SIGTERM)
         try:
@@ -352,6 +465,357 @@ class CliProvider(AgentProvider):
             else:
                 process.kill()
             process.wait(timeout=10)
+
+
+class _JobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _JobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _windows_kernel32() -> Any:
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.IsProcessInJob.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    kernel32.IsProcessInJob.restype = wintypes.BOOL
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    return kernel32
+
+
+def _create_configured_windows_job() -> int:
+    kernel32 = _windows_kernel32()
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(
+            ctypes.get_last_error(), "unable to create provider Windows Job Object"
+        )
+    try:
+        _configure_windows_job(int(job))
+    except BaseException:
+        _close_windows_handle(int(job))
+        raise
+    return int(job)
+
+
+def _configure_windows_job(job: int) -> None:
+    kernel32 = _windows_kernel32()
+    information = _JobExtendedLimitInformation()
+    information.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    if not kernel32.SetInformationJobObject(
+        job,
+        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise OSError(
+            ctypes.get_last_error(),
+            "unable to configure kill-on-close provider Windows Job Object",
+        )
+
+
+def _duplicate_inheritable_windows_handle(handle: int) -> int:
+    winapi: Any = __import__("_winapi")
+    return int(
+        winapi.DuplicateHandle(
+            winapi.GetCurrentProcess(),
+            handle,
+            winapi.GetCurrentProcess(),
+            0,
+            True,
+            winapi.DUPLICATE_SAME_ACCESS,
+        )
+    )
+
+
+def _create_windows_process_suspended(
+    command: list[str],
+    executable: Path,
+    workspace: Path,
+    environment: dict[str, str],
+) -> _WindowsSuspendedProcess:
+    winapi: Any = __import__("_winapi")
+    import msvcrt
+
+    stdout_read, stdout_write = winapi.CreatePipe(None, 0)
+    stderr_read, stderr_write = winapi.CreatePipe(None, 0)
+    stdin_fd = os.open(os.devnull, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    child_handles: list[int] = []
+    parent_handles = [
+        int(stdout_read),
+        int(stdout_write),
+        int(stderr_read),
+        int(stderr_write),
+    ]
+    process_handle: int | None = None
+    thread_handle: int | None = None
+    stdout_stream: TextIO | None = None
+    stderr_stream: TextIO | None = None
+    created_process: _WindowsSuspendedProcess | None = None
+    try:
+        child_stdin = _duplicate_inheritable_windows_handle(
+            int(msvcrt.get_osfhandle(stdin_fd))
+        )
+        child_stdout = _duplicate_inheritable_windows_handle(int(stdout_write))
+        child_stderr = _duplicate_inheritable_windows_handle(int(stderr_write))
+        child_handles.extend((child_stdin, child_stdout, child_stderr))
+        winapi.CloseHandle(stdout_write)
+        parent_handles.remove(int(stdout_write))
+        winapi.CloseHandle(stderr_write)
+        parent_handles.remove(int(stderr_write))
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= int(winapi.STARTF_USESTDHANDLES)
+        startup.hStdInput = child_stdin
+        startup.hStdOutput = child_stdout
+        startup.hStdError = child_stderr
+        startup.lpAttributeList = {"handle_list": list(child_handles)}
+        command_line = subprocess.list2cmdline(command)
+        creation_flags = (
+            _CREATE_SUSPENDED
+            | _CREATE_UNICODE_ENVIRONMENT
+            | int(winapi.CREATE_NEW_PROCESS_GROUP)
+        )
+        process_handle, thread_handle, pid, _thread_id = winapi.CreateProcess(
+            str(executable),
+            command_line,
+            None,
+            None,
+            True,
+            creation_flags,
+            environment,
+            str(workspace),
+            startup,
+        )
+        for handle in child_handles:
+            winapi.CloseHandle(handle)
+        child_handles.clear()
+        stdout_stream = _windows_text_stream(int(stdout_read))
+        parent_handles.remove(int(stdout_read))
+        stderr_stream = _windows_text_stream(int(stderr_read))
+        parent_handles.remove(int(stderr_read))
+        created_process = _WindowsSuspendedProcess(
+            command_line,
+            int(process_handle),
+            int(thread_handle),
+            int(pid),
+            stdout_stream,
+            stderr_stream,
+        )
+    except BaseException:
+        cleanup_error: BaseException | None = None
+        for stream in (stdout_stream, stderr_stream):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException as error:
+                    cleanup_error = cleanup_error or error
+        try:
+            if process_handle is not None:
+                winapi.TerminateProcess(process_handle, 125)
+                result = int(winapi.WaitForSingleObject(process_handle, 10_000))
+                if result != int(winapi.WAIT_OBJECT_0):
+                    raise RuntimeError(
+                        "partially created suspended provider did not terminate"
+                    )
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
+        for optional_handle in (thread_handle, process_handle):
+            if optional_handle is not None:
+                try:
+                    winapi.CloseHandle(optional_handle)
+                except BaseException as error:
+                    cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            raise RuntimeError(
+                "partially created suspended provider cleanup failed"
+            ) from cleanup_error
+        raise
+    finally:
+        finalization_errors: list[BaseException] = []
+        try:
+            os.close(stdin_fd)
+        except BaseException as error:
+            finalization_errors.append(error)
+        for handle in [*child_handles, *parent_handles]:
+            try:
+                winapi.CloseHandle(handle)
+            except BaseException as error:
+                finalization_errors.append(error)
+        if finalization_errors:
+            if created_process is not None:
+                try:
+                    created_process.kill()
+                    created_process.wait(timeout=10)
+                    created_process.close()
+                except BaseException as error:
+                    finalization_errors.append(error)
+            raise RuntimeError(
+                "provider standard-handle cleanup failed"
+            ) from finalization_errors[0]
+    if created_process is None:
+        raise RuntimeError("suspended provider creation returned no process")
+    return created_process
+
+
+def _windows_text_stream(handle: int) -> TextIO:
+    import msvcrt
+
+    descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    try:
+        return os.fdopen(
+            descriptor, "r", encoding="utf-8", errors="replace"
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _assign_process_to_windows_job(
+    job: int, process: _ProviderProcess
+) -> None:
+    if not isinstance(process, _WindowsSuspendedProcess):
+        raise TypeError("Windows Job assignment requires a suspended process")
+    kernel32 = _windows_kernel32()
+    if not kernel32.AssignProcessToJobObject(job, process.process_handle):
+        raise OSError(
+            ctypes.get_last_error(),
+            "unable to assign suspended provider to Windows Job Object",
+        )
+    assigned = wintypes.BOOL()
+    if (
+        not kernel32.IsProcessInJob(
+            process.process_handle, job, ctypes.byref(assigned)
+        )
+        or not assigned.value
+    ):
+        raise RuntimeError("provider Windows Job Object assignment was not confirmed")
+
+
+def _abort_suspended_windows_launch(
+    process: _ProviderProcess,
+    job: int,
+    retained_handles: list[int],
+    protected_executable_fd: int | None,
+) -> None:
+    errors: list[BaseException] = []
+    kernel32 = _windows_kernel32()
+    try:
+        kernel32.TerminateJobObject(job, 125)
+    except BaseException as error:
+        errors.append(error)
+    try:
+        process.kill()
+    except BaseException as error:
+        errors.append(error)
+    try:
+        process.wait(timeout=10)
+    except BaseException as error:
+        errors.append(error)
+    try:
+        _close_execution_resources(
+            process,
+            job,
+            retained_handles,
+            protected_executable_fd,
+        )
+    except BaseException as error:
+        errors.append(error)
+    if errors:
+        raise RuntimeError(
+            "suspended provider launch could not be terminated cleanly"
+        ) from errors[0]
+
+
+def _close_execution_resources(
+    process: _ProviderProcess,
+    job: int | None,
+    retained_handles: list[int],
+    protected_executable_fd: int | None,
+) -> None:
+    errors: list[BaseException] = []
+    if job is not None:
+        try:
+            _close_windows_handle(job)
+        except BaseException as error:
+            errors.append(error)
+    if isinstance(process, _WindowsSuspendedProcess):
+        try:
+            process.close()
+        except BaseException as error:
+            errors.append(error)
+    try:
+        _release_launch_protections(retained_handles, protected_executable_fd)
+    except BaseException as error:
+        errors.append(error)
+    if errors:
+        raise RuntimeError("provider execution handles were not fully closed") from errors[0]
+
+
+def _release_launch_protections(
+    retained_handles: list[int], protected_executable_fd: int | None
+) -> None:
+    errors: list[BaseException] = []
+    for handle in retained_handles:
+        try:
+            _close_windows_handle(handle)
+        except BaseException as error:
+            errors.append(error)
+    retained_handles.clear()
+    if protected_executable_fd is not None:
+        try:
+            os.close(protected_executable_fd)
+        except BaseException as error:
+            errors.append(error)
+    if errors:
+        raise RuntimeError("retained launch protections were not fully closed") from errors[0]
 
 
 def _retain_windows_file(path: Path, label: str) -> int:
