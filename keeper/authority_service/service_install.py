@@ -17,6 +17,7 @@ from keeper.authority_service.provider_identity import (
     AUTHORITY_SERVICE_PROCESS_RIGHTS,
     PROVIDER_ACCOUNT_NAME,
     PROVIDER_ACCOUNT_RIGHTS,
+    account_sid,
     account_rights,
     create_provider_account,
     generate_provider_password,
@@ -29,6 +30,11 @@ from keeper.authority_service.provider_identity import (
 )
 from keeper.authority_service.service_main import SERVICE_NAME
 from keeper.authority_service.windows_identity import current_process_sid
+from keeper.authority_service.windows_security import (
+    apply_path_security,
+    enforce_authority_security,
+    exact_path_policy,
+)
 from keeper.recovery import atomic_write_json
 
 
@@ -120,19 +126,22 @@ class AuthorityServiceInstaller:
                 _record(manifest, "directory", directory)
             _persist_manifest(manifest)
 
-        bootstrap_acl = [
-            "icacls",
-            str(SERVICE_ROOT),
-            "/inheritance:r",
-            "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
+        bootstrap_grants = [
+            ("S-1-5-18", "full"),
+            ("S-1-5-32-544", "full"),
         ]
         if service_exists:
-            bootstrap_acl.append(
-                rf"NT SERVICE\{SERVICE_NAME}:(OI)(CI)F"
+            bootstrap_grants.append(
+                (account_sid(rf"NT SERVICE\{SERVICE_NAME}"), "full")
             )
-        _run_recorded(bootstrap_acl, manifest)
+        apply_path_security(
+            SERVICE_ROOT,
+            exact_path_policy(
+                SERVICE_ROOT,
+                bootstrap_grants,
+                integrity="medium",
+            ),
+        )
         provider_sid = _ensure_provider_identity(manifest)
         runtime = SERVICE_ROOT / "bin" / "runtime"
         self._copy_runtime(runtime, manifest, resume=resume)
@@ -193,38 +202,17 @@ class AuthorityServiceInstaller:
                 manifest,
             )
         _ensure_service_process_rights(manifest)
-        protected_acl = [
-            "icacls",
-            str(SERVICE_ROOT),
-            "/inheritance:r",
-            "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
-            f"{service_account}:(OI)(CI)F",
-        ]
-        _run_recorded(protected_acl, manifest)
-        exchange_acl = [
-            "icacls",
-            str(exchange_root),
-            "/inheritance:r",
-            "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
-            f"{service_account}:(OI)(CI)M",
-            f"*{client_sid}:(OI)(CI)M",
-            f"*{provider_sid}:(OI)(CI)M",
-            "*S-1-5-12:(OI)(CI)M",
-        ]
-        _run_recorded(exchange_acl, manifest)
-        _run_recorded(
-            [
-                "icacls",
-                str(exchange_root),
-                "/setintegritylevel",
-                "(OI)(CI)L",
-            ],
-            manifest,
+        security_attestation = enforce_authority_security(
+            service_root=SERVICE_ROOT,
+            exchange_root=exchange_root,
+            service_sid=account_sid(service_account),
+            client_sid=client_sid,
+            provider_sid=provider_sid,
         )
+        manifest.setdefault("security_descriptor_repairs", []).append(
+            _security_repair_record(security_attestation)
+        )
+        _persist_manifest(manifest)
 
         _run_recorded(
             ["sc.exe", "description", SERVICE_NAME, "Keeper security authority"],
@@ -540,41 +528,17 @@ def repair_permissions() -> dict[str, Any]:
         and isinstance(identity.get("sid"), str)
         else None
     )
-    exchange_grants = [
-        "SYSTEM:(OI)(CI)F",
-        "BUILTIN\\Administrators:(OI)(CI)F",
-        f"{service_account}:(OI)(CI)M",
-        f"*{client_sid}:(OI)(CI)M",
-    ]
-    if provider_sid is not None:
-        exchange_grants.append(f"*{provider_sid}:(OI)(CI)M")
-    exchange_grants.append("*S-1-5-12:(OI)(CI)M")
-    commands = [
-        [
-            "icacls",
-            str(SERVICE_ROOT),
-            "/inheritance:r",
-            "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
-            f"{service_account}:(OI)(CI)F",
-        ],
-        [
-            "icacls",
-            str(exchange_root),
-            "/inheritance:r",
-            "/grant:r",
-            *exchange_grants,
-        ],
-        [
-            "icacls",
-            str(exchange_root),
-            "/setintegritylevel",
-            "(OI)(CI)L",
-        ],
-    ]
-    for command in commands:
-        _run_recorded(command, manifest)
+    if provider_sid is None:
+        raise PermissionError(
+            "provisioned provider identity is required for exact ACL repair"
+        )
+    security_attestation = enforce_authority_security(
+        service_root=SERVICE_ROOT,
+        exchange_root=exchange_root,
+        service_sid=account_sid(service_account),
+        client_sid=client_sid,
+        provider_sid=provider_sid,
+    )
     _record_diagnostic_artifacts(manifest, exchange_root)
     _record_runtime_artifacts(manifest)
     manifest.setdefault("permission_repairs", []).append(
@@ -582,7 +546,17 @@ def repair_permissions() -> dict[str, Any]:
             "repaired_at": _now(),
             "restricted_provider_sid": "S-1-5-12",
             "provider_account_sid": provider_sid,
+            "live_security_result": security_attestation["result"],
+            "expected_policy_sha256": security_attestation[
+                "expected_policy_sha256"
+            ],
+            "live_policy_sha256": security_attestation[
+                "live_policy_sha256"
+            ],
         }
+    )
+    manifest.setdefault("security_descriptor_repairs", []).append(
+        _security_repair_record(security_attestation)
     )
     _persist_manifest(manifest)
     return {
@@ -590,6 +564,13 @@ def repair_permissions() -> dict[str, Any]:
         "exchange_root": str(exchange_root),
         "restricted_provider_sid": "S-1-5-12",
         "provider_account_sid": provider_sid,
+        "live_security_result": security_attestation["result"],
+        "expected_policy_sha256": security_attestation[
+            "expected_policy_sha256"
+        ],
+        "live_policy_sha256": security_attestation[
+            "live_policy_sha256"
+        ],
     }
 
 
@@ -825,6 +806,25 @@ def _record_runtime_artifacts(manifest: dict[str, Any]) -> None:
                     "recorded_at": _now(),
                 }
             )
+
+
+def _security_repair_record(
+    attestation: dict[str, Any],
+) -> dict[str, Any]:
+    if attestation.get("result") != "PASS":
+        raise PermissionError(
+            "security descriptor repair cannot be recorded without live equality"
+        )
+    return {
+        "verified_at": _now(),
+        "result": "PASS",
+        "expected_policy_sha256": attestation["expected_policy_sha256"],
+        "live_policy_sha256": attestation["live_policy_sha256"],
+        "paths": sorted(
+            str(item["expected"]["path"])
+            for item in attestation["paths"].values()
+        ),
+    }
 
 
 def _ensure_provider_identity(manifest: dict[str, Any]) -> str:

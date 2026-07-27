@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +22,7 @@ from keeper.providers.adapters import (
     qualification_evidence_digest,
     route_provider,
 )
+from tests.keeper.authority_testkit import TestAuthorityClient
 
 
 def _version_script(path: Path, marker: Path, *, success: bool = True) -> None:
@@ -162,7 +163,10 @@ def test_provider_construction_failure_is_finalized(
             "RuntimeError: construction failed",
         )
 
-    monkeypatch.setattr(application.authority.core.observer, "qualify", fail_construction)
+    test_authority = cast(TestAuthorityClient, application.authority)
+    monkeypatch.setattr(
+        test_authority.core.observer, "qualify", fail_construction
+    )
     with pytest.raises(PermissionError, match="failed"):
         application.qualify_provider("codex", "qualifier")
 
@@ -327,7 +331,9 @@ def test_authority_secret_is_outside_provider_roots_and_not_inherited(
     tmp_path: Path,
 ) -> None:
     application = KeeperApplication(tmp_path / "data")
-    key_path = application.authority.core.keys.root
+    key_path = cast(
+        TestAuthorityClient, application.authority
+    ).core.keys.root
     exchange_root = Path(
         str(application.authority.diagnostics()["client_exchange_root"])
     )

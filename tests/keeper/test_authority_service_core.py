@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from keeper.authority_service.core import (
     CompletionObservation,
     ProcessObservation,
     QualificationObservation,
+    TrustedObserver,
 )
 from keeper.authority_service.protocol import (
     MAX_MESSAGE_BYTES,
@@ -78,7 +79,8 @@ def _service(tmp_path: Path) -> tuple[AuthorityServiceCore, AuthorityServiceClie
     executable = tmp_path / "controlled-provider.exe"
     executable.write_bytes(b"safe-test-provider")
     core = AuthorityServiceCore(
-        tmp_path / "service", observer=_Observer(executable)
+        tmp_path / "service",
+        observer=cast(TrustedObserver, _Observer(executable)),
     )
     client = AuthorityServiceClient(
         test_transport=lambda request: core.dispatch(request, "S-1-5-21-1000")

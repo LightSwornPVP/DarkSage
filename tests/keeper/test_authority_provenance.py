@@ -19,6 +19,10 @@ from keeper.authority_service.provenance import (
     AuthorityProvenanceReporter,
     validate_provenance_report,
 )
+from keeper.authority_service.windows_security import (
+    compare_path_security,
+    expected_authority_security,
+)
 
 
 _CLIENT_SID = "S-1-5-21-1000"
@@ -39,7 +43,9 @@ def _installation(
     Path,
 ]:
     service_root = tmp_path / "AuthorityService"
-    exchange_root = tmp_path / "ClientExchange" / "client"
+    exchange_root = (
+        tmp_path / "ClientExchange" / _CLIENT_SID.replace("-", "_")
+    )
     for directory in (
         service_root / "bin" / "runtime",
         service_root / "config",
@@ -150,6 +156,7 @@ def _installation(
             _SERVICE_ACCOUNT: _SERVICE_SID,
             _PROVIDER_ACCOUNT: _PROVIDER_SID,
         }[account],
+        security_attestor=_passing_security_attestor,
     )
     core.provenance_reporter = reporter
     client = AuthorityServiceClient(
@@ -209,6 +216,68 @@ def _acl_commands(
             "exit_code": 0,
         },
     ]
+
+
+def _passing_security_attestor(**arguments: Any) -> dict[str, Any]:
+    expected = expected_authority_security(**arguments)
+    paths: dict[str, Any] = {}
+    live_policy: dict[str, Any] = {}
+    for name in ("service_root", "client_exchange"):
+        live = {
+            **copy.deepcopy(expected[name]),
+            "mandatory_label_count": 1,
+        }
+        paths[name] = compare_path_security(expected[name], live)
+        live_policy[name] = live
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            expected, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    live_digest = hashlib.sha256(
+        json.dumps(
+            live_policy, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "expected_policy": expected,
+        "expected_policy_sha256": expected_digest,
+        "live_policy": live_policy,
+        "live_policy_sha256": live_digest,
+        "paths": paths,
+        "result": "PASS",
+    }
+
+
+def _failing_security_attestor(**arguments: Any) -> dict[str, Any]:
+    value = _passing_security_attestor(**arguments)
+    service = value["live_policy"]["service_root"]
+    service["aces"].append(
+        {
+            "ace_type": "allow",
+            "trustee_sid": "S-1-1-0",
+            "rights_mask": 0x001F01FF,
+            "inheritance_flags": [
+                "container_inherit",
+                "object_inherit",
+            ],
+            "propagation_flags": [],
+            "inherited": False,
+        }
+    )
+    value["paths"]["service_root"] = compare_path_security(
+        value["expected_policy"]["service_root"], service
+    )
+    value["live_policy_sha256"] = hashlib.sha256(
+        json.dumps(
+            value["live_policy"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    value["result"] = "FAIL"
+    return value
 
 
 def test_authenticated_provenance_passes_without_exposing_secrets(
@@ -317,6 +386,61 @@ def test_manifest_artifact_mutation_produces_failure(
     assert report["package"]["manifest_match"] is False
     assert report["package"]["result"] == "FAIL"
     assert report["overall_result"] == "FAIL"
+
+
+def test_successful_acl_command_history_cannot_override_live_failure(
+    tmp_path: Path,
+) -> None:
+    core, client, manifest_path, _package, _credential = _installation(
+        tmp_path
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert all(item["exit_code"] == 0 for item in manifest["commands"])
+    reporter = core.provenance_reporter
+    assert isinstance(reporter, AuthorityProvenanceReporter)
+    reporter._security_attestor = _failing_security_attestor
+
+    report = client.audit_provenance()
+
+    assert report["acl_policy"]["result"] == "FAIL"
+    assert report["acl_policy"]["paths"]["service_root"][
+        "unexpected_aces"
+    ]
+    assert report["overall_result"] == "FAIL"
+
+
+def test_acl_mutation_after_prior_pass_is_detected(tmp_path: Path) -> None:
+    core, client, _manifest, _package, _credential = _installation(
+        tmp_path
+    )
+    assert client.audit_provenance()["acl_policy"]["result"] == "PASS"
+    reporter = core.provenance_reporter
+    assert isinstance(reporter, AuthorityProvenanceReporter)
+    reporter._security_attestor = _failing_security_attestor
+
+    mutated = client.audit_provenance()
+
+    assert mutated["acl_policy"]["result"] == "FAIL"
+    assert mutated["overall_result"] == "FAIL"
+
+
+def test_unavailable_live_descriptor_is_indeterminate(
+    tmp_path: Path,
+) -> None:
+    core, client, _manifest, _package, _credential = _installation(
+        tmp_path
+    )
+    reporter = core.provenance_reporter
+    assert isinstance(reporter, AuthorityProvenanceReporter)
+
+    def unavailable(**_arguments: Any) -> dict[str, Any]:
+        raise PermissionError("live descriptor unavailable")
+
+    reporter._security_attestor = unavailable
+    report = client.audit_provenance()
+
+    assert report["acl_policy"]["result"] == "INDETERMINATE"
+    assert report["overall_result"] == "INDETERMINATE"
 
 
 def test_auditor_rejects_invalid_report_authentication(

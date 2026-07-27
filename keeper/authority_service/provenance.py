@@ -10,6 +10,9 @@ from typing import Any, Callable
 
 from keeper.authority_service.protocol import PROTOCOL_VERSION, Request
 from keeper.authority_service.provider_identity import account_sid
+from keeper.authority_service.windows_security import (
+    attest_authority_security,
+)
 
 
 AUDIT_REPORT_SCHEMA_VERSION = 1
@@ -56,6 +59,9 @@ class AuthorityProvenanceReporter:
         config_path: Path,
         *,
         identity_resolver: Callable[[str], str] = account_sid,
+        security_attestor: Callable[..., dict[str, Any]] = (
+            attest_authority_security
+        ),
     ) -> None:
         self.service_root = service_root.resolve(strict=True)
         self.config_path = config_path.resolve()
@@ -73,6 +79,7 @@ class AuthorityProvenanceReporter:
             self.service_root / "config" / "provider-identity.bin"
         )
         self._identity_resolver = identity_resolver
+        self._security_attestor = security_attestor
 
     def build(
         self,
@@ -323,33 +330,45 @@ class AuthorityProvenanceReporter:
             "installed package backups compared with manifest",
         )
 
-        acl_summary = expected_acl_policy(
-            service_sid=service_sid,
-            client_sid=str(manifest["authorized_client_sid"]),
-            provider_sid=provider_sid,
-        )
-        acl_digest = canonical_sha256(acl_summary)
-        acl_manifest_match = _manifest_records_acl_policy(
-            manifest,
-            self.service_root,
-            Path(
-                str(
-                    config.get("allowed_evidence_root", "")
-                    if isinstance(config, dict)
-                    else ""
+        exchange_root = Path(
+            str(
+                config.get("allowed_evidence_root", "")
+                if isinstance(config, dict)
+                else ""
+            )
+        ).parent
+        try:
+            expected_exchange_root = (
+                self.service_root.parent
+                / "ClientExchange"
+                / str(manifest["authorized_client_sid"]).replace("-", "_")
+            )
+            if exchange_root.resolve() != expected_exchange_root.resolve():
+                raise PermissionError(
+                    "configured client exchange root is not canonical"
                 )
-            ).parent,
-            service_account,
-            str(manifest["authorized_client_sid"]),
-            provider_recorded_sid,
-        )
+            acl_attestation = self._security_attestor(
+                service_root=self.service_root,
+                exchange_root=exchange_root,
+                service_sid=service_sid,
+                client_sid=str(manifest["authorized_client_sid"]),
+                provider_sid=provider_sid,
+            )
+            acl_result_value = str(acl_attestation["result"])
+            if acl_result_value not in _RESULTS:
+                raise ValueError("live ACL attestation result is invalid")
+        except (KeyError, OSError, PermissionError, RuntimeError, ValueError):
+            acl_attestation = _unavailable_acl_attestation(
+                self.service_root, exchange_root
+            )
+            acl_result_value = "INDETERMINATE"
         acl_result = record(
             "acl_policy",
-            "PASS" if acl_manifest_match else "FAIL",
+            acl_result_value,
             (
-                "protected manifest records the expected ACL and integrity policy"
-                if acl_manifest_match
-                else "protected manifest lacks the expected ACL policy commands"
+                "live DACL and mandatory integrity descriptors match exactly"
+                if acl_result_value == "PASS"
+                else "live DACL or mandatory integrity verification did not pass"
             ),
         )
 
@@ -458,12 +477,7 @@ class AuthorityProvenanceReporter:
             "runtime_artifacts": runtime_artifacts,
             "module_artifacts": module_artifacts,
             "package_backups": backups,
-            "acl_policy": {
-                "normalized_summary": acl_summary,
-                "policy_sha256": acl_digest,
-                "manifest_policy_match": acl_manifest_match,
-                "result": acl_result,
-            },
+            "acl_policy": {**acl_attestation, "result": acl_result},
             "artifact_results": results,
             "overall_result": overall,
         }
@@ -695,27 +709,17 @@ def _validate_report_schema(report: dict[str, Any]) -> None:
     _exact_object(
         acl,
         {
-            "normalized_summary",
-            "policy_sha256",
-            "manifest_policy_match",
+            "schema_version",
+            "expected_policy",
+            "expected_policy_sha256",
+            "live_policy",
+            "live_policy_sha256",
+            "paths",
             "result",
         },
         "ACL policy",
     )
-    summary = acl["normalized_summary"]
-    _exact_object(
-        summary, {"service_root", "client_exchange"}, "ACL summary"
-    )
-    _exact_object(
-        summary["service_root"],
-        {"inheritance", "integrity", "grants", "ordinary_desktop_read"},
-        "service-root ACL",
-    )
-    _exact_object(
-        summary["client_exchange"],
-        {"inheritance", "integrity", "grants"},
-        "client-exchange ACL",
-    )
+    _validate_acl_attestation(acl)
     if (
         not isinstance(report["installed_package_version"], str)
         or not _HEX_40.fullmatch(
@@ -751,6 +755,137 @@ def _validate_report_schema(report: dict[str, Any]) -> None:
             raise RuntimeError("Authority provenance module identity is invalid")
 
 
+def _validate_acl_attestation(acl: dict[str, Any]) -> None:
+    if (
+        acl.get("schema_version") != 1
+        or acl.get("result") not in _RESULTS
+    ):
+        raise RuntimeError("Authority live ACL result is invalid")
+    expected = acl["expected_policy"]
+    _exact_object(
+        expected,
+        {"schema_version", "service_root", "client_exchange"},
+        "expected ACL policy",
+    )
+    paths = acl["paths"]
+    live_policy = acl["live_policy"]
+    _exact_object(
+        paths, {"service_root", "client_exchange"}, "live ACL paths"
+    )
+    _exact_object(
+        live_policy,
+        {"service_root", "client_exchange"},
+        "live ACL policy",
+    )
+    for name in ("service_root", "client_exchange"):
+        _validate_path_policy(expected[name], f"expected {name}")
+        item = paths[name]
+        base_fields = {
+            "expected",
+            "live",
+            "unexpected_aces",
+            "missing_aces",
+            "excessive_rights",
+            "incorrect_inheritance",
+            "duplicate_trustees",
+            "integrity_mismatches",
+            "result",
+        }
+        fields = (
+            base_fields | {"unavailable_reason"}
+            if isinstance(item, dict) and item.get("result") == "INDETERMINATE"
+            else base_fields
+        )
+        _exact_object(item, fields, f"{name} ACL attestation")
+        if item["result"] not in _RESULTS:
+            raise RuntimeError("Authority path ACL result is invalid")
+        if item["live"] is not None:
+            _validate_live_path_policy(item["live"], f"live {name}")
+        for collection in (
+            "unexpected_aces",
+            "missing_aces",
+            "excessive_rights",
+        ):
+            values = item[collection]
+            if not isinstance(values, list):
+                raise RuntimeError("Authority ACL differences are invalid")
+            for ace in values:
+                _validate_ace(ace, "ACL difference")
+        for collection in (
+            "incorrect_inheritance",
+            "duplicate_trustees",
+            "integrity_mismatches",
+        ):
+            if not isinstance(item[collection], list) or not all(
+                isinstance(value, str) for value in item[collection]
+            ):
+                raise RuntimeError("Authority ACL findings are invalid")
+
+
+def _validate_path_policy(value: object, label: str) -> None:
+    item = _exact_object(
+        value,
+        {"path", "dacl_protected", "aces", "mandatory_integrity"},
+        label,
+    )
+    if not isinstance(item["aces"], list):
+        raise RuntimeError("Authority ACL ACE collection is invalid")
+    for ace in item["aces"]:
+        _validate_ace(ace, label)
+    _validate_integrity(item["mandatory_integrity"], label)
+
+
+def _validate_live_path_policy(value: object, label: str) -> None:
+    item = _exact_object(
+        value,
+        {
+            "path",
+            "dacl_protected",
+            "aces",
+            "mandatory_integrity",
+            "mandatory_label_count",
+        },
+        label,
+    )
+    if not isinstance(item["aces"], list):
+        raise RuntimeError("Authority live ACL ACE collection is invalid")
+    for ace in item["aces"]:
+        _validate_ace(ace, label)
+    if item["mandatory_integrity"] is not None:
+        _validate_integrity(item["mandatory_integrity"], label)
+
+
+def _validate_ace(value: object, label: str) -> None:
+    _exact_object(
+        value,
+        {
+            "ace_type",
+            "trustee_sid",
+            "rights_mask",
+            "inheritance_flags",
+            "propagation_flags",
+            "inherited",
+        },
+        label,
+    )
+
+
+def _validate_integrity(value: object, label: str) -> None:
+    _exact_object(
+        value,
+        {
+            "level",
+            "trustee_sid",
+            "policy_mask",
+            "policy_flags",
+            "inheritance_flags",
+            "propagation_flags",
+            "inherited",
+        },
+        label,
+    )
+
+
 _FILE_IDENTITY_FIELDS = {
     "path",
     "size",
@@ -768,43 +903,6 @@ def _exact_object(
     if not isinstance(value, dict) or set(value) != fields:
         raise RuntimeError(f"Authority provenance {label} fields are invalid")
     return value
-
-
-def expected_acl_policy(
-    *, service_sid: str, client_sid: str, provider_sid: str
-) -> dict[str, Any]:
-    return {
-        "service_root": {
-            "inheritance": "disabled",
-            "integrity": "system-default",
-            "grants": [
-                "S-1-5-18:full:object-container",
-                "S-1-5-32-544:full:object-container",
-                f"{service_sid}:full:object-container",
-            ],
-            "ordinary_desktop_read": "denied",
-        },
-        "client_exchange": {
-            "inheritance": "disabled",
-            "integrity": "low-no-write-up",
-            "grants": [
-                "S-1-5-18:full:object-container",
-                "S-1-5-32-544:full:object-container",
-                f"{service_sid}:modify:object-container",
-                f"{client_sid}:modify:object-container",
-                f"{provider_sid}:modify:object-container",
-                "S-1-5-12:modify:object-container",
-            ],
-        },
-    }
-
-
-def canonical_sha256(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
 
 
 def _database_report(
@@ -887,51 +985,67 @@ def _missing_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def _manifest_records_acl_policy(
-    manifest: dict[str, Any],
-    service_root: Path,
-    exchange_root: Path,
-    service_account: str,
-    client_sid: str,
-    provider_sid: str,
-) -> bool:
-    if not str(exchange_root) or not provider_sid:
-        return False
-    expected = [
-        [
-            "icacls",
-            str(service_root),
-            "/inheritance:r",
-            "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
-            f"{service_account}:(OI)(CI)F",
-        ],
-        [
-            "icacls",
-            str(exchange_root),
-            "/inheritance:r",
-            "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
-            f"{service_account}:(OI)(CI)M",
-            f"*{client_sid}:(OI)(CI)M",
-            f"*{provider_sid}:(OI)(CI)M",
-            "*S-1-5-12:(OI)(CI)M",
-        ],
-        [
-            "icacls",
-            str(exchange_root),
-            "/setintegritylevel",
-            "(OI)(CI)L",
-        ],
-    ]
-    successful = [
-        item.get("arguments")
-        for item in manifest.get("commands", [])
-        if isinstance(item, dict) and item.get("exit_code") == 0
-    ]
-    return all(command in successful for command in expected)
+def _unavailable_acl_attestation(
+    service_root: Path, exchange_root: Path
+) -> dict[str, Any]:
+    empty_policy = {
+        "schema_version": 1,
+        "service_root": {
+            "path": str(service_root.resolve()),
+            "dacl_protected": True,
+            "aces": [],
+            "mandatory_integrity": {
+                "level": "unknown",
+                "trustee_sid": "S-1-16-0",
+                "policy_mask": 1,
+                "policy_flags": ["no_write_up"],
+                "inheritance_flags": [],
+                "propagation_flags": [],
+                "inherited": False,
+            },
+        },
+        "client_exchange": {
+            "path": str(exchange_root.resolve()),
+            "dacl_protected": True,
+            "aces": [],
+            "mandatory_integrity": {
+                "level": "unknown",
+                "trustee_sid": "S-1-16-0",
+                "policy_mask": 1,
+                "policy_flags": ["no_write_up"],
+                "inheritance_flags": [],
+                "propagation_flags": [],
+                "inherited": False,
+            },
+        },
+    }
+    paths = {
+        name: {
+            "expected": empty_policy[name],
+            "live": None,
+            "unexpected_aces": [],
+            "missing_aces": [],
+            "excessive_rights": [],
+            "incorrect_inheritance": [],
+            "duplicate_trustees": [],
+            "integrity_mismatches": [],
+            "unavailable_reason": "LiveSecurityDescriptorUnavailable",
+            "result": "INDETERMINATE",
+        }
+        for name in ("service_root", "client_exchange")
+    }
+    return {
+        "schema_version": 1,
+        "expected_policy": empty_policy,
+        "expected_policy_sha256": None,
+        "live_policy": {
+            "service_root": None,
+            "client_exchange": None,
+        },
+        "live_policy_sha256": None,
+        "paths": paths,
+        "result": "INDETERMINATE",
+    }
 
 
 def _entries_digest(entries: list[tuple[str, bytes]]) -> str:

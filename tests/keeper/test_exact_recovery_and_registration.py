@@ -5,7 +5,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -20,6 +20,7 @@ from keeper.providers.adapters import (
     create_provider_registration,
     qualification_evidence_digest,
 )
+from tests.keeper.authority_testkit import TestAuthorityClient
 
 
 def _protected_attempt(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
@@ -293,12 +294,14 @@ def test_terminal_recovery_requires_protected_completion(
                 "provider-completion", completion
             )
         elif completion_case != "unsigned":
-            completion = app.authority.sign("provider-completion", completion)
+            completion = cast(
+                TestAuthorityClient, app.authority
+            ).sign("provider-completion", completion)
         app.store.insert_immutable(
             "artifacts", str(completion["id"]), completion
         )
         if completion_case == "replay":
-            replay = app.authority.sign(
+            replay = cast(TestAuthorityClient, app.authority).sign(
                 "provider-completion",
                 {
                     **completion,

@@ -110,7 +110,12 @@ def verify_live_provenance(
         "database_schema_sha256": report["database_schema"][
             "schema_sha256"
         ],
-        "acl_policy_sha256": report["acl_policy"]["policy_sha256"],
+        "acl_policy_sha256": report["acl_policy"][
+            "expected_policy_sha256"
+        ],
+        "live_acl_policy_sha256": report["acl_policy"][
+            "live_policy_sha256"
+        ],
         "report_authentication": "PASS",
         "request_binding": "PASS",
         "candidate_source_match": "PASS",
