@@ -17,6 +17,7 @@ from keeper.authority_service.provider_identity import (
     AUTHORITY_SERVICE_PROCESS_RIGHTS,
     PROVIDER_ACCOUNT_NAME,
     PROVIDER_ACCOUNT_RIGHTS,
+    account_rights,
     create_provider_account,
     generate_provider_password,
     grant_account_rights,
@@ -856,6 +857,9 @@ def _ensure_provider_identity(manifest: dict[str, Any]) -> str:
         )
         _persist_manifest(manifest)
     rights = grant_provider_account_rights(PROVIDER_ACCOUNT_NAME)
+    verified_rights = account_rights(PROVIDER_ACCOUNT_NAME)
+    if not set(rights).issubset(verified_rights):
+        raise PermissionError("provider account rights could not be verified")
     if not account_created and (
         identity.get("state") == "CREDENTIAL_PROTECTED"
         or identity.get("sid") != actual_sid
@@ -903,9 +907,15 @@ def _ensure_service_process_rights(
     rights = grant_account_rights(
         account_name, AUTHORITY_SERVICE_PROCESS_RIGHTS
     )
+    verified_rights = account_rights(account_name)
+    if not set(rights).issubset(verified_rights):
+        raise PermissionError(
+            "KeeperAuthority process rights could not be verified"
+        )
     manifest["service_process_rights"] = {
         "account_name": account_name,
         "rights": list(rights),
+        "verified_rights": list(verified_rights),
         "applied_at": _now(),
     }
     _persist_manifest(manifest)

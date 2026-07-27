@@ -179,6 +179,40 @@ def grant_account_rights(
     return account_rights
 
 
+def account_rights(account_name: str) -> tuple[str, ...]:
+    _, sid_buffer = _lookup_account_sid(account_name)
+    attributes = _LsaObjectAttributes()
+    attributes.Length = ctypes.sizeof(attributes)
+    policy = wintypes.HANDLE()
+    status = _advapi32().LsaOpenPolicy(
+        None,
+        ctypes.byref(attributes),
+        _POLICY_LOOKUP_NAMES,
+        ctypes.byref(policy),
+    )
+    _raise_lsa(status, "account-rights policy could not be opened")
+    rights = ctypes.POINTER(_LsaUnicodeString)()
+    count = wintypes.ULONG()
+    try:
+        status = _advapi32().LsaEnumerateAccountRights(
+            policy,
+            ctypes.cast(sid_buffer, wintypes.LPVOID),
+            ctypes.byref(rights),
+            ctypes.byref(count),
+        )
+        _raise_lsa(status, "account rights could not be enumerated")
+        return tuple(
+            ctypes.wstring_at(
+                rights[index].Buffer, rights[index].Length // 2
+            )
+            for index in range(int(count.value))
+        )
+    finally:
+        if rights:
+            _advapi32().LsaFreeMemory(rights)
+        _advapi32().LsaClose(policy)
+
+
 def protect_provider_password(password: str, destination: Path) -> None:
     if destination.exists():
         raise FileExistsError(destination)
@@ -411,6 +445,15 @@ def _advapi32() -> Any:
         wintypes.DWORD,
     ]
     value.LsaAddAccountRights.restype = wintypes.LONG
+    value.LsaEnumerateAccountRights.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        ctypes.POINTER(ctypes.POINTER(_LsaUnicodeString)),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    value.LsaEnumerateAccountRights.restype = wintypes.LONG
+    value.LsaFreeMemory.argtypes = [wintypes.LPVOID]
+    value.LsaFreeMemory.restype = wintypes.LONG
     value.LsaClose.argtypes = [wintypes.HANDLE]
     value.LsaClose.restype = wintypes.LONG
     value.LsaNtStatusToWinError.argtypes = [wintypes.LONG]
