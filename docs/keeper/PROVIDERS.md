@@ -15,11 +15,23 @@ policy, independence, qualification, authorization, revocation, and expiration.
 Its canonical digest covers every field other than the digest itself. Missing,
 extra, mistyped, expired, revoked, or mutated fields fail closed.
 
-Registration does not execute the provider or manufacture a version. Discovery
-reports `registered` until an explicitly protected qualification records its
-version, timestamp, method, result, and qualifying component digests. Standalone
-configuration uses this same schema and must bind its exact `provider_command`
-array; legacy registration objects are rejected rather than implicitly upgraded.
+Registration does not execute the provider or accept a caller-supplied version.
+It begins as `REGISTERED_UNQUALIFIED`. A separate explicitly authorized
+qualification retains the registered launcher and script through process creation,
+runs the approved version command, and stores immutable start and completion
+evidence containing the actual normalized output and component identities.
+Discovery reports `qualified` only when the registration references that exact
+protected evidence and digest.
+
+Capabilities and eligible workflow roles are registration authority. Diagnostics
+copy them exactly; routing requires the provider to be qualified, the required
+capability enabled, the role explicitly eligible, and independent-review
+classification for reviewer roles. Empty eligibility means no workflow routing.
+
+Standalone configuration uses the same schema and protected qualification
+evidence. Its exact `provider_command` array must match the registered invocation.
+For batch providers, Keeper canonicalizes the standalone script command to the
+registered `cmd.exe` launcher plus script component before comparison.
 
 The Codex adapter uses non-interactive execution, ephemeral session state,
 workspace-write sandboxing, and an output schema. Its command contract was checked

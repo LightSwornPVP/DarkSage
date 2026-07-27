@@ -56,6 +56,15 @@ terminal sets. Unknown or missing states and incomplete terminal dispositions
 remain indeterminate. `RECOVERED_TERMINAL` additionally requires consistent
 protected ownership and an authoritative result showing the exact process exited.
 
+Mutable provider `run.json` terminal fields are never completion authority.
+Normal completion writes an immutable Keeper completion record containing the
+exact attempt identity, result, executable/configuration identity, and digest of
+the provider evidence before finalizing protected attempt state. Recovery requires
+that record (or the same trusted crash-gap journal), validates its integrity and
+evidence digest, and only then permits `RECOVERED_TERMINAL`. If a child exits before
+the protected record is persisted, the attempt remains uncertain and
+non-retry-safe even when `run.json` claims success.
+
 Inspect the recorded workspace and Git state before retrying a blocked task.
 Keeper preserves dirty and failed worktrees. `cleanup-worktrees PATH` removes only
 a clean registered worktree and refuses dirty work.

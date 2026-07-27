@@ -46,6 +46,14 @@ instances, runs, tasks, stages, roles, attempts, registrations, executable or
 configuration identities, and statuses cannot finalize execution. A complete
 exact-path terminal record is the positive control.
 
+Qualification tests prove ordinary registration is non-executing and unqualified,
+then exercise successful and failed protected batch qualification using actual
+version output. Capability/role tests cover disabled reviewer and repair
+capabilities, empty and single-role eligibility, unknown/duplicate roles, and
+truthful diagnostics. Completion tests mutate only provider terminal evidence and
+verify it cannot finalize without a matching immutable completion journal; forged
+digests and wrong attempt or instance identities remain blocked.
+
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and
 writes structured evidence beneath the selected data directory when Tcl/Tk is

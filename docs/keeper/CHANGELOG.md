@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.5
+
+- Separate provider registration from protected qualification; version metadata
+  now comes only from an authorized retained-component qualification launch and
+  immutable qualification evidence.
+- Preserve registered capability and role restrictions through diagnostics,
+  selection, routing evidence, and reports.
+- Require an immutable Keeper completion journal before recovery can accept
+  mutable provider evidence as terminal.
+- Align standalone batch startup with qualified launcher/script composite
+  registrations.
+
 ## 0.5.4
 
 - Resolve recovery evidence only from the protected canonical `run.json` path
