@@ -38,6 +38,14 @@ registration validation. Batch registration tests separately corrupt launcher an
 script digests and sizes. Recovery tests delete, corrupt, duplicate, and mismatch
 provider evidence after durable execution-start persistence.
 
+Canonical-registration mutation tests alter endpoint, authentication, capability,
+policy, independence, qualification, component, authorization, revocation,
+expiration, path, size, and field shape authority while retaining the old digest;
+every mutation blocks discovery. Exact-attempt recovery tests prove wrong paths,
+instances, runs, tasks, stages, roles, attempts, registrations, executable or
+configuration identities, and statuses cannot finalize execution. A complete
+exact-path terminal record is the positive control.
+
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and
 writes structured evidence beneath the selected data directory when Tcl/Tk is

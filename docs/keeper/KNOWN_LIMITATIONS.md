@@ -21,3 +21,6 @@
 - Rendered Tk automation requires a Python runtime with matching Tcl/Tk libraries.
   The packaged diagnostic reports unavailable with exit 78 when that prerequisite is
   absent.
+- Cross-process reroute reservation and storage races are covered directly. A
+  dedicated separate-process test driving complete `WorkflowCoordinator.retry()`
+  winner launch and loser exception handling remains deferred.

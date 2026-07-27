@@ -43,6 +43,19 @@ filesystem `run.json` is missing or unreadable. Provider evidence is corroborati
 evidence only. Missing, malformed, duplicated, inaccessible, or identity-mismatched
 evidence is recorded as indeterminate and is never retry-safe.
 
+Recovery reads only the exact canonical `run.json` path protected in the durable
+attempt. It does not search sibling provider directories for a matching run ID.
+The path must remain canonical and contained in the run evidence root. The record
+must exactly match the Keeper run, task, stage, role, attempt and retry parent,
+logical provider and instance, stable registration, executable and configuration,
+endpoint and authentication, capability and policy identities, evidence path,
+launch nonce, and ownership token. Missing fields are mismatches, not wildcards.
+
+Provider status is canonicalized and checked against explicit nonterminal and
+terminal sets. Unknown or missing states and incomplete terminal dispositions
+remain indeterminate. `RECOVERED_TERMINAL` additionally requires consistent
+protected ownership and an authoritative result showing the exact process exited.
+
 Inspect the recorded workspace and Git state before retrying a blocked task.
 Keeper preserves dirty and failed worktrees. `cleanup-worktrees PATH` removes only
 a clean registered worktree and refuses dirty work.

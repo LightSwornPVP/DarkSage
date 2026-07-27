@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4
+
+- Resolve recovery evidence only from the protected canonical `run.json` path
+  and require complete execution identity plus an explicit provider status.
+- Canonically digest the complete schema-versioned provider registration,
+  including qualification and authorization metadata.
+- Align standalone command startup with the current registration schema and
+  exact invocation binding used by desktop routing.
+
 ## 0.5.3
 
 - Require protected, pre-existing provider registration before command-provider
