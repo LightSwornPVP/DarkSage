@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.2
+
+- Added post-validation Windows replacement and junction-retarget integration
+  coverage at the process-creation boundary.
+- Retained registered batch scripts against replacement in addition to their
+  immutable command launcher.
+- Added spawned-process reroute races, committed-reservation crash recovery,
+  execution-start crash recovery, and transactional rollback coverage.
+- Persisted reroute reservation state in recovery and final-report evidence.
+
 ## 0.5.1
 
 - Made recovery process discovery tri-state and fail closed on access denial and

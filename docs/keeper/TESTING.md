@@ -23,6 +23,12 @@ descendants, executable replacement, registration changes, truthful retry instan
 IDs, actual-execution-only reporting, independent-connection authorization races,
 and exact one-use reroute authority.
 
+Release-gate tests use Windows `spawn` workers with independent database
+connections. Executable race tests pause after validation and retained-handle
+acquisition but before `CreateProcess`, then attempt same-path, same-size, and
+junction retarget attacks. Directory symlinks are used when the current token
+permits them; otherwise the integration uses an unprivileged Windows junction.
+
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and
 writes structured evidence beneath the selected data directory when Tcl/Tk is
