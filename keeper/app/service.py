@@ -22,7 +22,7 @@ from keeper.app.path_safety import contained_path, validate_path_budget
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.app.workflow import WorkflowCoordinator
-from keeper.providers.adapters import ProviderDiscovery
+from keeper.providers.adapters import ProviderDiscovery, create_provider_registration
 from keeper.recovery import atomic_write_json, load_json
 from keeper.version import VERSION
 
@@ -37,7 +37,12 @@ class KeeperApplication:
         self.workflow = WorkflowCoordinator(self.store, self.data_directory, self.notify)
 
     def diagnostics(self) -> dict[str, Any]:
-        providers = [item.to_dict() for item in ProviderDiscovery(self.provider_paths()).discover()]
+        providers = [
+            item.to_dict()
+            for item in ProviderDiscovery(
+                self.provider_paths(), self.provider_registrations()
+            ).discover()
+        ]
         writable = _writable(self.data_directory)
         return {
             "keeper_version": VERSION,
@@ -80,6 +85,31 @@ class KeeperApplication:
 
     def save_provider_paths(self, paths: dict[str, str]) -> None:
         self.store.upsert("settings", "providers", paths)
+
+    def provider_registrations(self) -> dict[str, dict[str, Any]]:
+        value = self.store.get("settings", "provider_registrations") or {}
+        return {
+            str(key): dict(registration)
+            for key, registration in value.items()
+            if isinstance(key, str) and isinstance(registration, dict)
+        }
+
+    def register_provider(
+        self, provider_id: str, executable: Path, authorizer: str
+    ) -> dict[str, Any]:
+        if provider_id not in {"codex", "claude"} or not authorizer.strip():
+            raise PermissionError(
+                "provider registration requires a supported identity and authorizer"
+            )
+        registration = create_provider_registration(
+            provider_id, executable, authorized_by=authorizer
+        )
+        registrations = self.provider_registrations()
+        registrations[provider_id] = registration
+        self.store.upsert(
+            "settings", "provider_registrations", registrations
+        )
+        return registration
 
     def add_project(self, repository: Path, name: str | None = None) -> dict[str, Any]:
         inspection = self.git.inspect(repository)

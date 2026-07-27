@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
-import subprocess
 import uuid
+from datetime import UTC, datetime
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,29 +36,26 @@ class ProviderDiagnostic:
     verification_status: str
     capabilities: ProviderCapabilities
     detail: str = ""
+    registration: dict[str, Any] | None = None
+    discovery_state: str = "unavailable"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class CodexCommandAdapter(CliProvider):
-    def __init__(self, executable: str) -> None:
+    def __init__(self, executable: str, registration: dict[str, Any]) -> None:
         resolved = str(Path(executable).resolve(strict=True))
-        digest = hashlib.sha256(Path(resolved).read_bytes()).hexdigest()
         super().__init__(
             (resolved, "{prompt}"),
             provider_name="codex-command",
-            expected_executable_sha256=digest,
-            expected_executable_size=Path(resolved).stat().st_size,
-            registration_id="codex-command",
-            registration_version="1",
-            configuration_digest=hashlib.sha256(
-                json.dumps([resolved, "{prompt}"]).encode("utf-8")
-            ).hexdigest(),
+            **_cli_registration_arguments(registration),
         )
         self.executable = resolved
-        self.executable_sha256 = digest
+        self.executable_sha256 = str(registration["executable_sha256"])
+        self.registration = dict(registration)
         self.instance_id = uuid.uuid4().hex
+        self.validate()
 
     def build_command(self, request: AgentRequest) -> list[str]:
         schema_path = request.stdout_path.parent / "provider-output-schema.json"
@@ -78,23 +76,18 @@ class CodexCommandAdapter(CliProvider):
 class ClaudeCommandAdapter(CliProvider):
     """Claude CLI adapter. Implemented against documented flags; locally unverified."""
 
-    def __init__(self, executable: str) -> None:
+    def __init__(self, executable: str, registration: dict[str, Any]) -> None:
         resolved = str(Path(executable).resolve(strict=True))
-        digest = hashlib.sha256(Path(resolved).read_bytes()).hexdigest()
         super().__init__(
             (resolved, "{prompt}"),
             provider_name="claude-command",
-            expected_executable_sha256=digest,
-            expected_executable_size=Path(resolved).stat().st_size,
-            registration_id="claude-command",
-            registration_version="1",
-            configuration_digest=hashlib.sha256(
-                json.dumps([resolved, "{prompt}"]).encode("utf-8")
-            ).hexdigest(),
+            **_cli_registration_arguments(registration),
         )
         self.executable = resolved
-        self.executable_sha256 = digest
+        self.executable_sha256 = str(registration["executable_sha256"])
+        self.registration = dict(registration)
         self.instance_id = uuid.uuid4().hex
+        self.validate()
 
     def build_command(self, request: AgentRequest) -> list[str]:
         prompt = request.prompt_path.read_text(encoding="utf-8")
@@ -150,8 +143,13 @@ class ClaudeCommandAdapter(CliProvider):
 
 
 class ProviderDiscovery:
-    def __init__(self, configured_paths: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        configured_paths: dict[str, str] | None = None,
+        registrations: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.configured_paths = configured_paths or {}
+        self.registrations = registrations or {}
 
     def discover(self) -> list[ProviderDiagnostic]:
         return [
@@ -194,16 +192,27 @@ class ProviderDiscovery:
                 (path for candidate in candidates if (path := shutil.which(candidate))),
                 None,
             )
-        version = _version(executable) if executable else None
+        registration = self.registrations.get(identifier)
+        valid, detail = _validate_discovery_registration(
+            identifier, executable, registration
+        )
         return ProviderDiagnostic(
             identifier,
             display_name,
-            executable is not None,
+            valid,
             executable,
-            version,
-            verification,
+            (
+                str(registration.get("qualified_version"))
+                if valid and registration
+                and registration.get("qualified_version") is not None
+                else None
+            ),
+            verification if valid else "blocked",
             ProviderCapabilities(),
-            "" if executable else "Executable was not found; configure its full path in Settings.",
+            detail,
+            dict(registration) if valid and registration else None,
+            "qualified" if valid and registration and registration.get("qualified_version")
+            else "registered" if valid else "blocked" if executable else "unavailable",
         )
 
     def _ollama(self) -> ProviderDiagnostic:
@@ -213,12 +222,14 @@ class ProviderDiscovery:
             "Ollama local models",
             bool(executable),
             executable,
-            _version(executable) if executable else None,
+            None,
             "adapter verified with deterministic client; local service not exercised"
             if not executable
             else "executable detected; health check required before use",
             ProviderCapabilities(local_only=True, streaming=False),
             "" if executable else "Ollama is optional and was not found.",
+            None,
+            "configured" if executable else "unavailable",
         )
 
 
@@ -279,20 +290,158 @@ def _supports_role(capabilities: ProviderCapabilities, role: str) -> bool:
     return False
 
 
-def _version(executable: str) -> str | None:
-    try:
-        result = subprocess.run(
-            [executable, "--version"],
-            capture_output=True,
-            text=True,
-            shell=False,
-            timeout=5,
-            check=False,
+def create_provider_registration(
+    provider_id: str,
+    executable: Path,
+    *,
+    authorized_by: str,
+) -> dict[str, Any]:
+    configured = executable.resolve(strict=True)
+    capabilities = asdict(ProviderCapabilities())
+    launcher = configured
+    script: Path | None = None
+    if configured.suffix.casefold() in {".cmd", ".bat"}:
+        script = configured
+        launcher = Path(os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")).resolve(
+            strict=True
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    value = (result.stdout or result.stderr).strip().splitlines()
-    return value[0][:200] if value else None
+    launcher_content = launcher.read_bytes()
+    invocation = (
+        [str(launcher), "/d", "/c", str(script), "{prompt}"]
+        if script is not None
+        else [str(launcher), "{prompt}"]
+    )
+    registration: dict[str, Any] = {
+        "trusted_registration_id": f"keeper-provider:{provider_id}:v1",
+        "registration_version": "1",
+        "logical_provider_id": provider_id,
+        "provider_name": f"{provider_id}-command",
+        "canonical_executable_path": str(configured),
+        "launcher_path": str(launcher),
+        "launcher_sha256": hashlib.sha256(launcher_content).hexdigest(),
+        "launcher_size": len(launcher_content),
+        "launcher_registration_id": f"keeper-launcher:{provider_id}:v1",
+        "launcher_registration_version": "1",
+        "script_path": str(script) if script is not None else None,
+        "script_sha256": (
+            hashlib.sha256(script.read_bytes()).hexdigest() if script is not None else None
+        ),
+        "script_size": script.stat().st_size if script is not None else None,
+        "script_registration_id": (
+            f"keeper-script:{provider_id}:v1" if script is not None else None
+        ),
+        "script_registration_version": "1" if script is not None else None,
+        "invocation_shape": invocation,
+        "working_directory_policy": "task-worktree",
+        "allowed_environment": "keeper-filtered",
+        "endpoint_identity": "local-process",
+        "authentication_mode": "external-cli-session",
+        "capability_set": capabilities,
+        "provider_policy": "registered-command",
+        "independence_classification": "role-enforced",
+        "registration_status": "active",
+        "authorized_by": authorized_by,
+        "authorized_at": datetime.now(UTC).isoformat(),
+        "revoked_at": None,
+    }
+    registration["executable_sha256"] = registration["launcher_sha256"]
+    registration["executable_size"] = registration["launcher_size"]
+    registration["configuration_digest"] = _registration_configuration_digest(
+        registration
+    )
+    return registration
+
+
+def _validate_discovery_registration(
+    provider_id: str,
+    executable: str | None,
+    registration: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    if executable is None:
+        return False, "Executable was not found; configure its full path in Settings."
+    if not isinstance(registration, dict):
+        return False, "Configured provider has no immutable registration."
+    required = {
+        "trusted_registration_id", "registration_version", "logical_provider_id",
+        "provider_name", "canonical_executable_path", "launcher_path",
+        "launcher_sha256", "launcher_size", "configuration_digest",
+        "authentication_mode", "capability_set", "provider_policy",
+        "independence_classification", "registration_status", "authorized_by",
+        "authorized_at",
+    }
+    if any(key not in registration for key in required):
+        return False, "Provider registration is malformed or incomplete."
+    if (
+        registration.get("logical_provider_id") != provider_id
+        or registration.get("registration_status") != "active"
+        or registration.get("revoked_at") is not None
+    ):
+        return False, "Provider registration is stale, revoked, or mismatched."
+    if registration.get("configuration_digest") != _registration_configuration_digest(
+        registration
+    ):
+        return False, "Provider registration configuration digest is stale."
+    try:
+        configured = Path(executable).resolve(strict=True)
+        if configured != Path(str(registration["canonical_executable_path"])).resolve(
+            strict=True
+        ):
+            return False, "Configured provider path differs from registration."
+        launcher = Path(str(registration["launcher_path"])).resolve(strict=True)
+        launcher_content = launcher.read_bytes()
+        if (
+            hashlib.sha256(launcher_content).hexdigest()
+            != registration["launcher_sha256"]
+            or len(launcher_content) != registration["launcher_size"]
+        ):
+            return False, "Registered provider launcher identity changed."
+        script_path = registration.get("script_path")
+        if script_path is not None:
+            script = Path(str(script_path)).resolve(strict=True)
+            script_content = script.read_bytes()
+            if (
+                script != configured
+                or hashlib.sha256(script_content).hexdigest()
+                != registration.get("script_sha256")
+                or len(script_content) != registration.get("script_size")
+            ):
+                return False, "Registered provider script identity changed."
+    except (OSError, TypeError, ValueError):
+        return False, "Provider registration could not be validated."
+    return True, "Immutable registration validated; discovery did not execute provider code."
+
+
+def _registration_configuration_digest(registration: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "provider_id": registration.get("logical_provider_id"),
+                "invocation_shape": registration.get("invocation_shape"),
+                "launcher_sha256": registration.get("launcher_sha256"),
+                "script_sha256": registration.get("script_sha256"),
+                "working_directory_policy": registration.get(
+                    "working_directory_policy"
+                ),
+                "allowed_environment": registration.get("allowed_environment"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _cli_registration_arguments(registration: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "expected_executable_sha256": registration.get("launcher_sha256"),
+        "expected_executable_size": registration.get("launcher_size"),
+        "registration_id": registration.get("trusted_registration_id"),
+        "registration_version": registration.get("registration_version"),
+        "configuration_digest": registration.get("configuration_digest"),
+        "expected_script_sha256": registration.get("script_sha256"),
+        "expected_script_size": registration.get("script_size"),
+        "script_registration_id": registration.get("script_registration_id"),
+        "script_registration_version": registration.get("script_registration_version"),
+    }
 
 
 def _domain_schema(role: str) -> dict[str, Any]:

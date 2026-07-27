@@ -132,11 +132,19 @@ def test_running_command_tree_is_discovered_logged_and_terminated_on_restart(
     provider = CliProvider(
         (str(slow), "{prompt}"),
         "controlled-command",
-        expected_executable_sha256=hashlib.sha256(slow.read_bytes()).hexdigest(),
-        expected_executable_size=slow.stat().st_size,
+        expected_executable_sha256=hashlib.sha256(
+            Path(__import__("os").environ["COMSPEC"]).read_bytes()
+        ).hexdigest(),
+        expected_executable_size=Path(
+            __import__("os").environ["COMSPEC"]
+        ).stat().st_size,
         registration_id="controlled-command",
         registration_version="1",
         configuration_digest="c" * 64,
+        expected_script_sha256=hashlib.sha256(slow.read_bytes()).hexdigest(),
+        expected_script_size=slow.stat().st_size,
+        script_registration_id="controlled-script",
+        script_registration_version="1",
     )
     thread = threading.Thread(
         target=lambda: results.append(

@@ -30,6 +30,10 @@ class CliProvider(AgentProvider):
         registration_id: str | None = None,
         registration_version: str | None = None,
         configuration_digest: str | None = None,
+        expected_script_sha256: str | None = None,
+        expected_script_size: int | None = None,
+        script_registration_id: str | None = None,
+        script_registration_version: str | None = None,
         before_process_create: Callable[[Path], None] | None = None,
     ) -> None:
         self.command_script: Path | None = None
@@ -40,13 +44,7 @@ class CliProvider(AgentProvider):
         ):
             self.command_script = Path(command_template[0]).resolve(strict=True)
             launcher = Path(os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe"))
-            script_digest = hashlib.sha256(self.command_script.read_bytes()).hexdigest()
             command_template = (str(launcher), *command_template[1:])
-            expected_executable_sha256 = hashlib.sha256(launcher.read_bytes()).hexdigest()
-            expected_executable_size = launcher.stat().st_size
-            configuration_digest = hashlib.sha256(
-                f"{configuration_digest or ''}:{script_digest}".encode("utf-8")
-            ).hexdigest()
         self.command_template = command_template
         self.provider_name = provider_name
         self.expected_executable_sha256 = expected_executable_sha256
@@ -54,6 +52,10 @@ class CliProvider(AgentProvider):
         self.registration_id = registration_id
         self.registration_version = registration_version
         self.configuration_digest = configuration_digest
+        self.expected_script_sha256 = expected_script_sha256
+        self.expected_script_size = expected_script_size
+        self.script_registration_id = script_registration_id
+        self.script_registration_version = script_registration_version
         self.before_process_create = before_process_create
         self.instance_id = uuid.uuid4().hex
         self._active_process: subprocess.Popen[str] | None = None
@@ -98,6 +100,25 @@ class CliProvider(AgentProvider):
             raise PermissionError(
                 "provider executable content changed after registration"
             )
+        if self.command_script is not None:
+            if (
+                self.expected_script_sha256 is None
+                or self.expected_script_size is None
+                or not self.script_registration_id
+                or not self.script_registration_version
+            ):
+                raise PermissionError(
+                    "immutable batch-script registration is incomplete"
+                )
+            script_content = self.command_script.read_bytes()
+            if (
+                hashlib.sha256(script_content).hexdigest()
+                != self.expected_script_sha256
+                or len(script_content) != self.expected_script_size
+            ):
+                raise PermissionError(
+                    "provider batch script changed after registration"
+                )
         if "{prompt}" not in self.command_template:
             raise RuntimeError("provider_command must include the {prompt} argument placeholder")
         return resolved, content
@@ -123,6 +144,14 @@ class CliProvider(AgentProvider):
                     _close_windows_handle(handle)
                 raise PermissionError(
                     "retained provider executable failed identity verification"
+                )
+            if self.command_script is not None and hashlib.sha256(
+                self.command_script.read_bytes()
+            ).hexdigest() != self.expected_script_sha256:
+                for handle in retained_executable_handles:
+                    _close_windows_handle(handle)
+                raise PermissionError(
+                    "retained provider batch script failed identity verification"
                 )
         else:
             protected_executable_fd, protected_path = _sealed_executable(
@@ -221,6 +250,17 @@ class CliProvider(AgentProvider):
                             "registration_id": self.registration_id,
                             "registration_version": self.registration_version,
                             "configuration_digest": self.configuration_digest,
+                            "batch_script": (
+                                str(self.command_script)
+                                if self.command_script is not None
+                                else None
+                            ),
+                            "batch_script_sha256": self.expected_script_sha256,
+                            "batch_script_size": self.expected_script_size,
+                            "script_registration_id": self.script_registration_id,
+                            "script_registration_version": (
+                                self.script_registration_version
+                            ),
                             "launch_nonce": uuid.uuid4().hex,
                             "ownership_token": uuid.uuid4().hex,
                             "job_or_group_identity": (

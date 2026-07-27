@@ -139,7 +139,13 @@ class WorkflowCoordinator:
             if not run_id:
                 continue
             stage = str(record.get("stage", ""))
-            provider_record = _active_provider_record(record)
+            execution_attempt = _durable_active_execution(record)
+            evidence_resolution = _resolve_execution_evidence(
+                record, execution_attempt
+            )
+            provider_record = evidence_resolution.get("record")
+            if execution_attempt is None:
+                provider_record = _legacy_active_provider_record(record)
             ownership = (
                 provider_record.get("process_ownership")
                 if isinstance(provider_record, dict)
@@ -150,16 +156,28 @@ class WorkflowCoordinator:
             authority_records = self._process_ownership_records(
                 run_id,
                 (
-                    str(provider_record.get("run_id"))
-                    if isinstance(provider_record, dict)
-                    and provider_record.get("run_id")
+                    str(
+                        execution_attempt.get("provider_run_id")
+                        if isinstance(execution_attempt, dict)
+                        else provider_record.get("run_id")
+                        if isinstance(provider_record, dict)
+                        else ""
+                    )
+                    if (
+                        isinstance(execution_attempt, dict)
+                        or isinstance(provider_record, dict)
+                    )
                     else None
                 ),
             )
             authority = authority_records[0] if len(authority_records) == 1 else None
+            if ownership is None and isinstance(authority, dict):
+                ownership = authority
             pid = record.get("process_id")
             if not isinstance(pid, int) and isinstance(ownership, dict):
                 pid = ownership.get("pid")
+            if not isinstance(pid, int) and isinstance(authority, dict):
+                pid = authority.get("pid")
             if not isinstance(pid, int):
                 pid = _active_provider_pid(record)
             if process_exists is not _ORIGINAL_PROCESS_EXISTS:
@@ -180,9 +198,28 @@ class WorkflowCoordinator:
             retained_handle_acquired = False
             termination_uncertain = False
             termination_reason = ""
+            binding_verified = ownership_records_match(authority, ownership)
+            safe_terminal_finalization = bool(
+                execution_attempt
+                and evidence_resolution.get("status") == "RESOLVED_TERMINAL"
+                and isinstance(pid, int)
+                and probe.state is ProcessState.CONFIRMED_ABSENT
+                and isinstance(authority, dict)
+                and binding_verified
+            )
+            unresolved_execution = bool(execution_attempt) and not (
+                safe_terminal_finalization
+            )
+            if unresolved_execution and not isinstance(pid, int):
+                probe = ProcessProbe(
+                    ProcessState.INDETERMINATE,
+                    "durable execution-started attempt has no authoritative pid",
+                )
+                running = False
+                termination_uncertain = True
+                termination_reason = str(evidence_resolution.get("detail", ""))
             process_state = probe.state.value
             descendant_state = "not-inspected"
-            binding_verified = ownership_records_match(authority, ownership)
             if probe.state in {
                 ProcessState.CONFIRMED_PRESENT,
                 ProcessState.INDETERMINATE,
@@ -238,6 +275,10 @@ class WorkflowCoordinator:
                             else:
                                 descendant_state = "root-only"
                                 fresh_provider = _active_provider_record(record)
+                                if execution_attempt is None:
+                                    fresh_provider = _legacy_active_provider_record(
+                                        record
+                                    )
                                 fresh_ownership = (
                                     fresh_provider.get("process_ownership")
                                     if isinstance(fresh_provider, dict)
@@ -246,7 +287,10 @@ class WorkflowCoordinator:
                                 fresh_authorities = self._process_ownership_records(
                                     run_id,
                                     (
-                                        str(fresh_provider.get("run_id"))
+                                        str(execution_attempt.get("provider_run_id"))
+                                        if isinstance(execution_attempt, dict)
+                                        and execution_attempt.get("provider_run_id")
+                                        else str(fresh_provider.get("run_id"))
                                         if isinstance(fresh_provider, dict)
                                         and fresh_provider.get("run_id")
                                         else None
@@ -257,6 +301,11 @@ class WorkflowCoordinator:
                                     if len(fresh_authorities) == 1
                                     else None
                                 )
+                                if (
+                                    not isinstance(fresh_ownership, dict)
+                                    and isinstance(fresh_authority, dict)
+                                ):
+                                    fresh_ownership = fresh_authority
                                 final_identity = retained.identity()
                                 final_tree = _windows_process_tree(pid)
                                 destructive_revalidation_verified = (
@@ -295,6 +344,26 @@ class WorkflowCoordinator:
                 except (RuntimeError, ValueError):
                     continue
             current = self._run(run_id)
+            if safe_terminal_finalization and isinstance(execution_attempt, dict):
+                current["provider_execution_attempts"] = [
+                    (
+                        {
+                            **item,
+                            "status": "RECOVERED_TERMINAL",
+                            "finish_time": _now(),
+                            "result": (
+                                provider_record.get("status")
+                                if isinstance(provider_record, dict)
+                                else "terminal"
+                            ),
+                        }
+                        if isinstance(item, dict)
+                        and item.get("provider_run_id")
+                        == execution_attempt.get("provider_run_id")
+                        else item
+                    )
+                    for item in current.get("provider_execution_attempts", [])
+                ]
             current.update(
                 {
                     "status": "interrupted",
@@ -303,6 +372,7 @@ class WorkflowCoordinator:
                             "uncertain"
                             if (
                                 termination_uncertain
+                                or unresolved_execution
                                 or (running and not identity_verified)
                                 or (
                                     isinstance(provider_record, dict)
@@ -325,6 +395,13 @@ class WorkflowCoordinator:
                         ),
                         "descendant_state": descendant_state,
                         "termination_reason": termination_reason,
+                        "durable_execution_attempt": execution_attempt,
+                        "provider_evidence_status": evidence_resolution.get(
+                            "status"
+                        ),
+                        "provider_evidence_detail": evidence_resolution.get(
+                            "detail"
+                        ),
                         "ownership_binding_verified": binding_verified,
                         "authoritative_ownership": authority,
                         "authoritative_ownership_record_count": len(
@@ -334,6 +411,7 @@ class WorkflowCoordinator:
                         "retry_safe": (
                             not running
                             and not termination_uncertain
+                            and not unresolved_execution
                             and (
                                 not isinstance(provider_record, dict)
                                 or binding_verified
@@ -412,7 +490,7 @@ class WorkflowCoordinator:
             raise PermissionError("retry routing state is missing or malformed")
         _, _, proposed = _select_routes(
             task,
-            self.store.get("settings", "providers") or {},
+            self._provider_settings(),
         )
         previous = attempts[-1]
         decisions = previous.get("decisions")
@@ -638,7 +716,7 @@ class WorkflowCoordinator:
             self._advance(run_id, RunStage.PROVIDER_SELECTION)
         providers, routes, routing = _select_routes(
             stored,
-            self.store.get("settings", "providers") or {},
+            self._provider_settings(),
         )
         reroute_authorization: str | None = None
         if retry_stage is not None:
@@ -761,6 +839,7 @@ class WorkflowCoordinator:
             }
         )
         self.store.upsert("runs", run_id, record)
+
         if bool(stored.get("commit_requested", False)):
             staging_allowed = (
                 [".keeper-workflow/"]
@@ -903,6 +982,13 @@ class WorkflowCoordinator:
         self.store.upsert("runs", run_id, record)
         self.notify("run_completed", "Run completed", f"Run {run_id}")
 
+    def _provider_settings(self) -> dict[str, Any]:
+        paths = dict(self.store.get("settings", "providers") or {})
+        paths["__registrations__"] = dict(
+            self.store.get("settings", "provider_registrations") or {}
+        )
+        return paths
+
     def _finalize_report(
         self,
         run_id: str,
@@ -932,12 +1018,27 @@ class WorkflowCoordinator:
             not value for value in execution_ids
         ):
             raise RuntimeError("provider execution attempts are duplicated or malformed")
-        if set(execution_ids) != set(evidence_by_id):
+        unresolved_execution_ids = {
+            str(item.get("provider_run_id"))
+            for item in executions
+            if item.get("status") == "EXECUTION_STARTED"
+            and str(item.get("provider_run_id")) not in evidence_by_id
+        }
+        if set(execution_ids) != set(evidence_by_id) and not (
+            terminal_status == "BLOCKED"
+            and set(execution_ids) - set(evidence_by_id)
+            == unresolved_execution_ids
+            and set(evidence_by_id).issubset(set(execution_ids))
+        ):
             raise RuntimeError(
                 "provider execution attempts do not reconcile with provider run evidence"
             )
         for attempt in executions:
-            evidence_record = evidence_by_id[str(attempt["provider_run_id"])]
+            evidence_record = evidence_by_id.get(str(attempt["provider_run_id"]))
+            if evidence_record is None and attempt.get("status") == "EXECUTION_STARTED":
+                continue
+            if evidence_record is None:
+                raise RuntimeError("provider execution evidence is missing")
             if (
                 evidence_record.get("task_id") != attempt.get("task_id")
                 or evidence_record.get("role") != attempt.get("role")
@@ -1075,6 +1176,7 @@ class WorkflowCoordinator:
             "routing_attempts": list(run.get("routing_attempts", [])),
             "provider_execution_attempts": executions,
             "reroute_reservations": reroute_reservations,
+            "recovery": run.get("recovery", {}),
             "lifecycle_stages": list(run.get("history", [])),
             "authorizations": authorizations,
             "waivers": waivers,
@@ -1419,6 +1521,27 @@ class WorkflowCoordinator:
             "recorded_at": _now(),
         }
         self.store.insert_immutable("artifacts", str(value["id"]), value)
+        run["provider_execution_attempts"] = [
+            (
+                {
+                    **item,
+                    "process_id": ownership.get("pid"),
+                    "process_ownership": value,
+                    "launch_nonce": ownership.get("launch_nonce"),
+                    "ownership_token": ownership.get("ownership_token"),
+                    "process_creation_identity": ownership.get("creation_time"),
+                    "parent_or_job_identity": ownership.get(
+                        "job_or_group_identity"
+                    ),
+                }
+                if isinstance(item, dict)
+                and item.get("provider_run_id") == provider_run_id
+                and item.get("status") == "EXECUTION_STARTED"
+                else item
+            )
+            for item in run.get("provider_execution_attempts", [])
+        ]
+        self.store.upsert("runs", keeper_run_id, run)
 
     def _process_ownership_records(
         self, keeper_run_id: str, provider_run_id: str | None
@@ -1688,8 +1811,23 @@ def _select_routes(
         if not bool(stored.get("is_demo", False)):
             raise PermissionError("mock routing is restricted to explicit demonstrations")
         return _mock_routes(str(stored.get("mock_scenario", "repair")))
+    registrations = configured_paths.get("__registrations__", {})
+    paths = {
+        str(key): str(value)
+        for key, value in configured_paths.items()
+        if key != "__registrations__"
+    }
     diagnostics = ProviderDiscovery(
-        {str(key): str(value) for key, value in configured_paths.items()}
+        paths,
+        (
+            {
+                str(key): dict(value)
+                for key, value in registrations.items()
+                if isinstance(value, dict)
+            }
+            if isinstance(registrations, dict)
+            else {}
+        ),
     ).discover()
     real_diagnostics = [item for item in diagnostics if item.provider_id != "mock"]
     if policy == "local-only":
@@ -1848,10 +1986,18 @@ def _registered_verification_specs(stored: dict[str, Any]) -> list[dict[str, Any
 
 
 def _adapter(diagnostic: ProviderDiagnostic) -> AgentProvider:
-    if diagnostic.provider_id == "codex" and diagnostic.executable:
-        return CodexCommandAdapter(diagnostic.executable)
-    if diagnostic.provider_id == "claude" and diagnostic.executable:
-        return ClaudeCommandAdapter(diagnostic.executable)
+    if (
+        diagnostic.provider_id == "codex"
+        and diagnostic.executable
+        and diagnostic.registration
+    ):
+        return CodexCommandAdapter(diagnostic.executable, diagnostic.registration)
+    if (
+        diagnostic.provider_id == "claude"
+        and diagnostic.executable
+        and diagnostic.registration
+    ):
+        return ClaudeCommandAdapter(diagnostic.executable, diagnostic.registration)
     if diagnostic.provider_id == "ollama":
         return OllamaProvider()
     if diagnostic.provider_id == "mock":
@@ -1871,15 +2017,28 @@ def _routing_decision(
     policy: str,
     configured_paths: dict[str, Any],
 ) -> dict[str, Any]:
+    if diagnostic.registration is not None:
+        registration = dict(diagnostic.registration)
+        executable = str(registration["canonical_executable_path"])
+        executable_sha256 = str(registration["executable_sha256"])
+        registration_digest = _stable_registration_digest(registration)
+        return {
+            "role": role,
+            "provider_id": provider_id,
+            "provider": provider.provider_name,
+            "provider_instance_id": provider.instance_id,
+            "executable": executable,
+            "executable_sha256": executable_sha256,
+            "capability": capability,
+            "independence": independence,
+            "reasons": reasons,
+            "policy": policy,
+            "stable_registration": registration,
+            "stable_registration_digest": registration_digest,
+        }
     executable = ""
     executable_sha256 = ""
     executable_size = 0
-    if diagnostic.executable:
-        executable_path = Path(diagnostic.executable).resolve(strict=True)
-        executable = str(executable_path)
-        content = executable_path.read_bytes()
-        executable_sha256 = hashlib.sha256(content).hexdigest()
-        executable_size = len(content)
     endpoint_identity = (
         "http://127.0.0.1:11434"
         if diagnostic.provider_id == "ollama"
@@ -1896,7 +2055,7 @@ def _routing_decision(
         key: value
         for key, value in diagnostic.to_dict()["capabilities"].items()
     }
-    registration: dict[str, Any] = {
+    generated_registration: dict[str, Any] = {
         "trusted_registration_id": f"keeper-provider:{provider_id}:v1",
         "logical_provider_id": provider_id,
         "provider_name": provider.provider_name,
@@ -1912,20 +2071,20 @@ def _routing_decision(
         "registration_version": 1,
         "configured_path": str(configured_paths.get(provider_id, "")),
     }
-    registration["configuration_digest"] = hashlib.sha256(
+    generated_registration["configuration_digest"] = hashlib.sha256(
         json.dumps(
             {
                 "diagnostic": diagnostic.to_dict(),
-                "registration": registration,
+                "registration": generated_registration,
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
     registration_digest = hashlib.sha256(
-        json.dumps(registration, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(
+            generated_registration, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
     ).hexdigest()
     return {
         "role": role,
@@ -1938,7 +2097,7 @@ def _routing_decision(
         "independence": independence,
         "reasons": reasons,
         "policy": policy,
-        "stable_registration": registration,
+        "stable_registration": generated_registration,
         "stable_registration_digest": registration_digest,
     }
 
@@ -2098,7 +2257,6 @@ def _validate_routing_decisions(
             "configuration_digest",
             "endpoint_identity",
             "capability_set",
-            "selected_capability",
             "provider_policy",
             "independence_classification",
             "authentication_mode",
@@ -2131,11 +2289,8 @@ def _validate_routing_decisions(
             or item.get("provider_id")
             != registration.get("logical_provider_id")
             or item.get("provider") != registration.get("provider_name")
-            or item.get("policy") != registration.get("provider_policy")
-            or item.get("capability")
-            != registration.get("selected_capability")
-            or item.get("independence")
-            != registration.get("independence_classification")
+            or registration.get("registration_status", "active") != "active"
+            or registration.get("revoked_at") is not None
         ):
             raise PermissionError("routing decision identity is malformed")
         if policy != "mock" and (
@@ -2209,6 +2364,20 @@ def _active_provider_pid(record: dict[str, Any]) -> int | None:
 def _active_provider_record(
     record: dict[str, Any],
 ) -> dict[str, Any] | None:
+    resolution = _resolve_execution_evidence(
+        record, _durable_active_execution(record)
+    )
+    return (
+        resolution.get("record")
+        if resolution.get("status") == "RESOLVED_ACTIVE"
+        and isinstance(resolution.get("record"), dict)
+        else None
+    )
+
+
+def _legacy_active_provider_record(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
     root = record.get("evidence_root")
     if not isinstance(root, str):
         return None
@@ -2221,9 +2390,108 @@ def _active_provider_record(
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if value.get("status") == "running" and isinstance(value, dict):
+        if isinstance(value, dict) and value.get("status") == "running":
             return value
     return None
+
+
+def _durable_active_execution(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    attempts = record.get("provider_execution_attempts")
+    if not isinstance(attempts, list):
+        return None
+    active = [
+        item
+        for item in attempts
+        if isinstance(item, dict) and item.get("status") == "EXECUTION_STARTED"
+    ]
+    if len(active) != 1:
+        return (
+            {
+                "status": "INDETERMINATE",
+                "detail": "duplicate durable execution-started attempts",
+            }
+            if active
+            else None
+        )
+    return active[0]
+
+
+def _resolve_execution_evidence(
+    record: dict[str, Any],
+    attempt: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if attempt is None:
+        return {"status": "NO_ACTIVE_ATTEMPT", "detail": ""}
+    provider_run_id = attempt.get("provider_run_id")
+    if not isinstance(provider_run_id, str) or not provider_run_id:
+        return {
+            "status": "INDETERMINATE",
+            "detail": "durable execution attempt has no provider run id",
+        }
+    root_value = record.get("evidence_root")
+    if not isinstance(root_value, str):
+        return {
+            "status": "MISSING_EVIDENCE",
+            "detail": "run has no provider evidence root",
+        }
+    root = Path(root_value).resolve()
+    candidates = list(root.glob(".ai-workflow/runs/*/run.json"))
+    matches: list[dict[str, Any]] = []
+    malformed = False
+    inaccessible = False
+    for path in candidates:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            malformed = True
+            continue
+        except OSError:
+            inaccessible = True
+            continue
+        if isinstance(value, dict) and value.get("run_id") == provider_run_id:
+            matches.append(value)
+    if len(matches) > 1:
+        return {
+            "status": "DUPLICATE_EVIDENCE",
+            "detail": "multiple provider evidence records match the durable attempt",
+        }
+    if not matches:
+        status = (
+            "MALFORMED_EVIDENCE"
+            if malformed
+            else "INACCESSIBLE_EVIDENCE"
+            if inaccessible
+            else "MISSING_EVIDENCE"
+        )
+        return {
+            "status": status,
+            "detail": "provider evidence could not be uniquely resolved",
+        }
+    value = matches[0]
+    if (
+        value.get("task_id") != attempt.get("task_id")
+        or value.get("role") != attempt.get("role")
+        or (
+            attempt.get("stage_id") is not None
+            and value.get("stage_id") not in {None, attempt.get("stage_id")}
+        )
+    ):
+        return {
+            "status": "IDENTITY_MISMATCH",
+            "detail": "provider evidence identity differs from protected execution state",
+            "record": value,
+        }
+    return {
+        "status": (
+            "RESOLVED_ACTIVE"
+            if value.get("status") == "running"
+            else "RESOLVED_TERMINAL"
+        ),
+        "detail": "provider evidence resolved against protected execution state",
+        "record": value,
+    }
 
 
 def _windows_process_tree(root_process_id: int) -> list[int] | None:

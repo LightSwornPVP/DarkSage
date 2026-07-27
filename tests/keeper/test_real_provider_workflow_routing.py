@@ -9,6 +9,7 @@ from keeper.providers.adapters import (
     ProviderCapabilities,
     ProviderDiagnostic,
     ProviderDiscovery,
+    create_provider_registration,
 )
 
 
@@ -23,6 +24,12 @@ def diagnostic(identifier: str, root: Path) -> ProviderDiagnostic:
         "test",
         "controlled fake executable",
         ProviderCapabilities(),
+        registration=create_provider_registration(
+            identifier,
+            executable,
+            authorized_by="routing-test",
+        ),
+        discovery_state="qualified",
     )
 
 

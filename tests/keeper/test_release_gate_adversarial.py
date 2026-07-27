@@ -106,11 +106,17 @@ def _registered_script_provider(
     return CliProvider(
         (str(script), "{prompt}"),
         "controlled-command",
-        expected_executable_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
-        expected_executable_size=script.stat().st_size,
+        expected_executable_sha256=hashlib.sha256(
+            Path(os.environ["COMSPEC"]).read_bytes()
+        ).hexdigest(),
+        expected_executable_size=Path(os.environ["COMSPEC"]).stat().st_size,
         registration_id="controlled-command",
         registration_version="1",
         configuration_digest="c" * 64,
+        expected_script_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+        expected_script_size=script.stat().st_size,
+        script_registration_id="controlled-script",
+        script_registration_version="1",
         before_process_create=before_process_create,
     )
 
