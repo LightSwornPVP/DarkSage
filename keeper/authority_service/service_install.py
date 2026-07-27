@@ -32,9 +32,10 @@ class AuthorityServiceInstaller:
         service_exists = _service_exists()
         if resume:
             manifest = _load_incomplete_manifest()
-            if service_exists:
+            if service_exists and not _successful_service_create(manifest):
                 raise PermissionError(
-                    "KeeperAuthority service registration already exists"
+                    "KeeperAuthority service registration is not recorded "
+                    "by the incomplete install"
                 )
             _validate_resume_artifacts(manifest)
             source_commit = _git_head(self.source_root)
@@ -105,28 +106,61 @@ class AuthorityServiceInstaller:
             _persist_manifest(manifest)
 
         runtime = SERVICE_ROOT / "bin" / "runtime"
-        self._copy_runtime(runtime, manifest)
+        self._copy_runtime(runtime, manifest, resume=resume)
         package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
-        self._build_package(package)
-        _record_file(manifest, package)
+        if package.exists():
+            if not resume or not _recorded_file_matches(manifest, package):
+                raise PermissionError(
+                    "Authority Service package cannot be safely reused"
+                )
+        else:
+            self._build_package(package)
+            _record_file(manifest, package)
 
         config = SERVICE_ROOT / "config" / "service.json"
-        atomic_write_json(
-            config,
-            {
-                "schema_version": 1,
-                "service_name": SERVICE_NAME,
-                "service_root": str(SERVICE_ROOT / "data"),
-                "provider_root": str(exchange_root / "provider-work"),
-                "allowed_evidence_root": str(exchange_root / "evidence"),
-                "authorized_client_sid": client_sid,
-                "pipe_name": r"\\.\pipe\KeeperAuthority-v1",
-            },
-        )
-        _record_file(manifest, config)
+        if config.exists():
+            if not resume or not _recorded_file_matches(manifest, config):
+                raise PermissionError(
+                    "Authority Service configuration cannot be safely reused"
+                )
+        else:
+            atomic_write_json(
+                config,
+                {
+                    "schema_version": 1,
+                    "service_name": SERVICE_NAME,
+                    "service_root": str(SERVICE_ROOT / "data"),
+                    "provider_root": str(exchange_root / "provider-work"),
+                    "allowed_evidence_root": str(exchange_root / "evidence"),
+                    "authorized_client_sid": client_sid,
+                    "pipe_name": r"\\.\pipe\KeeperAuthority-v1",
+                },
+            )
+            _record_file(manifest, config)
         _persist_manifest(manifest)
 
         service_account = rf"NT SERVICE\{SERVICE_NAME}"
+        image_path = (
+            f'"{runtime / "python.exe"}" "{package}" service '
+            f'--config "{config}"'
+        )
+        if not service_exists:
+            _run_recorded(
+                [
+                    "sc.exe",
+                    "create",
+                    SERVICE_NAME,
+                    "binPath=",
+                    image_path,
+                    "obj=",
+                    service_account,
+                    "start=",
+                    "demand",
+                    "DisplayName=",
+                    "Keeper Authority Service",
+                ],
+                manifest,
+            )
         protected_acl = [
             "icacls",
             str(SERVICE_ROOT),
@@ -158,26 +192,6 @@ class AuthorityServiceInstaller:
             manifest,
         )
 
-        image_path = (
-            f'"{runtime / "python.exe"}" "{package}" service '
-            f'--config "{config}"'
-        )
-        _run_recorded(
-            [
-                "sc.exe",
-                "create",
-                SERVICE_NAME,
-                "binPath=",
-                image_path,
-                "obj=",
-                service_account,
-                "start=",
-                "demand",
-                "DisplayName=",
-                "Keeper Authority Service",
-            ],
-            manifest,
-        )
         _run_recorded(
             ["sc.exe", "description", SERVICE_NAME, "Keeper security authority"],
             manifest,
@@ -203,8 +217,17 @@ class AuthorityServiceInstaller:
         return manifest
 
     def _copy_runtime(
-        self, destination: Path, manifest: dict[str, Any]
+        self,
+        destination: Path,
+        manifest: dict[str, Any],
+        *,
+        resume: bool = False,
     ) -> None:
+        if destination.exists():
+            if not resume:
+                raise FileExistsError(destination)
+            _verify_recorded_tree(destination, manifest)
+            return
         base = Path(sys.base_prefix).resolve(strict=True)
         destination.mkdir(parents=True, exist_ok=False)
         _record(manifest, "directory", destination)
@@ -223,6 +246,7 @@ class AuthorityServiceInstaller:
                 _record_file(manifest, target)
         dlls = destination / "DLLs"
         shutil.copytree(base / "DLLs", dlls)
+        _record(manifest, "directory", dlls)
         for path in sorted(item for item in dlls.rglob("*") if item.is_file()):
             _record_file(manifest, path)
         standard_library = destination / (
@@ -459,6 +483,45 @@ def _artifact_recorded(manifest: dict[str, Any], path: Path) -> bool:
     )
 
 
+def _recorded_file_matches(
+    manifest: dict[str, Any], path: Path
+) -> bool:
+    content = path.read_bytes()
+    expected_path = str(path.resolve())
+    expected_hash = hashlib.sha256(content).hexdigest()
+    return any(
+        isinstance(item, dict)
+        and item.get("kind") == "file"
+        and item.get("path") == expected_path
+        and item.get("size") == len(content)
+        and item.get("sha256") == expected_hash
+        for item in manifest.get("artifacts", [])
+    )
+
+
+def _verify_recorded_tree(
+    directory: Path, manifest: dict[str, Any]
+) -> None:
+    for path in directory.rglob("*"):
+        if path.is_dir():
+            continue
+        elif not _recorded_file_matches(manifest, path):
+            raise PermissionError(
+                f"runtime file differs from install manifest: {path}"
+            )
+
+
+def _successful_service_create(manifest: dict[str, Any]) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("exit_code") == 0
+        and isinstance(item.get("arguments"), list)
+        and item["arguments"][:3]
+        == ["sc.exe", "create", SERVICE_NAME]
+        for item in manifest.get("commands", [])
+    )
+
+
 def _load_incomplete_manifest() -> dict[str, Any]:
     if not MANIFEST_PATH.is_file():
         raise PermissionError(
@@ -491,10 +554,16 @@ def _validate_resume_artifacts(manifest: dict[str, Any]) -> None:
         for item in manifest["artifacts"]
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
+    recorded_parents = {
+        str(parent.resolve())
+        for value in tuple(recorded)
+        for parent in Path(value).parents
+        if parent == SERVICE_ROOT or parent.is_relative_to(SERVICE_ROOT)
+    }
     allowed = recorded | {
         str(MANIFEST_PATH.resolve()),
         str(MANIFEST_PATH.parent.resolve()),
-    }
+    } | recorded_parents
     existing = {
         str(path.resolve())
         for path in SERVICE_ROOT.rglob("*")
