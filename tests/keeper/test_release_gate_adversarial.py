@@ -13,15 +13,10 @@ import pytest
 
 from keeper.app.service import KeeperApplication
 from keeper.app.storage import KeeperStore
-from keeper.authority import AuthorityKey
 from keeper.cli import main
 from keeper.providers.base import AgentRequest
 from keeper.providers.codex_cli import CliProvider
-from keeper.providers.adapters import (
-    apply_protected_qualification,
-    create_provider_registration,
-    qualification_evidence_digest,
-)
+from keeper.providers.adapters import create_provider_registration
 from keeper.recovery import ProcessState, _classify_windows_open_failure
 
 
@@ -82,25 +77,12 @@ def _crash_after_reservation_worker(
     os._exit(91)
 
 
-def _crash_after_execution_start_worker(data_directory: str) -> None:
-    app = KeeperApplication(Path(data_directory))
-    app.workflow._record_provider_execution(
-        "run",
-        {
-            "event": "started",
-            "provider_run_id": "provider-run",
-            "task_id": "task",
-            "stage_id": "author_execution",
-            "role": "builder",
-            "retry_count": 1,
-            "provider_name": "test-provider",
-            "provider_instance_id": "instance",
-            "start_time": datetime.now(UTC).isoformat(),
-            "evidence_path": str(
-                Path(data_directory) / "evidence" / "provider-run" / "run.json"
-            ),
-        },
-    )
+def _crash_after_authority_reservation_worker(
+    data_directory: str, payload: dict[str, Any]
+) -> None:
+    from tests.keeper.authority_testkit import TestAuthorityClient
+
+    TestAuthorityClient(Path(data_directory)).reserve_attempt(**payload)
     os._exit(92)
 
 
@@ -341,81 +323,30 @@ def test_standalone_commands_reject_incomplete_registration(
 def test_standalone_commands_accept_complete_current_registration(
     tmp_path: Path, command: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = Path(os.environ.get("COMSPEC", "cmd.exe")).resolve(strict=True)
+    executable = tmp_path / "controlled-codex.cmd"
+    executable.write_text(
+        "@echo off\r\n"
+        "if \"%~1\"==\"--version\" echo codex-cli 1.0\r\n"
+        "exit /b 0\r\n",
+        encoding="utf-8",
+    )
+    authority = KeeperApplication(tmp_path / "protected")
+    authority.register_provider("codex", executable, "standalone-test")
+    registration = authority.qualify_provider("codex", "standalone-test")
+    monkeypatch.setattr(
+        "keeper.cli.authority_client_factory",
+        lambda _root: authority.authority,
+    )
     workflow = tmp_path / ".ai-workflow"
     workflow.mkdir()
-    provider_command = [str(executable), "/d", "/c", "exit", "0", "{prompt}"]
-    registration = create_provider_registration(
-        "codex",
-        executable,
-        authorized_by="standalone-test",
-        invocation_shape=provider_command,
-    )
-    qualification: dict[str, Any] = {
-        "id": "qualification:standalone-test",
-        "kind": "provider_qualification",
-        "registration_id": registration["trusted_registration_id"],
-        "registration_version": registration["registration_version"],
-        "provider_id": registration["logical_provider_id"],
-        "provider_instance_id": "standalone-qualification",
-        "provider_run_id": "standalone-qualification-run",
-        "executable_sha256": registration["executable_sha256"],
-        "launcher_sha256": registration["launcher_sha256"],
-        "script_sha256": registration["script_sha256"],
-        "qualification_command": [str(executable), "--version"],
-        "command_digest": hashlib.sha256(
-            json.dumps([str(executable), "--version"]).encode("utf-8")
-        ).hexdigest(),
-        "started_at": "2026-07-26T00:00:00+00:00",
-        "finished_at": "2026-07-26T00:00:01+00:00",
-        "exit_status": 0,
-        "raw_version_output": "controlled-provider 1.0",
-        "normalized_version": "controlled-provider 1.0",
-        "qualification_method": "protected-registered-launch",
-        "qualification_result": "qualified",
-        "authorized_by": "standalone-test",
-        "ownership": {"launch_nonce": "standalone-qualification"},
-    }
-    qualification["evidence_digest"] = qualification_evidence_digest(qualification)
-    protected = tmp_path / "protected"
-    authority = AuthorityKey(protected)
-    start = authority.sign(
-        "provider-qualification-start",
-        {
-            "id": "qualification:standalone-test:start",
-            "kind": "provider_qualification_started",
-            "schema_version": 1,
-            "registration_id": registration["trusted_registration_id"],
-            "provider_id": registration["logical_provider_id"],
-            "authorization_reference": "standalone-test",
-            "event_challenge": "standalone-qualification",
-            "started_at": "2026-07-26T00:00:00+00:00",
-        },
-    )
-    qualification["authorization_reference"] = start["id"]
-    qualification["event_challenge"] = start["event_challenge"]
-    qualification["evidence_digest"] = qualification_evidence_digest(qualification)
-    qualification = authority.sign("provider-qualification", qualification)
-    registration = apply_protected_qualification(
-        registration,
-        qualification,
-        authority_verifier=authority.verify,
-        expected_challenge=str(start["event_challenge"]),
-        expected_authorization_reference=str(start["id"]),
-    )
-    protected_store = KeeperStore(protected / "keeper.db")
-    protected_store.migrate()
-    protected_store.insert_immutable(
-        "artifacts", str(qualification["id"]), qualification
-    )
-    protected_store.insert_immutable("artifacts", str(start["id"]), start)
-    monkeypatch.setattr("keeper.cli.default_data_directory", lambda: protected)
     (workflow / "config.json").write_text(
         json.dumps(
             {
-                "provider_command": provider_command,
+                "provider_command": [str(executable), "{prompt}"],
                 "provider_registration": registration,
-                "provider_qualification_reference": qualification["id"],
+                "provider_qualification_reference": registration[
+                    "qualification_evidence_id"
+                ],
             }
         ),
         encoding="utf-8",
@@ -520,59 +451,61 @@ def test_crash_after_reservation_is_durable_and_non_reusable(
         store.consume_reroute_authorization("authorization", expected)
 
 
-def test_crash_after_execution_start_preserves_uncertain_attempt(
+def test_crash_after_authority_reservation_blocks_duplicate_attempt(
     tmp_path: Path,
 ) -> None:
     data = tmp_path / "data"
     app = KeeperApplication(data)
-    expected = _expected()
-    app.store.upsert("authorizations", "authorization", _authorization(expected))
-    app.store.consume_reroute_authorization(
-        "authorization", expected, consumer_id="execution-consumer"
+    provider = tmp_path / "controlled-codex.cmd"
+    provider.write_text(
+        "@echo off\r\n"
+        "if \"%~1\"==\"--version\" echo codex-cli 1.0\r\n"
+        "exit /b 0\r\n",
+        encoding="utf-8",
     )
-    app.store.upsert(
-        "runs",
-        "run",
-        {
-            "id": "run",
-            "task_id": "task",
-            "routing_attempts": [
-                {
-                    "attempt_id": "destination",
-                    "attempt_number": 2,
-                    "retry_of": "source",
-                    "reroute_authorization_id": "authorization",
-                    "decisions": [
-                        {
-                            "role": "builder",
-                            "provider_instance_id": "instance",
-                            "stable_registration_digest": "d" * 64,
-                            "stable_registration": {"registration_id": "test"},
-                            "executable": "provider.exe",
-                            "executable_sha256": "e" * 64,
-                        }
-                    ],
-                }
-            ],
-        },
-    )
+    app.register_provider("codex", provider, "test")
+    registration = app.qualify_provider("codex", "test")
+    exchange = Path(
+        str(app.authority.diagnostics()["client_exchange_root"])
+    ).resolve()
+    evidence = exchange / "evidence" / "run" / "run.json"
+    prompt = exchange / "evidence" / "run" / "prompt.md"
+    stdout = exchange / "evidence" / "run" / "stdout.log"
+    stderr = exchange / "evidence" / "run" / "stderr.log"
+    workspace = exchange / "worktrees" / "run"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "registration_id": registration["trusted_registration_id"],
+        "keeper_run_id": "run",
+        "task_id": "task",
+        "stage_id": "author_execution",
+        "role": "builder",
+        "attempt_number": 2,
+        "provider_run_id": "provider-run",
+        "provider_instance_id": "instance",
+        "evidence_path": str(evidence),
+        "prompt_path": str(prompt),
+        "stdout_path": str(stdout),
+        "stderr_path": str(stderr),
+        "workspace": str(workspace),
+        "timeout_seconds": 30,
+        "reasoning_level": "medium",
+        "environment": {},
+    }
     context = multiprocessing.get_context("spawn")
     worker = context.Process(
-        target=_crash_after_execution_start_worker, args=(str(data),)
+        target=_crash_after_authority_reservation_worker,
+        args=(str(data), payload),
     )
     worker.start()
     worker.join(20)
     assert worker.exitcode == 92
-    run = app.store.get("runs", "run")
-    reservation = app.store.reroute_reservation("authorization")
-    assert run is not None
-    attempts = run["provider_execution_attempts"]
-    assert len(attempts) == 1
-    assert attempts[0]["status"] == "EXECUTION_STARTED"
-    assert reservation is not None
-    assert reservation["state"] == "EXECUTION_STARTED"
-    with pytest.raises(PermissionError):
-        app.store.consume_reroute_authorization("authorization", expected)
+    attempt_id = "provider-attempt:run:provider-run"
+    reserved = app.authority.query_state("attempts", attempt_id)["record"]
+    assert reserved["service_state"] == "RESERVED"
+    with pytest.raises(PermissionError, match="already reserved"):
+        app.authority.reserve_attempt(**payload)
 
 
 def test_transaction_failure_rolls_back_consumption_and_reservation(

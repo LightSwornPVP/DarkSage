@@ -48,6 +48,7 @@ class Keeper:
         workspace_manager: WorkspaceManager,
         router: ProviderRouter | None = None,
         lifecycle_observer: Callable[[str], None] | None = None,
+        runs_root: Path | None = None,
     ) -> None:
         self.config = config
         self.runner = runner
@@ -56,6 +57,7 @@ class Keeper:
         self.queue = TaskQueue(config.state_root / "tasks")
         self.verifier = Verifier()
         self.lifecycle_observer = lifecycle_observer
+        self.runs_root = runs_root or config.state_root / "runs"
 
     def _run_agent(
         self,
@@ -69,7 +71,7 @@ class Keeper:
             provider = self.router.for_role(role)
             runner = AgentRunner(
                 provider,
-                self.config.state_root / "runs",
+                self.runs_root,
                 self.config.process_timeout_seconds,
                 self.runner.maximum_output_bytes,
                 self.runner.keeper_run_id,

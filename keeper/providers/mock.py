@@ -9,6 +9,8 @@ from keeper.providers.base import AgentProvider, AgentRequest, ProcessResult
 
 
 class MockProvider(AgentProvider):
+    requires_authority_service = False
+
     def __init__(
         self,
         exit_code: int = 0,

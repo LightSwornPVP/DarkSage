@@ -18,6 +18,7 @@ class AgentRequest:
     reasoning_level: str = "medium"
     on_process_started: Callable[[int], None] | None = None
     on_process_owned: Callable[[dict[str, Any]], None] | None = None
+    authority_attempt_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,8 @@ class ProcessResult:
 class AgentProvider(ABC):
     provider_name = "primary"
     instance_id = uuid.uuid4().hex
+    requires_authority_service = True
+
     @abstractmethod
     def validate(self) -> None: ...
 

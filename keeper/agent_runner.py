@@ -24,7 +24,10 @@ class AgentRunner:
         maximum_output_bytes: int = 1_048_576,
         keeper_run_id: str | None = None,
         ownership_sink: Callable[[dict[str, Any]], None] | None = None,
-        execution_sink: Callable[[dict[str, Any]], None] | None = None,
+        execution_sink: Callable[
+            [dict[str, Any]], dict[str, Any] | None
+        ]
+        | None = None,
         execution_authority: dict[str, Any] | None = None,
     ) -> None:
         self.provider = provider
@@ -116,21 +119,41 @@ class AgentRunner:
             )
         record.evidence_path = str(record_path.resolve())
         atomic_write_json(record_path, record.to_dict())
+        execution_authorization: dict[str, Any] = {}
         if self.execution_sink is not None:
-            self.execution_sink(
-                {
-                    "event": "started",
-                    "provider_run_id": run_id,
-                    "task_id": task.id,
-                    "stage_id": task.active_run_stage,
-                    "role": role,
-                    "retry_count": retry,
-                    "provider_name": self.provider.provider_name,
-                    "provider_instance_id": self.provider.instance_id,
-                    "start_time": record.start_time,
-                    "evidence_path": str(record_path.resolve()),
-                }
+            execution_authorization = (
+                self.execution_sink(
+                    {
+                        "event": "started",
+                        "provider_run_id": run_id,
+                        "task_id": task.id,
+                        "stage_id": task.active_run_stage,
+                        "role": role,
+                        "retry_count": retry,
+                        "provider_name": self.provider.provider_name,
+                        "provider_instance_id": self.provider.instance_id,
+                        "authority_required": bool(
+                            self.provider.requires_authority_service
+                        ),
+                        "start_time": record.start_time,
+                        "evidence_path": str(record_path.resolve()),
+                        "prompt_path": str(prompt_path.resolve()),
+                        "stdout_path": str(stdout_path.resolve()),
+                        "stderr_path": str(stderr_path.resolve()),
+                        "workspace": str(workspace.resolve()),
+                        "timeout_seconds": self.timeout_seconds,
+                        "reasoning_level": reasoning_level,
+                    }
+                )
+                or {}
             )
+            attempt_id = execution_authorization.get("attempt_id")
+            if attempt_id is not None and not isinstance(attempt_id, str):
+                raise PermissionError(
+                    "provider authority attempt identity is malformed"
+                )
+            record.authority_attempt_id = attempt_id
+            atomic_write_json(record_path, record.to_dict())
 
         def process_started(process_id: int) -> None:
             record.process_id = process_id
@@ -145,8 +168,11 @@ class AgentRunner:
                 "task_id": task.id,
                 "provider_run_id": run_id,
                 "stage_id": task.active_run_stage,
-                "provider_name": self.provider.provider_name,
-                "provider_instance_id": self.provider.instance_id,
+                        "provider_name": self.provider.provider_name,
+                        "provider_instance_id": self.provider.instance_id,
+                        "authority_required": bool(
+                            self.provider.requires_authority_service
+                        ),
                 "role": role,
                 "evidence_path": str(directory.resolve()),
             }
@@ -165,6 +191,7 @@ class AgentRunner:
                 reasoning_level,
                 process_started,
                 process_owned,
+                record.authority_attempt_id,
             )
         )
         for log_path in (stdout_path, stderr_path):

@@ -168,6 +168,7 @@ class ClaudeCommandAdapter(CliProvider):
             request.reasoning_level,
             request.on_process_started,
             request.on_process_owned,
+            request.authority_attempt_id,
         )
         result = super().run(raw_request)
         if result.exit_code:

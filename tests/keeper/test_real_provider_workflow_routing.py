@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from keeper.app import workflow
+from tests.keeper.authority_testkit import TestAuthorityClient
 from keeper.providers.adapters import (
     ProviderCapabilities,
     ProviderDiagnostic,
@@ -51,7 +52,8 @@ def test_automatic_policy_routes_independent_command_adapters(
         lambda self: [diagnostic("codex", tmp_path), diagnostic("claude", tmp_path)],
     )
     providers, routes, decisions = workflow._select_routes(  # noqa: SLF001
-        {"provider_policy": "automatic", "risk": "high"}, {}
+        {"provider_policy": "automatic", "risk": "high"},
+        {"__authority_client__": TestAuthorityClient(tmp_path / "authority")},
     )
     assert providers[routes["builder"]].instance_id != providers[routes["reviewer"]].instance_id
     assert {item["role"] for item in decisions} == {

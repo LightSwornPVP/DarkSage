@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from backend.app.config import Settings
 from backend.app.database.base import Base
 from backend.app.database.session import create_engine, get_engine
+from tests.keeper.authority_testkit import TestAuthorityClient
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +24,21 @@ def _reset_engine_cache() -> Iterator[None]:
     get_engine.cache_clear()
     yield
     get_engine.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _inject_keeper_test_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep legacy application tests explicit while production has no signer fallback."""
+    monkeypatch.setattr(
+        "keeper.app.service.authority_client_factory",
+        TestAuthorityClient,
+    )
+    monkeypatch.setattr(
+        "keeper.cli.authority_client_factory",
+        TestAuthorityClient,
+    )
 
 
 @pytest.fixture

@@ -30,6 +30,7 @@ class RunRecord:
     independence_classification: str | None = None
     launch_nonce: str | None = None
     ownership_token: str | None = None
+    authority_attempt_id: str | None = None
     evidence_path: str | None = None
     reasoning_level: str = "medium"
     start_time: str = field(default_factory=now_iso)

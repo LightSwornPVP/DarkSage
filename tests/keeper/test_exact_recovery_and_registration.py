@@ -317,25 +317,17 @@ def test_terminal_recovery_requires_protected_completion(
     recovered = app.workflow.recover_interrupted_runs()[0]
 
     assert recovered["recovery"]["provider_evidence_status"] == "RESOLVED_TERMINAL"
-    verified = completion_case == "valid"
-    assert recovered["recovery"]["retry_safe"] is verified
+    assert recovered["recovery"]["retry_safe"] is False
     assert recovered["recovery"]["protected_completion_status"] == (
-        "VERIFIED"
-        if verified
-        else "MISSING"
+        "MISSING"
         if completion_case == "missing"
-        else "INTEGRITY_MISMATCH"
-        if completion_case == "forged-digest"
-        else "AUTHENTICATION_FAILED"
-        if completion_case in {"unsigned", "wrong-key"}
         else "INDETERMINATE"
         if completion_case == "replay"
-        else "IDENTITY_MISMATCH"
+        else "LEGACY_UNVERIFIABLE"
     )
-    assert recovered["provider_execution_attempts"][0]["status"] == (
-        "RECOVERED_TERMINAL"
-        if verified
-        else "EXECUTION_STARTED"
+    assert (
+        recovered["provider_execution_attempts"][0]["status"]
+        == "EXECUTION_STARTED"
     )
 
 

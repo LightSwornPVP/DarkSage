@@ -4,11 +4,14 @@ import ctypes
 import hashlib
 import os
 import subprocess
+import threading
+import time
 from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 _TOKEN_ALL_ACCESS = 0x000F01FF
@@ -189,28 +192,43 @@ def restricted_named_pipe_client_token(pipe: int) -> Iterator[int]:
             _kernel32().CloseHandle(token)
 
 
+@contextmanager
+def impersonate_token(token: int) -> Iterator[None]:
+    if not _advapi32().ImpersonateLoggedOnUser(token):
+        raise PermissionError(
+            f"restricted provider impersonation failed: {ctypes.get_last_error()}"
+        )
+    try:
+        yield
+    finally:
+        if not _advapi32().RevertToSelf():
+            raise PermissionError(
+                f"restricted provider impersonation could not be reverted: {ctypes.get_last_error()}"
+            )
+
+
 def create_restricted_primary_token(token: int) -> int:
     restricted_source = wintypes.HANDLE()
-    restricted_code_sid = wintypes.LPVOID()
+    administrators_sid = wintypes.LPVOID()
     if not _advapi32().ConvertStringSidToSidW(
-        "S-1-5-12", ctypes.byref(restricted_code_sid)
+        "S-1-5-32-544", ctypes.byref(administrators_sid)
     ):
         raise PermissionError(
-            f"restricted-code SID creation failed: {ctypes.get_last_error()}"
+            f"administrators SID creation failed: {ctypes.get_last_error()}"
         )
-    restricting_sids = (_SidAndAttributes * 1)(
-        _SidAndAttributes(restricted_code_sid, 0)
+    disabled_sids = (_SidAndAttributes * 1)(
+        _SidAndAttributes(administrators_sid, 0)
     )
     try:
         if not _advapi32().CreateRestrictedToken(
             wintypes.HANDLE(token),
             _DISABLE_MAX_PRIVILEGE,
-            0,
-            None,
-            0,
-            None,
             1,
-            ctypes.byref(restricting_sids),
+            ctypes.byref(disabled_sids),
+            0,
+            None,
+            0,
+            None,
             ctypes.byref(restricted_source),
         ):
             raise PermissionError(
@@ -240,7 +258,7 @@ def create_restricted_primary_token(token: int) -> int:
     finally:
         if restricted_source.value:
             _kernel32().CloseHandle(restricted_source)
-        _kernel32().LocalFree(restricted_code_sid)
+        _kernel32().LocalFree(administrators_sid)
 
 
 def run_restricted_process(
@@ -252,6 +270,8 @@ def run_restricted_process(
     stdout_path: Path,
     stderr_path: Path,
     timeout_seconds: float,
+    on_started: Callable[[dict[str, object]], None] | None = None,
+    cancel_requested: threading.Event | None = None,
 ) -> RestrictedProcessResult:
     if os.name != "nt":
         raise RuntimeError("restricted provider execution requires Windows")
@@ -315,27 +335,57 @@ def run_restricted_process(
                 process.hProcess, job, ctypes.byref(in_job)
             ) or not in_job.value:
                 raise PermissionError("restricted provider Job membership failed")
+            if on_started is not None:
+                content = executable.read_bytes()
+                on_started(
+                    {
+                        "pid": int(process.dwProcessId),
+                        "creation_time": _process_creation_time(process.hProcess),
+                        "executable": str(executable),
+                        "executable_sha256": hashlib.sha256(content).hexdigest(),
+                        "restricted": True,
+                        "integrity_level": "low",
+                        "job_confined": True,
+                    }
+                )
             if _kernel32().ResumeThread(process.hThread) != 1:
                 raise PermissionError(
                     "restricted provider primary thread did not resume exactly once"
                 )
-            wait_ms = max(1, int(timeout_seconds * 1000))
-            wait_result = _kernel32().WaitForSingleObject(
-                process.hProcess, wait_ms
-            )
-            timed_out = wait_result == _WAIT_TIMEOUT
-            if timed_out:
-                if not _kernel32().TerminateJobObject(job, 124):
-                    raise RuntimeError("restricted provider timeout cleanup failed")
-                if (
-                    _kernel32().WaitForSingleObject(process.hProcess, 10_000)
-                    != _WAIT_OBJECT_0
-                ):
-                    raise RuntimeError("restricted provider did not terminate")
-            elif wait_result != _WAIT_OBJECT_0:
-                raise OSError(
-                    ctypes.get_last_error(), "restricted provider wait failed"
+            deadline = time.monotonic() + timeout_seconds
+            timed_out = False
+            cancelled = False
+            while True:
+                if cancel_requested is not None and cancel_requested.is_set():
+                    cancelled = True
+                    if not _kernel32().TerminateJobObject(job, 125):
+                        raise RuntimeError(
+                            "restricted provider cancellation cleanup failed"
+                        )
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    if not _kernel32().TerminateJobObject(job, 124):
+                        raise RuntimeError(
+                            "restricted provider timeout cleanup failed"
+                        )
+                    break
+                wait_result = _kernel32().WaitForSingleObject(
+                    process.hProcess,
+                    max(1, min(100, int(remaining * 1000))),
                 )
+                if wait_result == _WAIT_OBJECT_0:
+                    break
+                if wait_result != _WAIT_TIMEOUT:
+                    raise OSError(
+                        ctypes.get_last_error(), "restricted provider wait failed"
+                    )
+            if (timed_out or cancelled) and (
+                _kernel32().WaitForSingleObject(process.hProcess, 10_000)
+                != _WAIT_OBJECT_0
+            ):
+                raise RuntimeError("restricted provider did not terminate")
             exit_code = wintypes.DWORD()
             if not _kernel32().GetExitCodeProcess(
                 process.hProcess, ctypes.byref(exit_code)
@@ -508,6 +558,30 @@ def _create_job() -> int:
     return int(job)
 
 
+def _process_creation_time(process: int) -> str:
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel_time = wintypes.FILETIME()
+    user_time = wintypes.FILETIME()
+    if not _kernel32().GetProcessTimes(
+        process,
+        ctypes.byref(creation),
+        ctypes.byref(exit_time),
+        ctypes.byref(kernel_time),
+        ctypes.byref(user_time),
+    ):
+        raise OSError(
+            ctypes.get_last_error(), "provider process creation time failed"
+        )
+    ticks = (int(creation.dwHighDateTime) << 32) | int(
+        creation.dwLowDateTime
+    )
+    return (
+        datetime(1601, 1, 1, tzinfo=UTC)
+        + timedelta(microseconds=ticks // 10)
+    ).isoformat()
+
+
 def _kernel32() -> Any:
     kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -570,6 +644,14 @@ def _kernel32() -> Any:
         ctypes.POINTER(wintypes.DWORD),
     ]
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
     kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
     kernel32.TerminateJobObject.restype = wintypes.BOOL
     return kernel32
@@ -592,6 +674,8 @@ def _advapi32() -> Any:
     advapi32.OpenThreadToken.restype = wintypes.BOOL
     advapi32.ImpersonateNamedPipeClient.argtypes = [wintypes.HANDLE]
     advapi32.ImpersonateNamedPipeClient.restype = wintypes.BOOL
+    advapi32.ImpersonateLoggedOnUser.argtypes = [wintypes.HANDLE]
+    advapi32.ImpersonateLoggedOnUser.restype = wintypes.BOOL
     advapi32.RevertToSelf.restype = wintypes.BOOL
     advapi32.DuplicateTokenEx.argtypes = [
         wintypes.HANDLE,

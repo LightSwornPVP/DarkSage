@@ -110,6 +110,13 @@ def test_service_constructs_qualification_and_completion_records(
         provider_run_id="provider-run-1",
         provider_instance_id="instance-1",
         evidence_path=str((tmp_path / "evidence" / "run.json").resolve()),
+        prompt_path=str((tmp_path / "evidence" / "prompt.md").resolve()),
+        stdout_path=str((tmp_path / "evidence" / "stdout.log").resolve()),
+        stderr_path=str((tmp_path / "evidence" / "stderr.log").resolve()),
+        workspace=str((tmp_path / "workspace").resolve()),
+        timeout_seconds=30,
+        reasoning_level="medium",
+        environment={"PATH": "test"},
     )
     attempt_id = str(reserved["attempt_id"])
     assert core.keys.verify(
@@ -140,6 +147,13 @@ def test_service_rejects_arbitrary_signing_and_duplicate_launch(
         provider_run_id="provider-run-2",
         provider_instance_id="instance-2",
         evidence_path=str((tmp_path / "evidence" / "run.json").resolve()),
+        prompt_path=str((tmp_path / "evidence" / "prompt.md").resolve()),
+        stdout_path=str((tmp_path / "evidence" / "stdout.log").resolve()),
+        stderr_path=str((tmp_path / "evidence" / "stderr.log").resolve()),
+        workspace=str((tmp_path / "workspace").resolve()),
+        timeout_seconds=30,
+        reasoning_level="medium",
+        environment={"PATH": "test"},
     )
     attempt_id = str(reserved["attempt_id"])
     client.record_provider_start(attempt_id, 5511)
@@ -203,3 +217,22 @@ def test_key_rotation_keeps_historical_verification(tmp_path: Path) -> None:
     assert core.keys.verify("provider-start", before)
     assert core.keys.verify("provider-start", after)
     assert json.dumps(before) != json.dumps(after)
+
+
+def test_missing_historical_key_fails_closed_without_recreation(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    before = core.keys.sign("provider-start", {"id": "old"})
+    client.rotate_key("ROTATE_KEEPER_AUTHORITY_KEY")
+    key_path = (
+        core.keys.root
+        / "key-v1"
+        / "authority"
+        / "authority-key-v1.bin"
+    )
+    core.keys.clear_cached_keys()
+    key_path.unlink()
+
+    assert core.keys.verify("provider-start", before) is False
+    assert key_path.exists() is False

@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from keeper.authority_service.key_ring import ServiceKeyRing
 from keeper.authority_service.protocol import Operation, Request
@@ -54,14 +54,36 @@ class CompletionObservation:
     finished_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionObservation:
+    process_id: int
+    exit_status: int
+    timed_out: bool
+    stdout_path: str
+    stderr_path: str
+    provider_evidence_digest: str
+    finished_at: str
+
+
 class TrustedObserver(Protocol):
     def qualify(
         self, registration: dict[str, Any], challenge: str
     ) -> QualificationObservation: ...
 
+    def register_provider(
+        self, provider_id: str, executable: Path, client_sid: str
+    ) -> dict[str, Any]: ...
+
     def observe_process(
         self, attempt: dict[str, Any], pid: int
     ) -> ProcessObservation: ...
+
+    def execute_provider(
+        self,
+        registration: dict[str, Any],
+        attempt: dict[str, Any],
+        on_started: Callable[[ProcessObservation], None],
+    ) -> ExecutionObservation: ...
 
     def observe_completion(
         self, attempt: dict[str, Any]
@@ -87,18 +109,29 @@ class AuthorityServiceCore:
     def dispatch(self, request: Request, client_sid: str) -> dict[str, Any]:
         if not client_sid:
             raise PermissionError("authority client identity is missing")
-        self.store.consume_request(
-            request.request_id,
-            request.operation_id,
-            request.nonce,
-            client_sid,
-        )
+        try:
+            self.store.consume_request(
+                request.request_id,
+                request.operation_id,
+                request.nonce,
+                client_sid,
+            )
+        except PermissionError:
+            self.store.audit(
+                uuid.uuid4().hex,
+                "request_rejected",
+                client_sid,
+                None,
+                {"operation": request.operation.value, "reason": "replay"},
+            )
+            raise
         handlers = {
             Operation.DIAGNOSTICS: self._diagnostics,
             Operation.REGISTER_PROVIDER: self._register_provider,
             Operation.BEGIN_QUALIFICATION: self._qualify_provider,
             Operation.FINALIZE_QUALIFICATION: self._internal_only,
             Operation.RESERVE_ATTEMPT: self._reserve_attempt,
+            Operation.EXECUTE_PROVIDER: self._execute_provider,
             Operation.RECORD_PROVIDER_START: self._record_provider_start,
             Operation.FINALIZE_COMPLETION: self._finalize_completion,
             Operation.QUERY_STATE: self._query_state,
@@ -110,7 +143,20 @@ class AuthorityServiceCore:
             Operation.ROTATE_KEY: self._rotate_key,
             Operation.MIGRATE_LEGACY: self._migrate_legacy,
         }
-        result = handlers[request.operation](request.payload, client_sid)
+        try:
+            result = handlers[request.operation](request.payload, client_sid)
+        except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as error:
+            self.store.audit(
+                request.operation_id,
+                request.operation.value,
+                client_sid,
+                None,
+                {
+                    "outcome": "rejected",
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise
         self.store.audit(
             request.operation_id,
             request.operation.value,
@@ -124,6 +170,9 @@ class AuthorityServiceCore:
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
         _exact(payload, set())
+        allowed_evidence_root = getattr(
+            self.observer, "allowed_evidence_root", None
+        )
         return {
             "service_version": SERVICE_VERSION,
             "protocol_version": 1,
@@ -135,6 +184,16 @@ class AuthorityServiceCore:
             "registrations": len(self.store.list_records("registrations")),
             "qualifications": len(self.store.list_records("qualifications")),
             "attempts": len(self.store.list_records("attempts")),
+            "allowed_evidence_root": (
+                str(allowed_evidence_root)
+                if isinstance(allowed_evidence_root, Path)
+                else None
+            ),
+            "client_exchange_root": (
+                str(allowed_evidence_root.parent)
+                if isinstance(allowed_evidence_root, Path)
+                else None
+            ),
         }
 
     def _register_provider(
@@ -143,11 +202,18 @@ class AuthorityServiceCore:
         _exact(payload, {"provider_id", "executable"})
         provider_id = _choice(payload["provider_id"], {"codex", "claude"})
         executable = Path(_text(payload["executable"], "provider executable"))
-        registration = create_provider_registration(
-            provider_id,
-            executable,
-            authorized_by=client_sid,
-        )
+        if self.observer is not None and hasattr(
+            self.observer, "register_provider"
+        ):
+            registration = self.observer.register_provider(
+                provider_id, executable, client_sid
+            )
+        else:
+            registration = create_provider_registration(
+                provider_id,
+                executable,
+                authorized_by=client_sid,
+            )
         identifier = str(registration["trusted_registration_id"])
         self.store.insert("registrations", identifier, "REGISTERED_UNQUALIFIED", registration)
         return {"registration": registration, "registration_id": identifier}
@@ -296,6 +362,13 @@ class AuthorityServiceCore:
             "provider_run_id",
             "provider_instance_id",
             "evidence_path",
+            "prompt_path",
+            "stdout_path",
+            "stderr_path",
+            "workspace",
+            "timeout_seconds",
+            "reasoning_level",
+            "environment",
         }
         _exact(payload, fields)
         registration_id = _text(payload["registration_id"], "registration ID")
@@ -329,6 +402,24 @@ class AuthorityServiceCore:
                 "evidence_path": _canonical_path(
                     payload["evidence_path"], "evidence path"
                 ),
+                "prompt_path": _canonical_path(
+                    payload["prompt_path"], "prompt path"
+                ),
+                "stdout_path": _canonical_path(
+                    payload["stdout_path"], "stdout path"
+                ),
+                "stderr_path": _canonical_path(
+                    payload["stderr_path"], "stderr path"
+                ),
+                "workspace": _canonical_path(payload["workspace"], "workspace"),
+                "timeout_seconds": _bounded_int(
+                    payload["timeout_seconds"], "timeout seconds", 1, 86_400
+                ),
+                "reasoning_level": _choice(
+                    payload["reasoning_level"],
+                    {"low", "medium", "high", "extra-high"},
+                ),
+                "environment": _safe_environment(payload["environment"]),
                 "launch_challenge": challenge,
                 "authorized_client_sid": client_sid,
                 "reserved_at": _now(),
@@ -345,6 +436,133 @@ class AuthorityServiceCore:
             challenge=challenge,
         )
         return {"attempt": record, "attempt_id": attempt_id}
+
+    def _execute_provider(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(payload, {"attempt_id"})
+        if self.observer is None:
+            raise RuntimeError("authority provider observer is unavailable")
+        attempt_id = _text(payload["attempt_id"], "attempt ID")
+        attempt = self.store.get("attempts", attempt_id)
+        if attempt is None or attempt.pop("service_state", None) != "RESERVED":
+            raise PermissionError("provider launch is not reserved")
+        if attempt.get("authorized_client_sid") != client_sid:
+            raise PermissionError("provider launch belongs to another client")
+        registration = self.store.get(
+            "registrations", str(attempt["registration_id"])
+        )
+        if registration is None or registration.pop("service_state", None) != "QUALIFIED":
+            raise PermissionError("provider registration is not qualified")
+        claim = self.keys.sign(
+            "provider-launch-claim",
+            {
+                **attempt,
+                "kind": "provider_launch_claim",
+                "claimed_at": _now(),
+                "claim_transaction_id": uuid.uuid4().hex,
+            },
+        )
+        self.store.transition(
+            "attempts", attempt_id, "RESERVED", "LAUNCH_CLAIMED", claim
+        )
+        started_result: dict[str, Any] = {}
+
+        def on_started(observation: ProcessObservation) -> None:
+            if (
+                not observation.restricted
+                or observation.integrity_level != "low"
+                or not observation.job_confined
+            ):
+                raise PermissionError(
+                    "provider restricted confinement was not established"
+                )
+            expected = Path(str(registration["launcher_path"])).resolve()
+            if (
+                Path(observation.executable).resolve() != expected
+                or observation.executable_sha256
+                != registration["launcher_sha256"]
+            ):
+                raise PermissionError(
+                    "provider process identity differs from registration"
+                )
+            started = self.keys.sign(
+                "provider-start",
+                {
+                    **claim,
+                    "kind": "provider_execution_started",
+                    "pid": observation.pid,
+                    "process_creation_time": observation.creation_time,
+                    "process_executable": observation.executable,
+                    "process_executable_sha256": observation.executable_sha256,
+                    "restricted_token": observation.restricted,
+                    "integrity_level": observation.integrity_level,
+                    "job_confined": observation.job_confined,
+                    "started_at": _now(),
+                    "completion_challenge": secrets.token_hex(32),
+                },
+            )
+            self.store.transition(
+                "attempts",
+                attempt_id,
+                "LAUNCH_CLAIMED",
+                "EXECUTION_STARTED",
+                started,
+            )
+            started_result.update(started)
+
+        observed = self.observer.execute_provider(
+            registration, claim, on_started
+        )
+        if not started_result:
+            raise RuntimeError("provider start was not service-observed")
+        current = self.store.get("attempts", attempt_id)
+        if (
+            isinstance(current, dict)
+            and current.get("service_state") == "CANCELLED"
+        ):
+            return {
+                "attempt_id": attempt_id,
+                "start": started_result,
+                "cancelled": True,
+                "process_result": {
+                    "process_id": observed.process_id,
+                    "exit_status": observed.exit_status,
+                    "timed_out": observed.timed_out,
+                    "stdout_path": observed.stdout_path,
+                    "stderr_path": observed.stderr_path,
+                },
+            }
+        normalized_result = (
+            "completed" if observed.exit_status == 0 else "failed"
+        )
+        completion = self._completion_record(
+            attempt_id,
+            started_result,
+            observed.provider_evidence_digest,
+            observed.exit_status,
+            normalized_result,
+            observed.finished_at,
+        )
+        self.store.transition(
+            "attempts",
+            attempt_id,
+            "EXECUTION_STARTED",
+            normalized_result.upper(),
+            completion,
+        )
+        return {
+            "attempt_id": attempt_id,
+            "start": started_result,
+            "completion": completion,
+            "process_result": {
+                "process_id": observed.process_id,
+                "exit_status": observed.exit_status,
+                "timed_out": observed.timed_out,
+                "stdout_path": observed.stdout_path,
+                "stderr_path": observed.stderr_path,
+            },
+        }
 
     def _record_provider_start(
         self, payload: dict[str, Any], client_sid: str
@@ -400,12 +618,51 @@ class AuthorityServiceCore:
             raise RuntimeError("authority provider observer is unavailable")
         attempt_id = _text(payload["attempt_id"], "attempt ID")
         attempt = self.store.get("attempts", attempt_id)
-        if attempt is None or attempt.pop("service_state", None) != "EXECUTION_STARTED":
+        if attempt is None:
+            raise PermissionError("provider attempt is not finalizable")
+        state = attempt.pop("service_state", None)
+        if state in {"COMPLETED", "FAILED"}:
+            if (
+                attempt.get("kind") != "provider_completion"
+                or attempt.get("authorized_client_sid") != client_sid
+                or not self.keys.verify("provider-completion", attempt)
+            ):
+                raise PermissionError(
+                    "provider terminal completion is not authentic"
+                )
+            return {"completion": attempt, "attempt_id": attempt_id}
+        if state != "EXECUTION_STARTED":
             raise PermissionError("provider attempt is not finalizable")
         if attempt.get("authorized_client_sid") != client_sid:
             raise PermissionError("provider attempt belongs to another client")
         observed = self.observer.observe_completion(attempt)
-        completion = self.keys.sign(
+        completion = self._completion_record(
+            attempt_id,
+            attempt,
+            observed.evidence_digest,
+            observed.exit_status,
+            observed.normalized_result,
+            observed.finished_at,
+        )
+        self.store.transition(
+            "attempts",
+            attempt_id,
+            "EXECUTION_STARTED",
+            observed.normalized_result.upper(),
+            completion,
+        )
+        return {"completion": completion, "attempt_id": attempt_id}
+
+    def _completion_record(
+        self,
+        attempt_id: str,
+        attempt: dict[str, Any],
+        evidence_digest: str,
+        exit_status: int,
+        normalized_result: str,
+        finished_at: str,
+    ) -> dict[str, Any]:
+        return self.keys.sign(
             "provider-completion",
             {
                 "id": f"provider-completion:{attempt_id}",
@@ -424,22 +681,15 @@ class AuthorityServiceCore:
                 "registration_digest": attempt["registration_digest"],
                 "process_id": attempt["pid"],
                 "process_creation_time": attempt["process_creation_time"],
-                "provider_evidence_digest": observed.evidence_digest,
-                "exit_status": observed.exit_status,
-                "normalized_result": observed.normalized_result,
-                "terminal_disposition": observed.normalized_result.upper(),
-                "finished_at": observed.finished_at,
+                "provider_evidence_digest": evidence_digest,
+                "exit_status": exit_status,
+                "normalized_result": normalized_result,
+                "terminal_disposition": normalized_result.upper(),
+                "finished_at": finished_at,
+                "authorized_client_sid": attempt["authorized_client_sid"],
                 "transaction_id": uuid.uuid4().hex,
             },
         )
-        self.store.transition(
-            "attempts",
-            attempt_id,
-            "EXECUTION_STARTED",
-            observed.normalized_result.upper(),
-            completion,
-        )
-        return {"completion": completion, "attempt_id": attempt_id}
 
     def _query_state(
         self, payload: dict[str, Any], client_sid: str
@@ -461,6 +711,7 @@ class AuthorityServiceCore:
                 "provider-qualification-start",
                 "provider-qualification",
                 "provider-launch-authorization",
+                "provider-launch-claim",
                 "provider-start",
                 "provider-completion",
             },
@@ -486,10 +737,18 @@ class AuthorityServiceCore:
         if value is None:
             raise PermissionError("provider attempt is unavailable")
         state = str(value.pop("service_state"))
-        if state not in {"RESERVED", "EXECUTION_STARTED", "PAUSED"}:
+        if state not in {
+            "RESERVED",
+            "LAUNCH_CLAIMED",
+            "EXECUTION_STARTED",
+            "PAUSED",
+        }:
             raise PermissionError("provider attempt cannot be cancelled")
         if value.get("authorized_client_sid") != client_sid:
             raise PermissionError("provider attempt belongs to another client")
+        cancel_provider = getattr(self.observer, "cancel_provider", None)
+        if callable(cancel_provider):
+            cancel_provider(attempt_id)
         cancelled = {**value, "cancelled_at": _now()}
         self.store.transition("attempts", attempt_id, state, "CANCELLED", cancelled)
         return {"attempt_id": attempt_id, "state": "CANCELLED"}
@@ -549,6 +808,7 @@ class AuthorityServiceCore:
         if not isinstance(registrations, list):
             raise ValueError("legacy registrations must be a list")
         migrated = 0
+        created: list[dict[str, Any]] = []
         for old in registrations:
             if not isinstance(old, dict):
                 raise ValueError("legacy registration is malformed")
@@ -556,9 +816,32 @@ class AuthorityServiceCore:
             executable = Path(
                 _text(old.get("canonical_executable_path"), "legacy executable")
             )
-            registration = create_provider_registration(
-                provider_id, executable, authorized_by=client_sid
-            )
+            matches = [
+                value
+                for value in self.store.list_records("registrations")
+                if value.get("logical_provider_id") == provider_id
+                and value.get("canonical_executable_path")
+                == str(executable.resolve(strict=True))
+            ]
+            if len(matches) > 1:
+                raise PermissionError(
+                    "legacy registration migration is ambiguous"
+                )
+            if matches:
+                existing = dict(matches[0])
+                existing.pop("service_state", None)
+                created.append(existing)
+                continue
+            if self.observer is not None and hasattr(
+                self.observer, "register_provider"
+            ):
+                registration = self.observer.register_provider(
+                    provider_id, executable, client_sid
+                )
+            else:
+                registration = create_provider_registration(
+                    provider_id, executable, authorized_by=client_sid
+                )
             self.store.insert(
                 "registrations",
                 str(registration["trusted_registration_id"]),
@@ -566,8 +849,10 @@ class AuthorityServiceCore:
                 registration,
             )
             migrated += 1
+            created.append(registration)
         return {
             "migrated_registrations": migrated,
+            "registrations": created,
             "legacy_evidence_status": "UNVERIFIABLE",
         }
 
@@ -599,6 +884,46 @@ def _positive_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"authority {label} is invalid")
     return value
+
+
+def _bounded_int(
+    value: object, label: str, minimum: int, maximum: int
+) -> int:
+    result = _positive_int(value, label)
+    if result < minimum or result > maximum:
+        raise ValueError(f"authority {label} is out of range")
+    return result
+
+
+def _safe_environment(value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or len(value) > 256:
+        raise ValueError("authority provider environment is invalid")
+    result: dict[str, str] = {}
+    sensitive = (
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "COOKIE",
+        "CREDENTIAL",
+    )
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key) > 128
+            or "=" in key
+            or "\0" in key
+            or any(marker in key.upper() for marker in sensitive)
+            or not isinstance(item, str)
+            or len(item) > 32_768
+            or "\0" in item
+        ):
+            raise ValueError("authority provider environment is invalid")
+        result[key] = item
+    return result
 
 
 def _canonical_path(value: object, label: str) -> str:

@@ -66,6 +66,7 @@ class AuthorityServiceInstaller:
             exchange_root,
             exchange_root / "provider-work",
             exchange_root / "evidence",
+            exchange_root / "worktrees",
         )
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=False)
@@ -114,7 +115,6 @@ class AuthorityServiceInstaller:
             "BUILTIN\\Administrators:(OI)(CI)F",
             f"{service_account}:(OI)(CI)M",
             f"*{client_sid}:(OI)(CI)M",
-            "*S-1-5-12:(OI)(CI)M",
         ]
         _run_recorded(exchange_acl, manifest)
         _run_recorded(

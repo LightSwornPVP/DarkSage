@@ -10,6 +10,7 @@ import pytest
 from keeper.app.service import KeeperApplication
 from keeper.cli import main
 from keeper.authority import AuthorityKey
+from keeper.authority_service.core import QualificationObservation
 from keeper.providers.adapters import (
     ProviderCapabilities,
     ProviderDiagnostic,
@@ -144,10 +145,24 @@ def test_provider_construction_failure_is_finalized(
     _version_script(executable, marker)
     application.register_provider("codex", executable, "registrar")
 
-    def fail_construction(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("construction failed")
+    def fail_construction(
+        *_args: object, **_kwargs: object
+    ) -> QualificationObservation:
+        return QualificationObservation(
+            "qualification-failed:test",
+            {
+                "restricted": False,
+                "integrity_level": "unknown",
+                "job_confined": False,
+            },
+            "2026-07-27T00:00:00+00:00",
+            "2026-07-27T00:00:01+00:00",
+            70,
+            "",
+            "RuntimeError: construction failed",
+        )
 
-    monkeypatch.setattr("keeper.app.service.CliProvider", fail_construction)
+    monkeypatch.setattr(application.authority.core.observer, "qualify", fail_construction)
     with pytest.raises(PermissionError, match="failed"):
         application.qualify_provider("codex", "qualifier")
 
@@ -157,7 +172,7 @@ def test_provider_construction_failure_is_finalized(
     ]
     assert registration["registration_lifecycle"] == "QUALIFICATION_FAILED"
     assert evidence["qualification_result"] == "failed"
-    assert evidence["failure_reason"] == "RuntimeError"
+    assert evidence["failure_reason"] == "RuntimeError: construction failed"
 
 
 def test_standalone_batch_uses_composite_qualified_registration(
@@ -174,7 +189,7 @@ def test_standalone_batch_uses_composite_qualified_registration(
         str(registration["qualification_evidence_id"])
     ]
     monkeypatch.setattr(
-        "keeper.cli.default_data_directory", lambda: authority.data_directory
+        "keeper.cli.authority_client_factory", lambda _root: authority.authority
     )
     repository = tmp_path / "repository"
     state = repository / ".ai-workflow"
@@ -207,7 +222,7 @@ def test_raw_qualification_evidence_in_standalone_config_is_rejected(
         str(registration["qualification_evidence_id"])
     ]
     monkeypatch.setattr(
-        "keeper.cli.default_data_directory", lambda: authority.data_directory
+        "keeper.cli.authority_client_factory", lambda _root: authority.authority
     )
     repository = tmp_path / "repository"
     state = repository / ".ai-workflow"
@@ -312,30 +327,28 @@ def test_authority_secret_is_outside_provider_roots_and_not_inherited(
     tmp_path: Path,
 ) -> None:
     application = KeeperApplication(tmp_path / "data")
-    key_path = application.authority.path
-    evidence_root = application.data_directory / "evidence"
-    qualification_root = application.data_directory / "qualification"
+    key_path = application.authority.core.keys.root
+    exchange_root = Path(
+        str(application.authority.diagnostics()["client_exchange_root"])
+    )
 
-    assert key_path.is_relative_to(application.data_directory / "authority")
-    assert not key_path.is_relative_to(evidence_root)
-    assert not key_path.is_relative_to(qualification_root)
+    assert not hasattr(application.authority, "path")
+    assert not key_path.is_relative_to(exchange_root)
     assert all(
         "AUTHORITY" not in key.upper() and str(key_path) != value
         for key, value in os.environ.items()
     )
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows authority lock")
-def test_provider_child_cannot_read_dpapi_authority_blob(tmp_path: Path) -> None:
+def test_provider_receives_no_authority_key_location(tmp_path: Path) -> None:
     application = KeeperApplication(tmp_path / "data")
     executable = tmp_path / "provider.cmd"
-    copied_key = tmp_path / "copied-key.bin"
     marker = tmp_path / "marker.txt"
     executable.write_text(
         "\n".join(
             [
                 "@echo off",
-                f'copy /y "{application.authority.path}" "{copied_key}" >nul 2>&1',
+                'if defined KEEPER_AUTHORITY_KEY_PATH exit /b 9',
                 f'echo invoked>>"{marker}"',
                 "echo protected-version 1.0",
                 "exit /b 0",
@@ -349,7 +362,7 @@ def test_provider_child_cannot_read_dpapi_authority_blob(tmp_path: Path) -> None
     application.qualify_provider("codex", "qualifier")
 
     assert marker.exists()
-    assert copied_key.exists() is False
+    assert not hasattr(application.authority, "path")
 
 
 @pytest.mark.parametrize(

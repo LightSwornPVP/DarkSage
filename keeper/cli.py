@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
+from dataclasses import replace
 from pathlib import Path
+from typing import Any, Callable
 
 from keeper.agent_runner import AgentRunner
-from keeper.app.storage import KeeperStore, default_data_directory
-from keeper.authority import AuthorityKey
+from keeper.authority_service.client import AuthorityServiceClient
+from keeper.authority_service import service_install
 from keeper.config import KeeperConfig
 from keeper.orchestrator import Keeper
-from keeper.providers.codex_cli import CliProvider
-from keeper.providers.adapters import validate_provider_registration
+from keeper.policies import filtered_environment
+from keeper.providers.authority_service import AuthorityServiceProvider
 from keeper.providers.mock import MockProvider
 from keeper.providers.ollama import OllamaProvider
 from keeper.providers.routing import ProviderRouter
@@ -20,52 +24,42 @@ from keeper.verifier import VerificationCommand, Verifier
 from keeper.workspace import WorkspaceManager
 
 
+authority_client_factory: Callable[[Path], AuthorityServiceClient] = (
+    lambda _root: AuthorityServiceClient()
+)
+
+
 def build_keeper(root: Path, mock: bool = False) -> Keeper:
     config = KeeperConfig.load(root)
     registration = config.provider_registration or {}
-    def command_provider() -> CliProvider:
+    authority = authority_client_factory(root)
+
+    def command_provider() -> AuthorityServiceProvider:
         if not config.provider_command:
             raise PermissionError("provider command is missing")
         executable = config.provider_command[0]
         provider_id = str(registration.get("logical_provider_id") or "")
-        reference = config.provider_qualification_reference
-        if not reference:
+        registration_id = registration.get("trusted_registration_id")
+        if not provider_id or not isinstance(registration_id, str):
             raise PermissionError(
-                "standalone provider qualification reference is missing"
+                "standalone provider service registration is missing"
             )
-        protected_root = default_data_directory().resolve()
-        protected_store = KeeperStore(protected_root / "keeper.db")
-        protected_store.migrate()
-        evidence = protected_store.get("artifacts", reference)
-        start_evidence = (
-            protected_store.get(
-                "artifacts", str(evidence.get("authorization_reference"))
+        protected = authority.query_state("registrations", registration_id)
+        authoritative = protected.get("record")
+        if not isinstance(authoritative, dict):
+            raise PermissionError(
+                "standalone provider is not registered with the Authority Service"
             )
-            if isinstance(evidence, dict)
-            else None
-        )
-        authority = AuthorityKey(protected_root)
-        valid, detail = validate_provider_registration(
-            provider_id,
-            executable,
-            registration,
-            (
-                {
-                    str(evidence["id"]): evidence,
-                    str(start_evidence["id"]): start_evidence,
-                }
-                if isinstance(evidence, dict)
-                and isinstance(evidence.get("id"), str)
-                and isinstance(start_evidence, dict)
-                and isinstance(start_evidence.get("id"), str)
-                else {}
-            ),
-            authority.verify,
-        )
-        if not valid:
-            raise PermissionError(f"provider registration is invalid: {detail}")
-        if registration.get("registration_lifecycle") != "QUALIFIED":
-            raise PermissionError("standalone command provider is not qualified")
+        state = authoritative.pop("service_state", None)
+        if (
+            state != "QUALIFIED"
+            or authoritative.get("configuration_digest")
+            != registration.get("configuration_digest")
+            or authoritative.get("logical_provider_id") != provider_id
+        ):
+            raise PermissionError(
+                "standalone provider service qualification is inconsistent"
+            )
         expected_invocation = registration.get("invocation_shape")
         actual_invocation = list(config.provider_command)
         if registration.get("script_path") is not None:
@@ -80,21 +74,7 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
             raise PermissionError(
                 "provider command differs from canonical registration invocation"
             )
-        provider = CliProvider(
-            config.provider_command,
-            expected_executable_sha256=registration.get("launcher_sha256"),
-            expected_executable_size=registration.get("launcher_size"),
-            registration_id=registration.get("trusted_registration_id"),
-            registration_version=registration.get("registration_version"),
-            configuration_digest=registration.get("configuration_digest"),
-            expected_script_sha256=registration.get("script_sha256"),
-            expected_script_size=registration.get("script_size"),
-            script_registration_id=registration.get("script_registration_id"),
-            script_registration_version=registration.get(
-                "script_registration_version"
-            ),
-            launch_guard=authority.provider_launch_guard,
-        )
+        provider = AuthorityServiceProvider(authority, authoritative)
         provider.validate()
         return provider
     provider = (
@@ -135,16 +115,86 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
         },
         dict(config.provider_routes),
     )
-    runner = AgentRunner(provider, config.state_root / "runs", config.process_timeout_seconds)
+    if mock:
+        runtime_config = config
+        runs_root = config.state_root / "runs"
+        keeper_run_id = None
+        execution_sink = None
+    else:
+        diagnostics = authority.diagnostics()
+        exchange_value = diagnostics.get("client_exchange_root")
+        if not isinstance(exchange_value, str) or not exchange_value:
+            raise RuntimeError("Authority Service client exchange is unavailable")
+        exchange = Path(exchange_value).resolve(strict=True)
+        repository_id = hashlib.sha256(
+            str(root.resolve()).encode("utf-8")
+        ).hexdigest()[:16]
+        runtime_config = replace(
+            config,
+            workspace_root=exchange / "worktrees" / f"standalone-{repository_id}",
+        )
+        runs_root = (
+            exchange / "evidence" / f"standalone-{repository_id}" / "runs"
+        )
+        keeper_run_id = f"standalone:{repository_id}"
+
+        def execution_sink(event: dict[str, Any]) -> dict[str, Any] | None:
+            if event.get("event") == "started":
+                environment = filtered_environment(dict(os.environ))
+                environment["KEEPER_PROVIDER_ROLE"] = str(event["role"])
+                reserved = authority.reserve_attempt(
+                    registration_id=str(
+                        registration["trusted_registration_id"]
+                    ),
+                    keeper_run_id=keeper_run_id,
+                    task_id=str(event["task_id"]),
+                    stage_id=str(event["stage_id"]),
+                    role=str(event["role"]),
+                    attempt_number=int(event["retry_count"]) + 1,
+                    provider_run_id=str(event["provider_run_id"]),
+                    provider_instance_id=str(event["provider_instance_id"]),
+                    evidence_path=str(event["evidence_path"]),
+                    prompt_path=str(event["prompt_path"]),
+                    stdout_path=str(event["stdout_path"]),
+                    stderr_path=str(event["stderr_path"]),
+                    workspace=str(event["workspace"]),
+                    timeout_seconds=int(event["timeout_seconds"]),
+                    reasoning_level=str(event["reasoning_level"]),
+                    environment=environment,
+                )
+                return {"attempt_id": reserved["attempt_id"]}
+            if event.get("event") == "finished":
+                record_path = Path(str(event["evidence_path"]))
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                attempt_id = record.get("authority_attempt_id")
+                if not isinstance(attempt_id, str):
+                    raise PermissionError(
+                        "standalone Authority Service attempt is missing"
+                    )
+                completed = authority.finalize_completion(attempt_id)
+                (record_path.parent / "authority-completion.json").write_text(
+                    json.dumps(completed, sort_keys=True),
+                    encoding="utf-8",
+                )
+            return None
+
+    runner = AgentRunner(
+        provider,
+        runs_root,
+        runtime_config.process_timeout_seconds,
+        keeper_run_id=keeper_run_id,
+        execution_sink=execution_sink,
+    )
     return Keeper(
-        config,
+        runtime_config,
         runner,
         WorkspaceManager(
-            config.repository_root,
-            config.workspace_root,
+            runtime_config.repository_root,
+            runtime_config.workspace_root,
             config.state_root / "workspace-ownership",
         ),
         router,
+        runs_root=runs_root,
     )
 
 
@@ -165,6 +215,20 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("recover", help="record decisions for interrupted runs")
     cleanup = commands.add_parser("cleanup-worktrees", help="remove a clean task worktree")
     cleanup.add_argument("path", type=Path)
+    commands.add_parser(
+        "authority-install", help="install the KeeperAuthority Windows service"
+    )
+    commands.add_parser("authority-start", help="start KeeperAuthority")
+    commands.add_parser("authority-stop", help="stop KeeperAuthority")
+    commands.add_parser("authority-restart", help="restart KeeperAuthority")
+    commands.add_parser("authority-status", help="show KeeperAuthority SCM status")
+    commands.add_parser(
+        "authority-diagnostics", help="query KeeperAuthority diagnostics"
+    )
+    authority_backup = commands.add_parser(
+        "authority-backup", help="backup protected authority metadata"
+    )
+    authority_backup.add_argument("destination", type=Path)
     return result
 
 
@@ -172,6 +236,46 @@ def main(arguments: list[str] | None = None) -> int:
     options = parser().parse_args(arguments)
     root = options.root.resolve()
     try:
+        if options.command == "authority-install":
+            value = service_install.AuthorityServiceInstaller(root).install()
+            print(json.dumps(value, indent=2, sort_keys=True))
+            return 0
+        if options.command == "authority-start":
+            service_install.start()
+            print("KeeperAuthority started.")
+            return 0
+        if options.command == "authority-stop":
+            service_install.stop()
+            print("KeeperAuthority stopped.")
+            return 0
+        if options.command == "authority-restart":
+            service_install.restart()
+            print("KeeperAuthority restarted.")
+            return 0
+        if options.command == "authority-status":
+            print(json.dumps(service_install.status(), indent=2, sort_keys=True))
+            return 0
+        if options.command == "authority-diagnostics":
+            print(
+                json.dumps(
+                    service_install.diagnostics(), indent=2, sort_keys=True
+                )
+            )
+            return 0
+        if options.command == "authority-backup":
+            print(
+                json.dumps(
+                    {
+                        "backup": str(
+                            service_install.backup(
+                                options.destination.resolve()
+                            )
+                        )
+                    },
+                    indent=2,
+                )
+            )
+            return 0
         keeper = build_keeper(root, options.mock)
         if options.command == "pause":
             keeper.pause()

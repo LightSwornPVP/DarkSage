@@ -16,25 +16,25 @@ from pathlib import Path
 from typing import Any, Callable
 
 from keeper.agent_runner import AgentRunner
+from keeper.authority_service.client import AuthorityServiceClient
 from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.path_safety import validate_path_budget
 from keeper.app.reporting import finalize_evidence
 from keeper.app.storage import KeeperStore
 from keeper.app.verification_policy import trusted_bash_launcher
-from keeper.authority import AuthorityKey
 from keeper.config import KeeperConfig
 from keeper.models.task import Task
 from keeper.orchestrator import Keeper
+from keeper.policies import filtered_environment
 from keeper.providers.adapters import (
-    ClaudeCommandAdapter,
-    CodexCommandAdapter,
     ProviderCapabilities,
     ProviderDiagnostic,
     ProviderDiscovery,
     RoutingRequest,
     route_provider,
 )
+from keeper.providers.authority_service import AuthorityServiceProvider
 from keeper.providers.base import AgentProvider
 from keeper.providers.codex_cli import CliProvider
 from keeper.providers.mock import MockProvider
@@ -74,7 +74,7 @@ class WorkflowCoordinator:
         store: KeeperStore,
         data_directory: Path,
         notify: Callable[[str, str, str], dict[str, Any]],
-        authority: AuthorityKey,
+        authority: AuthorityServiceClient,
     ) -> None:
         self.store = store
         self.data_directory = data_directory
@@ -90,8 +90,21 @@ class WorkflowCoordinator:
     ) -> dict[str, Any]:
         task = self._task(task_id)
         run_id = f"run-{uuid.uuid4().hex}"
+        if (
+            task.get("provider_policy") == "mock"
+            and bool(task.get("is_demo", False))
+        ):
+            execution_root = self.data_directory
+        else:
+            diagnostics = self.authority.diagnostics()
+            exchange = diagnostics.get("client_exchange_root")
+            if not isinstance(exchange, str) or not exchange:
+                raise RuntimeError(
+                    "Authority Service client exchange is unavailable"
+                )
+            execution_root = Path(exchange).resolve(strict=True)
         validate_path_budget(
-            self.data_directory
+            execution_root
             / "evidence"
             / run_id
             / ".ai-workflow"
@@ -101,7 +114,7 @@ class WorkflowCoordinator:
             purpose="workflow evidence path",
         )
         validate_path_budget(
-            self.data_directory / "worktrees" / run_id / str(task["id"]),
+            execution_root / "worktrees" / run_id / str(task["id"]),
             purpose="workflow worktree path",
         )
         run = self.lifecycle.create(run_id, task_id)
@@ -114,7 +127,8 @@ class WorkflowCoordinator:
                 "started_at": _now(),
                 "provider": None,
                 "latest_log": None,
-                "evidence_root": str(self.data_directory / "evidence" / run_id),
+                "evidence_root": str(execution_root / "evidence" / run_id),
+                "authority_execution_root": str(execution_root),
                 "attempt": 1,
             }
         )
@@ -771,13 +785,17 @@ class WorkflowCoordinator:
             return
         if retry_stage is None:
             self._advance(run_id, RunStage.WORKTREE_PREPARATION)
-        evidence = self.data_directory / "evidence" / run_id
+        protected_run = self._run(run_id)
+        execution_root = Path(
+            str(protected_run.get("authority_execution_root", ""))
+        ).resolve(strict=True)
+        evidence = Path(str(protected_run["evidence_root"])).resolve()
         evidence.mkdir(parents=True, exist_ok=True)
         state = evidence / ".ai-workflow"
         config = KeeperConfig(
             repository,
             state,
-            self.data_directory / "worktrees" / run_id,
+            execution_root / "worktrees" / run_id,
             (),
             provider_routes=tuple(routes.items()),
             process_timeout_seconds=int(stored.get("timeout_seconds", 30)),
@@ -789,9 +807,6 @@ class WorkflowCoordinator:
             else _domain_task(stored, run_id)
         )
         routed_providers: dict[str, AgentProvider] = dict(providers)
-        for provider in {id(item): item for item in providers.values()}.values():
-            if isinstance(provider, CliProvider):
-                provider.launch_guard = self.authority.provider_launch_guard
         router = ProviderRouter(routed_providers, routes)
         observer = _LifecycleObserver(
             self.lifecycle, run_id, cancel, pause, self.notify
@@ -1023,6 +1038,7 @@ class WorkflowCoordinator:
             and isinstance(item.get("id"), str)
         }
         paths["__authority_verifier__"] = self.authority.verify
+        paths["__authority_client__"] = self.authority
         return paths
 
     def _finalize_report(
@@ -1036,7 +1052,7 @@ class WorkflowCoordinator:
         git_result: dict[str, Any] | None = None,
         failure_reason: str | None = None,
     ) -> dict[str, Any]:
-        evidence = self.data_directory / "evidence" / run_id
+        evidence = Path(str(self._run(run_id)["evidence_root"])).resolve()
         evidence.mkdir(parents=True, exist_ok=True)
         run = self._run(run_id)
         records = _provider_records(evidence)
@@ -1461,7 +1477,7 @@ class WorkflowCoordinator:
 
     def _record_provider_execution(
         self, run_id: str, event: dict[str, Any]
-    ) -> None:
+    ) -> dict[str, Any] | None:
         record = self._run(run_id)
         executions = list(record.get("provider_execution_attempts", []))
         provider_run_id = str(event.get("provider_run_id") or "")
@@ -1475,6 +1491,17 @@ class WorkflowCoordinator:
         if event.get("event") == "started":
             if matches:
                 raise PermissionError("duplicate provider execution attempt")
+            if event.get("authority_required") is False:
+                executions.append(
+                    {
+                        **event,
+                        "status": "MOCK_EXECUTION",
+                        "authority_status": "NOT_APPLICABLE_DEMO",
+                    }
+                )
+                record["provider_execution_attempts"] = executions
+                self.store.upsert("runs", run_id, record)
+                return None
             route_attempts = record.get("routing_attempts", [])
             latest_route = (
                 route_attempts[-1]
@@ -1502,6 +1529,49 @@ class WorkflowCoordinator:
             reroute_authorization_id = latest_route.get(
                 "reroute_authorization_id"
             )
+            registration = route.get("stable_registration")
+            if not isinstance(registration, dict):
+                raise PermissionError(
+                    "provider execution registration is unavailable"
+                )
+            provider_environment = filtered_environment(dict(os.environ))
+            provider_environment["KEEPER_PROVIDER_ROLE"] = str(
+                event["role"]
+            )
+            launcher_parent = str(
+                Path(str(registration["launcher_path"])).resolve().parent
+            )
+            provider_environment["PATH"] = (
+                launcher_parent
+                + os.pathsep
+                + provider_environment.get("PATH", "")
+            )
+            reservation = self.authority.reserve_attempt(
+                registration_id=str(registration["trusted_registration_id"]),
+                keeper_run_id=run_id,
+                task_id=str(event["task_id"]),
+                stage_id=str(event["stage_id"]),
+                role=str(event["role"]),
+                attempt_number=int(latest_route["attempt_number"]),
+                provider_run_id=provider_run_id,
+                provider_instance_id=str(event["provider_instance_id"]),
+                evidence_path=str(event["evidence_path"]),
+                prompt_path=str(event["prompt_path"]),
+                stdout_path=str(event["stdout_path"]),
+                stderr_path=str(event["stderr_path"]),
+                workspace=str(event["workspace"]),
+                timeout_seconds=int(event["timeout_seconds"]),
+                reasoning_level=str(event["reasoning_level"]),
+                environment=provider_environment,
+            )
+            authority_attempt = reservation.get("attempt")
+            authority_attempt_id = reservation.get("attempt_id")
+            if not isinstance(authority_attempt, dict) or not isinstance(
+                authority_attempt_id, str
+            ):
+                raise RuntimeError(
+                    "Authority Service attempt reservation is malformed"
+                )
             executions.append(
                 {
                     **event,
@@ -1514,8 +1584,12 @@ class WorkflowCoordinator:
                     "stable_registration": route.get("stable_registration"),
                     "executable": route.get("executable"),
                     "executable_sha256": route.get("executable_sha256"),
-                    "completion_challenge": secrets.token_hex(32),
-                    "status": "EXECUTION_STARTED",
+                    "completion_challenge": None,
+                    "authority_attempt_id": authority_attempt_id,
+                    "authority_launch_challenge": authority_attempt.get(
+                        "launch_challenge"
+                    ),
+                    "status": "EXECUTION_RESERVED",
                 }
             )
             if reroute_authorization_id:
@@ -1524,69 +1598,64 @@ class WorkflowCoordinator:
                     "RESERVED",
                     "EXECUTION_STARTED",
                 )
+            record["provider_execution_attempts"] = executions
+            self.store.upsert("runs", run_id, record)
+            return {"attempt_id": authority_attempt_id}
         elif event.get("event") == "finished":
             if len(matches) != 1:
                 raise PermissionError("provider completion has no unique start record")
             current = dict(executions[matches[0]])
+            if current.get("status") == "MOCK_EXECUTION":
+                current.update(event)
+                current["status"] = str(event.get("result", "failed")).upper()
+                executions[matches[0]] = current
+                record["provider_execution_attempts"] = executions
+                self.store.upsert("runs", run_id, record)
+                return None
             if current.get("status") != "EXECUTION_STARTED":
                 raise PermissionError("provider execution was already finalized")
-            evidence_path = Path(str(event.get("evidence_path", ""))).resolve(
-                strict=True
-            )
-            evidence_content = evidence_path.read_bytes()
-            completion: dict[str, Any] = {
-                "id": f"provider-completion:{run_id}:{provider_run_id}",
-                "kind": "provider_completion",
-                "schema_version": 1,
-                "completion_challenge": current.get("completion_challenge"),
-                "keeper_run_id": run_id,
-                "task_id": current.get("task_id"),
-                "stage_id": current.get("stage_id"),
-                "role": current.get("role"),
-                "attempt_number": current.get("attempt_number"),
-                "provider_run_id": provider_run_id,
-                "provider_instance_id": current.get("provider_instance_id"),
-                "stable_registration_digest": current.get(
-                    "stable_registration_digest"
-                ),
-                "executable": current.get("executable"),
-                "executable_sha256": current.get("executable_sha256"),
-                "configuration_digest": (
-                    current.get("stable_registration", {}).get(
-                        "configuration_digest"
-                    )
-                    if isinstance(current.get("stable_registration"), dict)
-                    else None
-                ),
-                "start_time": current.get("start_time"),
-                "end_time": event.get("finish_time"),
-                "exit_status": event.get("process_exit_code"),
-                "normalized_result": event.get("result"),
-                "provider_evidence_digest": hashlib.sha256(
-                    evidence_content
-                ).hexdigest(),
-                "terminal_disposition": str(
-                    event.get("result", "failed")
-                ).upper(),
-                "completion_event_id": uuid.uuid4().hex,
-                "lifecycle_transaction_id": uuid.uuid4().hex,
-                "transaction_recorded_at": _now(),
-                "process_ownership": current.get("process_ownership"),
-            }
-            completion["integrity_digest"] = _protected_record_digest(completion)
-            completion = self.authority.sign("provider-completion", completion)
+            authority_attempt_id = current.get("authority_attempt_id")
+            if not isinstance(authority_attempt_id, str):
+                raise PermissionError(
+                    "Authority Service attempt identity is unavailable"
+                )
+            authority_state = self.authority.query_state(
+                "attempts", authority_attempt_id
+            ).get("record")
+            if (
+                isinstance(authority_state, dict)
+                and authority_state.get("service_state") == "CANCELLED"
+            ):
+                current.update(event)
+                current["status"] = "CANCELLED"
+                executions[matches[0]] = current
+                record["provider_execution_attempts"] = executions
+                self.store.upsert("runs", run_id, record)
+                return None
+            protected = self.authority.finalize_completion(authority_attempt_id)
+            completion = protected.get("completion")
+            if not isinstance(completion, dict):
+                raise RuntimeError(
+                    "Authority Service completion response is malformed"
+                )
             self.store.insert_immutable(
                 "artifacts", str(completion["id"]), completion
             )
             current.update(event)
             current["status"] = str(event.get("result", "failed")).upper()
             current["completion_record_id"] = completion["id"]
-            current["completion_integrity_digest"] = completion["integrity_digest"]
+            current["completion_integrity_digest"] = completion.get(
+                "authenticated_writer_proof"
+            )
+            current["completion_challenge"] = completion.get(
+                "completion_challenge"
+            )
             executions[matches[0]] = current
         else:
             raise PermissionError("unknown provider execution lifecycle event")
         record["provider_execution_attempts"] = executions
         self.store.upsert("runs", run_id, record)
+        return None
 
     def _persist_process_ownership(self, ownership: dict[str, Any]) -> None:
         keeper_run_id = str(ownership.get("keeper_run_id") or "")
@@ -1620,10 +1689,14 @@ class WorkflowCoordinator:
                     "parent_or_job_identity": ownership.get(
                         "job_or_group_identity"
                     ),
+                    "completion_challenge": ownership.get(
+                        "completion_challenge"
+                    ),
+                    "status": "EXECUTION_STARTED",
                 }
                 if isinstance(item, dict)
                 and item.get("provider_run_id") == provider_run_id
-                and item.get("status") == "EXECUTION_STARTED"
+                and item.get("status") == "EXECUTION_RESERVED"
                 else item
             )
             for item in run.get("provider_execution_attempts", [])
@@ -1651,6 +1724,14 @@ class WorkflowCoordinator:
     ) -> dict[str, Any]:
         if not isinstance(attempt, dict):
             return {"status": "NOT_REQUIRED", "detail": ""}
+        if (
+            attempt.get("authority_required") is False
+            or attempt.get("authority_status") == "NOT_APPLICABLE_DEMO"
+        ):
+            return {
+                "status": "NOT_REQUIRED_DEMO",
+                "detail": "mock/demo executions do not carry protected authority",
+            }
         matches = [
             item
             for item in self.store.list("artifacts")
@@ -1658,13 +1739,55 @@ class WorkflowCoordinator:
             and item.get("keeper_run_id") == run.get("id")
             and item.get("provider_run_id") == attempt.get("provider_run_id")
         ]
+        if not matches:
+            authority_attempt_id = attempt.get("authority_attempt_id")
+            if isinstance(authority_attempt_id, str):
+                try:
+                    protected = self.authority.query_state(
+                        "attempts", authority_attempt_id
+                    ).get("record")
+                except (
+                    OSError,
+                    PermissionError,
+                    RuntimeError,
+                    TimeoutError,
+                ) as error:
+                    return {
+                        "status": "SERVICE_UNAVAILABLE",
+                        "detail": str(error),
+                    }
+                if (
+                    isinstance(protected, dict)
+                    and protected.get("service_state")
+                    in {"COMPLETED", "FAILED"}
+                    and protected.get("kind") == "provider_completion"
+                ):
+                    completion = dict(protected)
+                    completion.pop("service_state", None)
+                    self.store.insert_immutable(
+                        "artifacts",
+                        str(completion["id"]),
+                        completion,
+                    )
+                    matches = [completion]
         if len(matches) != 1:
             return {
                 "status": "MISSING" if not matches else "INDETERMINATE",
                 "detail": "protected completion record is missing or duplicated",
             }
         completion = matches[0]
+        if completion.get("schema_version") != 2:
+            return {
+                "status": "LEGACY_UNVERIFIABLE",
+                "detail": (
+                    "in-process authority completion is legacy and must not "
+                    "authorize recovery"
+                ),
+                "record": completion,
+            }
+        registration = attempt.get("stable_registration")
         expected = {
+            "attempt_id": attempt.get("authority_attempt_id"),
             "keeper_run_id": run.get("id"),
             "task_id": attempt.get("task_id"),
             "stage_id": attempt.get("stage_id"),
@@ -1672,19 +1795,27 @@ class WorkflowCoordinator:
             "attempt_number": attempt.get("attempt_number"),
             "provider_run_id": attempt.get("provider_run_id"),
             "provider_instance_id": attempt.get("provider_instance_id"),
-            "stable_registration_digest": attempt.get(
-                "stable_registration_digest"
-            ),
-            "executable": attempt.get("executable"),
-            "executable_sha256": attempt.get("executable_sha256"),
-            "configuration_digest": (
-                attempt.get("stable_registration", {}).get(
-                    "configuration_digest"
-                )
-                if isinstance(attempt.get("stable_registration"), dict)
+            "registration_id": (
+                registration.get("trusted_registration_id")
+                if isinstance(registration, dict)
                 else None
             ),
-            "completion_challenge": attempt.get("completion_challenge"),
+            "registration_digest": (
+                registration.get("configuration_digest")
+                if isinstance(registration, dict)
+                else None
+            ),
+            "completion_challenge": (
+                attempt.get("completion_challenge")
+                or completion.get("completion_challenge")
+            ),
+            "process_id": (
+                attempt.get("process_id") or completion.get("process_id")
+            ),
+            "process_creation_time": (
+                attempt.get("process_creation_identity")
+                or completion.get("process_creation_time")
+            ),
         }
         if any(
             value is None or completion.get(key) != value
@@ -1693,14 +1824,6 @@ class WorkflowCoordinator:
             return {
                 "status": "IDENTITY_MISMATCH",
                 "detail": "protected completion identity differs from attempt",
-                "record": completion,
-            }
-        if completion.get("integrity_digest") != _protected_record_digest(
-            completion
-        ):
-            return {
-                "status": "INTEGRITY_MISMATCH",
-                "detail": "protected completion integrity digest is invalid",
                 "record": completion,
             }
         if not self.authority.verify("provider-completion", completion):
@@ -2011,6 +2134,7 @@ def _select_routes(
     registrations = configured_paths.get("__registrations__", {})
     qualification_evidence = configured_paths.get("__qualification_evidence__", {})
     authority_verifier = configured_paths.get("__authority_verifier__")
+    authority_client = configured_paths.get("__authority_client__")
     paths = {
         str(key): str(value)
         for key, value in configured_paths.items()
@@ -2019,6 +2143,7 @@ def _select_routes(
             "__registrations__",
             "__qualification_evidence__",
             "__authority_verifier__",
+            "__authority_client__",
         }
     }
     diagnostics = ProviderDiscovery(
@@ -2080,7 +2205,8 @@ def _select_routes(
     selected = {author.provider_id, reviewer.provider_id, repairer.provider_id}
     instances = {
         provider_id: _adapter(
-            next(item for item in real_diagnostics if item.provider_id == provider_id)
+            next(item for item in real_diagnostics if item.provider_id == provider_id),
+            authority_client,
         )
         for provider_id in selected
     }
@@ -2204,19 +2330,25 @@ def _registered_verification_specs(stored: dict[str, Any]) -> list[dict[str, Any
     return specifications
 
 
-def _adapter(diagnostic: ProviderDiagnostic) -> AgentProvider:
+def _adapter(
+    diagnostic: ProviderDiagnostic, authority_client: object
+) -> AgentProvider:
     if (
         diagnostic.provider_id == "codex"
         and diagnostic.executable
         and diagnostic.registration
     ):
-        return CodexCommandAdapter(diagnostic.executable, diagnostic.registration)
+        if not isinstance(authority_client, AuthorityServiceClient):
+            raise RuntimeError("Authority Service client is unavailable")
+        return AuthorityServiceProvider(authority_client, diagnostic.registration)
     if (
         diagnostic.provider_id == "claude"
         and diagnostic.executable
         and diagnostic.registration
     ):
-        return ClaudeCommandAdapter(diagnostic.executable, diagnostic.registration)
+        if not isinstance(authority_client, AuthorityServiceClient):
+            raise RuntimeError("Authority Service client is unavailable")
+        return AuthorityServiceProvider(authority_client, diagnostic.registration)
     if diagnostic.provider_id == "ollama":
         return OllamaProvider()
     if diagnostic.provider_id == "mock":
@@ -2649,7 +2781,9 @@ def _durable_active_execution(
     active = [
         item
         for item in attempts
-        if isinstance(item, dict) and item.get("status") == "EXECUTION_STARTED"
+        if isinstance(item, dict)
+        and item.get("status")
+        in {"EXECUTION_RESERVED", "EXECUTION_STARTED"}
     ]
     if len(active) != 1:
         return (

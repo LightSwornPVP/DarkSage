@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SERVICE_SCHEMA_VERSION = 1
+SERVICE_SCHEMA_VERSION = 2
 
 
 class AuthorityStore:
@@ -78,7 +78,6 @@ class AuthorityStore:
                     payload_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE(run_id, attempt_number),
                     FOREIGN KEY(registration_id) REFERENCES registrations(id)
                 );
                 CREATE TABLE IF NOT EXISTS audit_log(
@@ -99,6 +98,28 @@ class AuthorityStore:
                 connection.execute(
                     "INSERT INTO service_meta(key,value) VALUES('schema_version',?)",
                     (str(SERVICE_SCHEMA_VERSION),),
+                )
+            elif int(row["value"]) == 1:
+                connection.executescript(
+                    """
+                    ALTER TABLE attempts RENAME TO attempts_v1;
+                    CREATE TABLE attempts(
+                        id TEXT PRIMARY KEY,
+                        registration_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        challenge TEXT NOT NULL UNIQUE,
+                        run_id TEXT NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        payload TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(registration_id) REFERENCES registrations(id)
+                    );
+                    INSERT INTO attempts SELECT * FROM attempts_v1;
+                    DROP TABLE attempts_v1;
+                    UPDATE service_meta SET value='2' WHERE key='schema_version';
+                    """
                 )
             elif int(row["value"]) != SERVICE_SCHEMA_VERSION:
                 raise RuntimeError("authority service schema is incompatible")

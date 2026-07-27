@@ -35,6 +35,11 @@ class KeeperConfig:
         data: dict[str, Any] = {}
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
+        if "provider_qualification_evidence" in data:
+            raise PermissionError(
+                "raw provider qualification evidence is not accepted from "
+                "desktop configuration"
+            )
         state_root = repository_root / ".ai-workflow"
         workspace = Path(data.get("workspace_root", repository_root.parent / f"{repository_root.name}.keeper-worktrees"))
         command = tuple(data.get("provider_command", []))

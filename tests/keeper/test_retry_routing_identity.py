@@ -44,6 +44,9 @@ def _state(
     assert stored_run is not None
     stored_run["status"] = "blocked"
     stored_run["stopped_from"] = "author_execution"
+    evidence_root = app.data_directory / "evidence" / run_id
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    stored_run["evidence_root"] = str(evidence_root.resolve())
     app.store.upsert("runs", run_id, stored_run)
     return run_id, task, providers, decisions
 

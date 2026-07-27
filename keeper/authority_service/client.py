@@ -73,9 +73,19 @@ class AuthorityServiceClient:
             {"attempt_id": attempt_id, "pid": pid},
         )
 
+    def execute_provider(self, attempt_id: str) -> dict[str, Any]:
+        return self.request(
+            Operation.EXECUTE_PROVIDER, {"attempt_id": attempt_id}
+        )
+
     def finalize_completion(self, attempt_id: str) -> dict[str, Any]:
         return self.request(
             Operation.FINALIZE_COMPLETION, {"attempt_id": attempt_id}
+        )
+
+    def cancel_attempt(self, attempt_id: str) -> dict[str, Any]:
+        return self.request(
+            Operation.CANCEL_ATTEMPT, {"attempt_id": attempt_id}
         )
 
     def query_state(self, kind: str, identifier: str) -> dict[str, Any]:
@@ -91,6 +101,13 @@ class AuthorityServiceClient:
 
     def rotate_key(self, confirmation: str) -> dict[str, Any]:
         return self.request(Operation.ROTATE_KEY, {"confirmation": confirmation})
+
+    def migrate_legacy(
+        self, registrations: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.MIGRATE_LEGACY, {"registrations": registrations}
+        )
 
 
 def _connect(pipe_name: str, timeout_seconds: float) -> int:
