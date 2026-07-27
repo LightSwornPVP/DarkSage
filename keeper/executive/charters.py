@@ -12,7 +12,9 @@ from keeper.executive.enums import (
 from keeper.executive.intake import IntakeResult
 from keeper.executive.models import (
     ApprovalRecord,
+    AssumptionRecord,
     AuthorityEnvelope,
+    DecisionRecord,
     ProjectCharter,
     ProjectRecord,
     utc_now,
@@ -117,6 +119,22 @@ class CharterService:
             now,
         )
         self.repository.save_charter(charter)
+        for assumption in charter.assumptions:
+            self.repository.insert_assumption(
+                AssumptionRecord(
+                    new_id("assumption"),
+                    project.project_id,
+                    revision,
+                    assumption,
+                    "conversation intake",
+                    0.6,
+                    "Confirm during charter review.",
+                    "May change scope, schedule, or completion criteria.",
+                    "PROPOSED",
+                    None,
+                    now,
+                )
+            )
         self.repository.save_project(
             transition_project(
                 project if project.state in {ExecutiveState.INTAKE, ExecutiveState.CLARIFICATION_REQUIRED} else replace(project, state=ExecutiveState.INTAKE.value),
@@ -183,6 +201,24 @@ class CharterService:
             active_charter_revision=charter.revision,
         )
         self.repository.save_project(active)
+        self.repository.insert_decision(
+            DecisionRecord(
+                new_id("decision"),
+                charter.project_id,
+                charter.revision,
+                "Activate Project Charter",
+                ("keep draft", "activate approved charter"),
+                "activate approved charter",
+                "Founder approval authorizes project execution within the charter.",
+                charter.founder_approval_identity or "Founder",
+                charter.founder_approval_record_id or "",
+                (charter.founder_approval_record_id or "",),
+                ("Keeper may plan and act only within the active authority envelope.",),
+                True,
+                utc_now(),
+                None,
+            )
+        )
         return active
 
     def revise(

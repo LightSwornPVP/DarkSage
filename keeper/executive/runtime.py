@@ -6,13 +6,14 @@ from keeper.executive.authority import AuthorityEvaluator
 from keeper.executive.enums import ExecutiveState, TaskStatus
 from keeper.executive.models import (
     ExecutiveTask,
+    MemoryRecord,
     ProjectCharter,
     ProjectRecord,
     SpecialistProfile,
     utc_now,
 )
 from keeper.executive.planning import TaskReadiness, WorkflowPlanner
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import ExecutiveRepository, new_id
 from keeper.executive.specialists import (
     ReviewOrchestrator,
     SpecialistGateway,
@@ -112,6 +113,23 @@ class ExecutiveRuntime:
             candidate, charter, author
         )
         self.repository.save_task(returned)
+        self.repository.insert_memory(
+            MemoryRecord(
+                new_id("memory"),
+                project.project_id,
+                charter.revision,
+                returned.task_id,
+                returned.stage_id,
+                "EVIDENCE",
+                "VERIFIED",
+                "specialist result",
+                f"{result.status}: {', '.join(result.outputs)}",
+                True,
+                result.evidence,
+                None,
+                utc_now(),
+            )
+        )
         requires_independent = any(
             "independent" in item.casefold()
             for item in returned.review_requirements
@@ -133,6 +151,23 @@ class ExecutiveRuntime:
         )
         disposition = self.reviewer.apply(returned, review)
         self.repository.save_task(disposition)
+        self.repository.insert_memory(
+            MemoryRecord(
+                new_id("memory"),
+                project.project_id,
+                charter.revision,
+                disposition.task_id,
+                disposition.stage_id,
+                "OUTCOME",
+                "VERIFIED",
+                "review disposition",
+                review.disposition,
+                True,
+                review.evidence,
+                None,
+                utc_now(),
+            )
+        )
         if disposition.status == TaskStatus.BLOCKED:
             return self._pause(
                 project,
