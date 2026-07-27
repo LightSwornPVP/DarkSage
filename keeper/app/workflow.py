@@ -346,6 +346,9 @@ class WorkflowCoordinator:
                             }
                         ),
                         "detected_at": _now(),
+                        "reroute_reservations": (
+                            self.store.reroute_reservations_for_run(run_id)
+                        ),
                     },
                 }
             )
@@ -915,6 +918,7 @@ class WorkflowCoordinator:
         evidence.mkdir(parents=True, exist_ok=True)
         run = self._run(run_id)
         records = _provider_records(evidence)
+        reroute_reservations = self.store.reroute_reservations_for_run(run_id)
         executions = run.get("provider_execution_attempts", [])
         if not isinstance(executions, list):
             raise RuntimeError("provider execution attempt state is malformed")
@@ -1070,6 +1074,7 @@ class WorkflowCoordinator:
             "routing_rationale": list(run.get("routing_decisions", [])),
             "routing_attempts": list(run.get("routing_attempts", [])),
             "provider_execution_attempts": executions,
+            "reroute_reservations": reroute_reservations,
             "lifecycle_stages": list(run.get("history", [])),
             "authorizations": authorizations,
             "waivers": waivers,
@@ -1356,14 +1361,15 @@ class WorkflowCoordinator:
                     "provider execution has no unique selected routing identity"
                 )
             route = matching_routes[0]
+            reroute_authorization_id = latest_route.get(
+                "reroute_authorization_id"
+            )
             executions.append(
                 {
                     **event,
                     "attempt_number": latest_route.get("attempt_number"),
                     "retry_parent": latest_route.get("retry_of"),
-                    "reroute_authorization_id": latest_route.get(
-                        "reroute_authorization_id"
-                    ),
+                    "reroute_authorization_id": reroute_authorization_id,
                     "stable_registration_digest": route.get(
                         "stable_registration_digest"
                     ),
@@ -1373,6 +1379,12 @@ class WorkflowCoordinator:
                     "status": "EXECUTION_STARTED",
                 }
             )
+            if reroute_authorization_id:
+                self.store.transition_reroute_reservation(
+                    str(reroute_authorization_id),
+                    "RESERVED",
+                    "EXECUTION_STARTED",
+                )
         elif event.get("event") == "finished":
             if len(matches) != 1:
                 raise PermissionError("provider completion has no unique start record")

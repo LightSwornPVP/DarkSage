@@ -21,7 +21,7 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
     config = KeeperConfig.load(root)
     registration = config.provider_registration or {}
     def command_provider() -> CliProvider:
-        return CliProvider(
+        provider = CliProvider(
             config.provider_command,
             expected_executable_sha256=registration.get("executable_sha256"),
             expected_executable_size=registration.get("executable_size"),
@@ -29,6 +29,8 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
             registration_version=registration.get("version"),
             configuration_digest=registration.get("configuration_digest"),
         )
+        provider.validate()
+        return provider
     provider = (
         MockProvider(output={"status": "completed", "files_changed": [], "findings": []})
         if mock
@@ -103,8 +105,8 @@ def parser() -> argparse.ArgumentParser:
 def main(arguments: list[str] | None = None) -> int:
     options = parser().parse_args(arguments)
     root = options.root.resolve()
-    keeper = build_keeper(root, options.mock)
     try:
+        keeper = build_keeper(root, options.mock)
         if options.command == "pause":
             keeper.pause()
             print("Keeper is paused.")

@@ -10,7 +10,7 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 
 from keeper.policies import filtered_environment
 from keeper.providers.base import AgentProvider, AgentRequest, ProcessResult
@@ -30,6 +30,7 @@ class CliProvider(AgentProvider):
         registration_id: str | None = None,
         registration_version: str | None = None,
         configuration_digest: str | None = None,
+        before_process_create: Callable[[], None] | None = None,
     ) -> None:
         self.command_script: Path | None = None
         if (
@@ -53,6 +54,7 @@ class CliProvider(AgentProvider):
         self.registration_id = registration_id
         self.registration_version = registration_version
         self.configuration_digest = configuration_digest
+        self.before_process_create = before_process_create
         self.instance_id = uuid.uuid4().hex
         self._active_process: subprocess.Popen[str] | None = None
         self._active_job: int | None = None
@@ -103,29 +105,21 @@ class CliProvider(AgentProvider):
     def run(self, request: AgentRequest) -> ProcessResult:
         registered_path, registered_content = self._validated_executable()
         request.stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        retained_executable_handle: int | None = None
+        retained_executable_handles: list[int] = []
         protected_path = registered_path
         if os.name == "nt":
-            kernel32: Any = ctypes.windll.kernel32
-            kernel32.CreateFileW.restype = ctypes.c_void_p
-            handle = kernel32.CreateFileW(
-                str(registered_path),
-                0x80000000,
-                0x00000001,
-                None,
-                3,
-                0x00000080,
-                None,
+            retained_executable_handles.append(
+                _retain_windows_file(registered_path, "registered executable")
             )
-            if not handle or int(handle) == -1:
-                raise PermissionError(
-                    "registered executable could not be retained against replacement"
+            if self.command_script is not None:
+                retained_executable_handles.append(
+                    _retain_windows_file(self.command_script, "registered command script")
                 )
-            retained_executable_handle = int(handle)
             if hashlib.sha256(registered_path.read_bytes()).hexdigest() != (
                 self.expected_executable_sha256
             ):
-                kernel32.CloseHandle(retained_executable_handle)
+                for handle in retained_executable_handles:
+                    _close_windows_handle(handle)
                 raise PermissionError(
                     "retained provider executable failed identity verification"
                 )
@@ -177,6 +171,8 @@ class CliProvider(AgentProvider):
                 ]
             else:
                 command[0] = str(protected_path)
+            if self.before_process_create is not None:
+                self.before_process_create()
             process = subprocess.Popen(
                 command,
                 cwd=request.workspace,
@@ -268,9 +264,8 @@ class CliProvider(AgentProvider):
                 if job and self._active_job == job:
                     ctypes.windll.kernel32.CloseHandle(job)
                     self._active_job = None
-                if retained_executable_handle is not None:
-                    ctypes.windll.kernel32.CloseHandle(retained_executable_handle)
-
+                for handle in retained_executable_handles:
+                    _close_windows_handle(handle)
     def cancel(self) -> None:
         if self._active_process and self._active_process.poll() is None:
             self._terminate_tree(self._active_process, self._active_job)
@@ -322,3 +317,28 @@ class CliProvider(AgentProvider):
             else:
                 process.kill()
             process.wait(timeout=10)
+
+
+def _retain_windows_file(path: Path, label: str) -> int:
+    kernel32: Any = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x80000000,
+        0x00000001,
+        None,
+        3,
+        0x00000080,
+        None,
+    )
+    if not handle or int(handle) == -1:
+        raise PermissionError(f"{label} could not be retained against replacement")
+    return int(handle)
+
+
+def _close_windows_handle(handle: int) -> None:
+    kernel32: Any = ctypes.windll.kernel32
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    if not kernel32.CloseHandle(ctypes.c_void_p(handle)):
+        raise OSError(ctypes.get_last_error(), "unable to close retained file handle")

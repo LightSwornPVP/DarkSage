@@ -67,18 +67,7 @@ def probe_process(pid: int | None) -> ProcessProbe:
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
             error = ctypes.get_last_error()
-            if error == 87:
-                return ProcessProbe(
-                    ProcessState.CONFIRMED_ABSENT,
-                    "operating system confirmed that the pid does not exist",
-                    error,
-                )
-            diagnostic = (
-                "process query access denied"
-                if error == 5
-                else "process state could not be established"
-            )
-            return ProcessProbe(ProcessState.INDETERMINATE, diagnostic, error)
+            return _classify_windows_open_failure(error)
         try:
             exit_code = ctypes.c_uint32()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
@@ -109,6 +98,21 @@ def probe_process(pid: int | None) -> ProcessProbe:
             error.errno,
         )
     return ProcessProbe(ProcessState.CONFIRMED_PRESENT, "process is active")
+
+
+def _classify_windows_open_failure(error: int) -> ProcessProbe:
+    if error == 87:
+        return ProcessProbe(
+            ProcessState.CONFIRMED_ABSENT,
+            "operating system confirmed that the pid does not exist",
+            error,
+        )
+    diagnostic = (
+        "process query access denied"
+        if error in {5, 1314}
+        else "process state could not be established"
+    )
+    return ProcessProbe(ProcessState.INDETERMINATE, diagnostic, error)
 
 
 def process_exists(pid: int | None) -> bool:

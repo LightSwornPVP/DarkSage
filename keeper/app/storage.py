@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 1
@@ -90,6 +90,7 @@ class KeeperStore:
         expected: dict[str, Any],
         *,
         consumer_id: str | None = None,
+        before_commit: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Atomically consume an authorization and reserve its destination attempt."""
         consumer = consumer_id or uuid.uuid4().hex
@@ -157,7 +158,47 @@ class KeeperStore:
                 raise PermissionError(
                     "reroute authorization or destination transition is already reserved"
                 ) from error
+            if before_commit is not None:
+                before_commit()
         return authorization
+
+    def reroute_reservation(
+        self, authorization_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM reroute_reservations WHERE authorization_id=?",
+                (authorization_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def reroute_reservations_for_run(
+        self, run_id: str
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM reroute_reservations WHERE run_id=? "
+                "ORDER BY destination_attempt",
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def transition_reroute_reservation(
+        self,
+        authorization_id: str,
+        expected_state: str,
+        state: str,
+    ) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE reroute_reservations SET state=? "
+                "WHERE authorization_id=? AND state=?",
+                (state, authorization_id, expected_state),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "reroute reservation state transition was not authorized"
+                )
 
     def upsert(self, table: str, identifier: str, payload: dict[str, Any]) -> None:
         _require_table(table)
