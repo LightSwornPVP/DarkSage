@@ -210,20 +210,29 @@ def impersonate_token(token: int) -> Iterator[None]:
 def create_restricted_primary_token(token: int) -> int:
     restricted_source = wintypes.HANDLE()
     administrators_sid = wintypes.LPVOID()
+    interactive_sid = wintypes.LPVOID()
+    if not _advapi32().ConvertStringSidToSidW(
+        "S-1-5-4", ctypes.byref(interactive_sid)
+    ):
+        raise PermissionError(
+            f"interactive SID creation failed: {ctypes.get_last_error()}"
+        )
     if not _advapi32().ConvertStringSidToSidW(
         "S-1-5-32-544", ctypes.byref(administrators_sid)
     ):
+        _kernel32().LocalFree(interactive_sid)
         raise PermissionError(
             f"administrators SID creation failed: {ctypes.get_last_error()}"
         )
-    disabled_sids = (_SidAndAttributes * 1)(
-        _SidAndAttributes(administrators_sid, 0)
+    disabled_sids = (_SidAndAttributes * 2)(
+        _SidAndAttributes(administrators_sid, 0),
+        _SidAndAttributes(interactive_sid, 0),
     )
     try:
         if not _advapi32().CreateRestrictedToken(
             wintypes.HANDLE(token),
             _DISABLE_MAX_PRIVILEGE,
-            1,
+            2,
             ctypes.byref(disabled_sids),
             0,
             None,
@@ -259,6 +268,7 @@ def create_restricted_primary_token(token: int) -> int:
         if restricted_source.value:
             _kernel32().CloseHandle(restricted_source)
         _kernel32().LocalFree(administrators_sid)
+        _kernel32().LocalFree(interactive_sid)
 
 
 def run_restricted_process(
