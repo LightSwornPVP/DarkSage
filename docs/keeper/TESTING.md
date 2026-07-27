@@ -54,6 +54,14 @@ truthful diagnostics. Completion tests mutate only provider terminal evidence an
 verify it cannot finalize without a matching immutable completion journal; forged
 digests and wrong attempt or instance identities remain blocked.
 
+Authenticated-authority regressions remove writer proofs, recompute all public
+digests, insert completion rows manually, sign with another installation key,
+copy records across registrations and attempts, mutate signed versions and
+component identities, and replay challenges. Standalone tests prove raw evidence
+and missing protected references fail closed. Secret-isolation tests confirm the
+authority key is outside provider roots and absent from inherited environment
+state.
+
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and
 writes structured evidence beneath the selected data directory when Tcl/Tk is

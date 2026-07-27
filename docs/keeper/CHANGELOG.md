@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.6
+
+- Authenticate qualification and completion authority with installation-local
+  HMAC-SHA-256 writer proofs and constant-time verification.
+- Protect the Windows authority key with DPAPI, keep it outside provider evidence
+  and repository roots, and fail closed when key loading is unavailable.
+- Replace standalone raw qualification evidence with a protected evidence
+  reference resolved from Keeper storage.
+- Bind signed qualification and completion records to unpredictable pre-launch
+  challenges and add forgery, wrong-key, cross-installation, and replay coverage.
+
 ## 0.5.5
 
 - Separate provider registration from protected qualification; version metadata

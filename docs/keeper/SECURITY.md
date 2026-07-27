@@ -25,6 +25,33 @@ The environment-name filter is defense in depth, not a secret manager. Operators
 must use the repository's approved credential storage and inspect custom provider
 configuration before execution.
 
+## Authenticated lifecycle authority
+
+Keeper creates a 256-bit installation authority key with the operating system
+cryptographic random source. On Windows the stored key blob is protected with
+current-user DPAPI and kept under the Keeper data directory's dedicated
+`authority/` folder, outside repositories, worktrees, provider evidence, and
+qualification working directories. On non-Windows systems the key file must have
+mode `0600`; broader permissions fail closed. The plaintext key exists only in the
+trusted Keeper process. On Windows, Keeper also retains a non-inheritable,
+exclusive read handle on the protected blob for each provider-execution window,
+so the launched provider cannot reopen it. A concurrent launch fails closed
+instead of sharing the key file.
+
+The key is never placed in configuration, environment variables, command lines,
+stdin, logs, reports, or provider working directories. Provider children receive
+only public challenges and evidence paths. Qualification and completion records
+carry a versioned key identifier and HMAC-SHA-256 writer proof over their complete
+canonical payload. Verification uses constant-time comparison. Public SHA-256
+digests remain useful for content reconciliation but never establish writer
+authority.
+
+Key loading, DPAPI unprotection, identifier mismatch, or authentication failure
+blocks qualification and completion. There is no unkeyed fallback. Automatic key
+rotation is intentionally disabled for the MVP. Rotation requires retaining the
+old DPAPI-protected key for records that must remain verifiable; deleting or
+replacing it makes old records unverifiable and therefore non-retry-safe.
+
 Commit authorization and mutation are separate operating-system and Git
 operations. Keeper revalidates the authorized staged-content digest immediately
 before commit, but no cross-process transaction can make the final check and Git

@@ -65,6 +65,13 @@ evidence digest, and only then permits `RECOVERED_TERMINAL`. If a child exits be
 the protected record is persisted, the attempt remains uncertain and
 non-retry-safe even when `run.json` claims success.
 
+Before provider launch, Keeper durably creates a cryptographically random,
+attempt-specific completion challenge. The completion journal binds that
+challenge, process ownership, lifecycle transaction, and evidence digest and is
+authenticated with the installation authority key. A manually inserted database
+row, literal writer label, copied record, reused challenge, or correctly recomputed
+public digest remains unverified without a valid writer proof.
+
 Inspect the recorded workspace and Git state before retrying a blocked task.
 Keeper preserves dirty and failed worktrees. `cleanup-worktrees PATH` removes only
 a clean registered worktree and refuses dirty work.

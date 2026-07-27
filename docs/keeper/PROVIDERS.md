@@ -21,15 +21,21 @@ qualification retains the registered launcher and script through process creatio
 runs the approved version command, and stores immutable start and completion
 evidence containing the actual normalized output and component identities.
 Discovery reports `qualified` only when the registration references that exact
-protected evidence and digest.
+protected evidence and digest. Both the start event and final evidence are bound
+to an unpredictable pre-launch challenge and authenticated by Keeper's
+installation authority key. A caller-computed public digest cannot qualify a
+provider.
 
 Capabilities and eligible workflow roles are registration authority. Diagnostics
 copy them exactly; routing requires the provider to be qualified, the required
 capability enabled, the role explicitly eligible, and independent-review
 classification for reviewer roles. Empty eligibility means no workflow routing.
 
-Standalone configuration uses the same schema and protected qualification
-evidence. Its exact `provider_command` array must match the registered invocation.
+Standalone configuration contains only the protected qualification evidence
+reference, never raw authoritative evidence. Startup resolves the signed record
+and its signed authorization event from Keeper-controlled storage and validates
+them with the installation authority key. Its exact `provider_command` array must
+match the registered invocation.
 For batch providers, Keeper canonicalizes the standalone script command to the
 registered `cmd.exe` launcher plus script component before comparison.
 
