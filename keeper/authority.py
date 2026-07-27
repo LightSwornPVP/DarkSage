@@ -90,25 +90,69 @@ class AuthorityKey:
 
     def _load_or_create(self) -> bytes:
         if self.path.exists():
-            self._validate_permissions()
-            protected = self.path.read_bytes()
-            key = _unprotect(protected)
-            if len(key) != 32:
-                raise PermissionError("Keeper authority key has an invalid length")
-            return key
+            return self._load_existing()
         key = secrets.token_bytes(32)
         protected = _protect(key)
+        temporary = self.directory / (
+            f".authority-key-v{AUTHORITY_KEY_VERSION}."
+            f"{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        )
         descriptor = os.open(
-            self.path,
+            temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
             0o600,
         )
         try:
-            os.write(descriptor, protected)
+            written = 0
+            while written < len(protected):
+                count = os.write(descriptor, protected[written:])
+                if count <= 0:
+                    raise OSError("Keeper authority key temporary write stalled")
+                written += count
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        try:
+            try:
+                os.link(temporary, self.path)
+            except FileExistsError:
+                return self._load_existing()
+            except OSError as error:
+                raise PermissionError(
+                    "Keeper authority key atomic publication failed"
+                ) from error
+            if os.name != "nt":
+                directory_descriptor = os.open(
+                    self.directory,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+            published = self._load_existing()
+            if not hmac.compare_digest(published, key):
+                raise PermissionError(
+                    "Keeper authority key publication did not preserve key material"
+                )
+            return published
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _load_existing(self) -> bytes:
         self._validate_permissions()
+        try:
+            protected = self.path.read_bytes()
+            key = _unprotect(protected)
+        except OSError as error:
+            raise PermissionError(
+                "Keeper authority key could not be loaded"
+            ) from error
+        if len(key) != 32:
+            raise PermissionError("Keeper authority key has an invalid length")
         return key
 
     def _validate_directory(self) -> None:
