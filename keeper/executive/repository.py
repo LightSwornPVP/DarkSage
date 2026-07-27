@@ -137,6 +137,33 @@ class ExecutiveRepository:
             and (authority_relevant is None or item.authority_relevant == authority_relevant)
         ]
 
+    def decisions(self, project_id: str) -> list[DecisionRecord]:
+        return [
+            DecisionRecord.from_dict(item)
+            for item in self.store.list("project_decisions")
+            if item.get("project_id") == project_id
+        ]
+
+    def assumptions(self, project_id: str) -> list[AssumptionRecord]:
+        return [
+            AssumptionRecord.from_dict(item)
+            for item in self.store.list("project_assumptions")
+            if item.get("project_id") == project_id
+        ]
+
+    def save_conversation(self, interaction_id: str, payload: dict[str, Any]) -> None:
+        required = {"interaction_id", "project_id", "speaker", "message", "created_at"}
+        if set(payload) != required:
+            raise ValueError("conversation record fields are invalid")
+        self.store.insert_immutable("project_conversations", interaction_id, payload)
+
+    def conversations(self, project_id: str) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.store.list("project_conversations")
+            if item.get("project_id") == project_id
+        ]
+
     def _required(self, table: str, identifier: str) -> dict[str, Any]:
         value = self.store.get(table, identifier)
         if value is None:

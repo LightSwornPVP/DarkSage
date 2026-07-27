@@ -65,6 +65,16 @@ class AuthorityEvaluator:
             return self._decision(AuthorityOutcome.INDETERMINATE, "identity-binding", "project_id", "project identity does not match", "reject the action")
         if ExecutiveState(project.state) in TERMINAL_STATES:
             return self._decision(AuthorityOutcome.DENIED, "terminal-project", "state", "terminal projects cannot launch actions", "create a new project")
+        if ExecutiveState(project.state) in {
+            ExecutiveState.PAUSED,
+            ExecutiveState.BLOCKED,
+            ExecutiveState.WAITING_FOR_FOUNDER,
+            ExecutiveState.WAITING_FOR_PROVIDER,
+            ExecutiveState.WAITING_FOR_CREDENTIAL,
+            ExecutiveState.WAITING_FOR_EXTERNAL_SYSTEM,
+            ExecutiveState.WAITING_FOR_USAGE_RESET,
+        }:
+            return self._decision(AuthorityOutcome.DENIED, "non-executable-project-state", "state", "the project is paused or waiting", "resolve the pause before launching work")
         if project.active_charter_revision != action.charter_revision or charter.revision != action.charter_revision:
             return self._decision(AuthorityOutcome.CHARTER_REVISION_REQUIRED, "active-revision", "revision", "action is bound to a stale charter revision", "bind the action to the active charter")
         if charter.status != "APPROVED" or project.active_charter_id != charter.charter_id:
