@@ -616,6 +616,7 @@ def qualification_evidence_digest(evidence: dict[str, Any]) -> str:
             "authority_schema_version",
             "authority_key_id",
             "authenticated_writer_proof",
+            "service_key_version",
         }
     }
     return hashlib.sha256(

@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import ctypes
+import os
+from ctypes import wintypes
+from pathlib import Path
+from typing import Any, Callable
+
+from keeper.authority_service.protocol import (
+    Operation,
+    Request,
+    decode_frame,
+    encode_frame,
+    parse_response,
+)
+
+
+DEFAULT_PIPE_NAME = r"\\.\pipe\KeeperAuthority-v1"
+
+
+class AuthorityServiceClient:
+    """Fail-closed client for the local Keeper Authority Windows service."""
+
+    def __init__(
+        self,
+        pipe_name: str = DEFAULT_PIPE_NAME,
+        *,
+        timeout_seconds: float = 15.0,
+        test_transport: Callable[[Request], dict[str, Any]] | None = None,
+    ) -> None:
+        self.pipe_name = pipe_name
+        self.timeout_seconds = timeout_seconds
+        self._test_transport = test_transport
+
+    def request(
+        self, operation: Operation, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        request = Request.create(operation, payload)
+        if self._test_transport is not None:
+            return self._test_transport(request)
+        if os.name != "nt":
+            raise RuntimeError("Keeper Authority Service requires Windows")
+        handle = _connect(self.pipe_name, self.timeout_seconds)
+        try:
+            _write_all(handle, encode_frame(request.to_dict()))
+            response = decode_frame(lambda length: _read(handle, length))
+        finally:
+            _close(handle)
+        return parse_response(response, request.request_id)
+
+    def diagnostics(self) -> dict[str, Any]:
+        return self.request(Operation.DIAGNOSTICS, {})
+
+    def register_provider(self, provider_id: str, executable: Path) -> dict[str, Any]:
+        return self.request(
+            Operation.REGISTER_PROVIDER,
+            {"provider_id": provider_id, "executable": str(executable.resolve())},
+        )
+
+    def qualify_provider(self, registration_id: str) -> dict[str, Any]:
+        return self.request(
+            Operation.BEGIN_QUALIFICATION,
+            {"registration_id": registration_id},
+        )
+
+    def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
+        return self.request(Operation.RESERVE_ATTEMPT, dict(identity))
+
+    def record_provider_start(self, attempt_id: str, pid: int) -> dict[str, Any]:
+        return self.request(
+            Operation.RECORD_PROVIDER_START,
+            {"attempt_id": attempt_id, "pid": pid},
+        )
+
+    def finalize_completion(self, attempt_id: str) -> dict[str, Any]:
+        return self.request(
+            Operation.FINALIZE_COMPLETION, {"attempt_id": attempt_id}
+        )
+
+    def query_state(self, kind: str, identifier: str) -> dict[str, Any]:
+        return self.request(Operation.QUERY_STATE, {"kind": kind, "id": identifier})
+
+    def verify(self, purpose: str, record: object) -> bool:
+        return bool(
+            self.request(
+                Operation.VERIFY_EVIDENCE,
+                {"purpose": purpose, "record": record},
+            ).get("valid")
+        )
+
+    def rotate_key(self, confirmation: str) -> dict[str, Any]:
+        return self.request(Operation.ROTATE_KEY, {"confirmation": confirmation})
+
+
+def _connect(pipe_name: str, timeout_seconds: float) -> int:
+    kernel32 = _kernel32()
+    milliseconds = max(1, int(timeout_seconds * 1000))
+    if not kernel32.WaitNamedPipeW(pipe_name, milliseconds):
+        error = ctypes.get_last_error()
+        raise TimeoutError(f"Keeper Authority Service is unavailable: {error}")
+    handle = kernel32.CreateFileW(
+        pipe_name,
+        0xC0000000,
+        0,
+        None,
+        3,
+        0,
+        None,
+    )
+    if handle in {None, ctypes.c_void_p(-1).value}:
+        raise PermissionError(
+            f"Keeper Authority Service connection was rejected: {ctypes.get_last_error()}"
+        )
+    return int(handle)
+
+
+def _write_all(handle: int, value: bytes) -> None:
+    offset = 0
+    kernel32 = _kernel32()
+    while offset < len(value):
+        written = wintypes.DWORD()
+        chunk = value[offset:]
+        buffer = ctypes.create_string_buffer(chunk)
+        if not kernel32.WriteFile(
+            handle, buffer, len(chunk), ctypes.byref(written), None
+        ):
+            raise OSError(
+                ctypes.get_last_error(), "Keeper Authority IPC write failed"
+            )
+        if written.value <= 0:
+            raise OSError("Keeper Authority IPC write stalled")
+        offset += int(written.value)
+
+
+def _read(handle: int, length: int) -> bytes:
+    kernel32 = _kernel32()
+    buffer = ctypes.create_string_buffer(length)
+    read = wintypes.DWORD()
+    if not kernel32.ReadFile(
+        handle, buffer, length, ctypes.byref(read), None
+    ):
+        error = ctypes.get_last_error()
+        if error == 109:
+            return b""
+        raise OSError(error, "Keeper Authority IPC read failed")
+    return buffer.raw[: read.value]
+
+
+def _close(handle: int) -> None:
+    if not _kernel32().CloseHandle(handle):
+        raise OSError(ctypes.get_last_error(), "Keeper Authority IPC close failed")
+
+
+def _kernel32() -> Any:
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WaitNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    kernel32.WaitNamedPipeW.restype = wintypes.BOOL
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.WriteFile.argtypes = kernel32.ReadFile.argtypes
+    kernel32.WriteFile.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
