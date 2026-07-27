@@ -27,35 +27,54 @@ class AuthorityServiceInstaller:
     def __init__(self, source_root: Path) -> None:
         self.source_root = source_root.resolve(strict=True)
 
-    def install(self) -> dict[str, Any]:
+    def install(self, *, resume: bool = False) -> dict[str, Any]:
         _require_admin()
-        if SERVICE_ROOT.exists() or _service_exists():
+        service_exists = _service_exists()
+        if resume:
+            manifest = _load_incomplete_manifest()
+            if service_exists:
+                raise PermissionError(
+                    "KeeperAuthority service registration already exists"
+                )
+            _validate_resume_artifacts(manifest)
+            source_commit = _git_head(self.source_root)
+            manifest.setdefault("installation_attempts", []).append(
+                {
+                    "resumed_at": _now(),
+                    "previous_source_commit": manifest.get("source_commit"),
+                    "source_commit": source_commit,
+                }
+            )
+            manifest["source_commit"] = source_commit
+            client_sid = str(manifest["authorized_client_sid"])
+        elif SERVICE_ROOT.exists() or service_exists:
             raise PermissionError(
                 "KeeperAuthority already exists; use status/repair/upgrade, not install"
             )
-        client_sid = current_process_sid()
+        else:
+            client_sid = current_process_sid()
+            manifest = {
+                "schema_version": 1,
+                "service_name": SERVICE_NAME,
+                "service_account": rf"NT SERVICE\{SERVICE_NAME}",
+                "authorized_client_sid": client_sid,
+                "created_at": _now(),
+                "source_commit": _git_head(self.source_root),
+                "artifacts": [],
+                "commands": [],
+                "runtime_artifacts": [
+                    {
+                        "kind": "named_pipe",
+                        "name": r"\\.\pipe\KeeperAuthority-v1",
+                        "persistent": False,
+                    }
+                ],
+                "uninstall_policy": (
+                    "service registration may be removed; protected data, keys, "
+                    "audit history, backups, and this manifest are preserved"
+                ),
+            }
         exchange_root = INSTALL_ROOT / "ClientExchange" / _sid_directory(client_sid)
-        manifest: dict[str, Any] = {
-            "schema_version": 1,
-            "service_name": SERVICE_NAME,
-            "service_account": rf"NT SERVICE\{SERVICE_NAME}",
-            "authorized_client_sid": client_sid,
-            "created_at": _now(),
-            "source_commit": _git_head(self.source_root),
-            "artifacts": [],
-            "commands": [],
-            "runtime_artifacts": [
-                {
-                    "kind": "named_pipe",
-                    "name": r"\\.\pipe\KeeperAuthority-v1",
-                    "persistent": False,
-                }
-            ],
-            "uninstall_policy": (
-                "service registration may be removed; protected data, keys, "
-                "audit history, backups, and this manifest are preserved"
-            ),
-        }
         directories = (
             SERVICE_ROOT,
             SERVICE_ROOT / "bin",
@@ -69,8 +88,20 @@ class AuthorityServiceInstaller:
             exchange_root / "worktrees",
         )
         for directory in directories:
-            directory.mkdir(parents=True, exist_ok=False)
-            _record(manifest, "directory", directory)
+            if directory.exists():
+                if not (
+                    resume
+                    or directory == MANIFEST_PATH.parent
+                ):
+                    raise FileExistsError(directory)
+                if not directory.is_dir():
+                    raise PermissionError(
+                        f"Authority Service directory is not a directory: {directory}"
+                    )
+            else:
+                directory.mkdir(parents=True, exist_ok=False)
+            if not _artifact_recorded(manifest, directory):
+                _record(manifest, "directory", directory)
             _persist_manifest(manifest)
 
         runtime = SERVICE_ROOT / "bin" / "runtime"
@@ -309,6 +340,7 @@ def parser() -> argparse.ArgumentParser:
     )
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("install")
+    commands.add_parser("resume-install")
     commands.add_parser("start")
     commands.add_parser("stop")
     commands.add_parser("restart")
@@ -327,6 +359,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     try:
         if options.command == "install":
             value: object = AuthorityServiceInstaller(options.source_root).install()
+        elif options.command == "resume-install":
+            value = AuthorityServiceInstaller(options.source_root).install(
+                resume=True
+            )
         elif options.command == "start":
             start()
             value = {"started": True}
@@ -413,6 +449,62 @@ def _record_file(manifest: dict[str, Any], path: Path) -> None:
             "recorded_at": _now(),
         }
     )
+
+
+def _artifact_recorded(manifest: dict[str, Any], path: Path) -> bool:
+    expected = str(path.resolve())
+    return any(
+        isinstance(item, dict) and item.get("path") == expected
+        for item in manifest.get("artifacts", [])
+    )
+
+
+def _load_incomplete_manifest() -> dict[str, Any]:
+    if not MANIFEST_PATH.is_file():
+        raise PermissionError(
+            "incomplete-install manifest is unavailable; resume failed closed"
+        )
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError(
+            "incomplete-install manifest is invalid"
+        ) from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("service_name") != SERVICE_NAME
+        or manifest.get("installation_completed_at") is not None
+        or not isinstance(manifest.get("artifacts"), list)
+        or not isinstance(manifest.get("commands"), list)
+        or not isinstance(manifest.get("authorized_client_sid"), str)
+    ):
+        raise PermissionError(
+            "Authority Service install is not safely resumable"
+        )
+    return manifest
+
+
+def _validate_resume_artifacts(manifest: dict[str, Any]) -> None:
+    recorded = {
+        str(Path(str(item["path"])).resolve())
+        for item in manifest["artifacts"]
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    allowed = recorded | {
+        str(MANIFEST_PATH.resolve()),
+        str(MANIFEST_PATH.parent.resolve()),
+    }
+    existing = {
+        str(path.resolve())
+        for path in SERVICE_ROOT.rglob("*")
+    } | {str(SERVICE_ROOT.resolve())}
+    unexpected = sorted(existing - allowed)
+    if unexpected:
+        raise PermissionError(
+            "incomplete install contains unrecorded artifacts: "
+            + ", ".join(unexpected)
+        )
 
 
 def _persist_manifest(manifest: dict[str, Any]) -> None:
