@@ -18,7 +18,9 @@ from keeper.authority_service.protocol import (
     parse_request,
     success_response,
 )
-from keeper.authority_service.windows_identity import named_pipe_client_sid
+from keeper.authority_service.windows_identity import (
+    named_pipe_client_identity,
+)
 
 
 _PIPE_ACCESS_DUPLEX = 0x00000003
@@ -150,10 +152,18 @@ class NamedPipeAuthorityServer:
             self._threads.discard(threading.current_thread())
 
     def _authenticated_client_sid(self, pipe: int) -> str:
-        sid = named_pipe_client_sid(pipe)
-        if sid != self.authorized_client_sid:
+        identity = named_pipe_client_identity(pipe)
+        if identity.sid != self.authorized_client_sid:
             raise PermissionError("authority client identity is unauthorized")
-        return sid
+        if identity.restricted:
+            raise PermissionError(
+                "restricted authority clients are unauthorized"
+            )
+        if identity.integrity_rid < 8192:
+            raise PermissionError(
+                "low-integrity authority clients are unauthorized"
+            )
+        return identity.sid
 
     def _rate_limit(self, client_sid: str) -> None:
         now = time.monotonic()

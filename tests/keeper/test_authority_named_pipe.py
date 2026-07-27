@@ -10,7 +10,10 @@ import pytest
 from keeper.authority_service.client import AuthorityServiceClient
 from keeper.authority_service.core import AuthorityServiceCore
 from keeper.authority_service.ipc_server import NamedPipeAuthorityServer
-from keeper.authority_service.windows_identity import current_process_sid
+from keeper.authority_service.windows_identity import (
+    WindowsTokenIdentity,
+    current_process_sid,
+)
 from keeper.authority_service.restricted_process import (
     restricted_current_process_token,
     run_restricted_process,
@@ -30,9 +33,16 @@ def test_named_pipe_authenticates_client_and_serves_framed_request(
     thread.start()
     assert server.ready.wait(timeout=5)
     try:
-        result = AuthorityServiceClient(
-            pipe_name, timeout_seconds=5
-        ).diagnostics()
+        try:
+            result = AuthorityServiceClient(
+                pipe_name, timeout_seconds=5
+            ).diagnostics()
+        except PermissionError as error:
+            if "restricted authority clients" in str(error):
+                pytest.skip(
+                    "Codex sandbox intentionally presents a restricted token"
+                )
+            raise
         assert result["service_version"] == "1.0.0"
         assert result["client_sid"] == current_process_sid()
     finally:
@@ -107,3 +117,52 @@ def test_low_restricted_provider_cannot_connect_to_authority_pipe(
         server.stop()
         thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("identity", "message"),
+    [
+        (
+            WindowsTokenIdentity("S-1-5-21-1000", True, 8192),
+            "restricted",
+        ),
+        (
+            WindowsTokenIdentity("S-1-5-21-1000", False, 4096),
+            "low-integrity",
+        ),
+        (
+            WindowsTokenIdentity("S-1-5-21-9999", False, 8192),
+            "unauthorized",
+        ),
+    ],
+)
+def test_pipe_server_rejects_ineligible_client_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: WindowsTokenIdentity,
+    message: str,
+) -> None:
+    core = AuthorityServiceCore(tmp_path / "service")
+    server = NamedPipeAuthorityServer(core, "S-1-5-21-1000")
+    monkeypatch.setattr(
+        "keeper.authority_service.ipc_server.named_pipe_client_identity",
+        lambda _pipe: identity,
+    )
+
+    with pytest.raises(PermissionError, match=message):
+        server._authenticated_client_sid(1)
+
+
+def test_pipe_server_accepts_authorized_medium_unrestricted_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = AuthorityServiceCore(tmp_path / "service")
+    server = NamedPipeAuthorityServer(core, "S-1-5-21-1000")
+    monkeypatch.setattr(
+        "keeper.authority_service.ipc_server.named_pipe_client_identity",
+        lambda _pipe: WindowsTokenIdentity(
+            "S-1-5-21-1000", False, 8192
+        ),
+    )
+
+    assert server._authenticated_client_sid(1) == "S-1-5-21-1000"

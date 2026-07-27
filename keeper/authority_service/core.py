@@ -11,6 +11,7 @@ from typing import Any, Callable, Protocol
 
 from keeper.authority_service.key_ring import ServiceKeyRing
 from keeper.authority_service.protocol import Operation, Request
+from keeper.authority_service.provenance import AUDIT_REPORT_PURPOSE
 from keeper.authority_service.store import AuthorityStore
 from keeper.providers.adapters import (
     apply_protected_qualification,
@@ -90,6 +91,20 @@ class TrustedObserver(Protocol):
     ) -> CompletionObservation: ...
 
 
+class ProvenanceReporter(Protocol):
+    def build(
+        self,
+        request: Request,
+        client_sid: str,
+        *,
+        installed_package_version: str,
+        authority_key_id: str,
+        authority_key_version: int,
+        database_path: Path,
+        database_identity: dict[str, Any] | None,
+    ) -> dict[str, Any]: ...
+
+
 class AuthorityServiceCore:
     """Service-owned lifecycle authority; callers never supply signed records."""
 
@@ -98,6 +113,7 @@ class AuthorityServiceCore:
         root: Path,
         *,
         observer: TrustedObserver | None = None,
+        provenance_reporter: ProvenanceReporter | None = None,
     ) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -105,6 +121,7 @@ class AuthorityServiceCore:
         self.store.migrate()
         self.keys = ServiceKeyRing(self.root / "keys")
         self.observer = observer
+        self.provenance_reporter = provenance_reporter
 
     def dispatch(self, request: Request, client_sid: str) -> dict[str, Any]:
         if not client_sid:
@@ -127,6 +144,7 @@ class AuthorityServiceCore:
             raise
         handlers = {
             Operation.DIAGNOSTICS: self._diagnostics,
+            Operation.AUDIT_PROVENANCE: self._audit_provenance,
             Operation.REGISTER_PROVIDER: self._register_provider,
             Operation.BEGIN_QUALIFICATION: self._qualify_provider,
             Operation.FINALIZE_QUALIFICATION: self._internal_only,
@@ -144,7 +162,14 @@ class AuthorityServiceCore:
             Operation.MIGRATE_LEGACY: self._migrate_legacy,
         }
         try:
-            result = handlers[request.operation](request.payload, client_sid)
+            if request.operation == Operation.AUDIT_PROVENANCE:
+                result = self._audit_provenance_request(
+                    request, client_sid
+                )
+            else:
+                result = handlers[request.operation](
+                    request.payload, client_sid
+                )
         except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as error:
             self.store.audit(
                 request.operation_id,
@@ -165,6 +190,38 @@ class AuthorityServiceCore:
             {"outcome": "accepted"},
         )
         return result
+
+    def _audit_provenance_request(
+        self, request: Request, client_sid: str
+    ) -> dict[str, Any]:
+        _exact(request.payload, set())
+        if self.provenance_reporter is None:
+            raise RuntimeError(
+                "Authority provenance reporter is unavailable"
+            )
+        try:
+            database_identity = self.store.schema_identity()
+        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+            database_identity = None
+        report = self.provenance_reporter.build(
+            request,
+            client_sid,
+            installed_package_version=SERVICE_VERSION,
+            authority_key_id=self.keys.current_key_id,
+            authority_key_version=self.keys.current_version,
+            database_path=self.store.path,
+            database_identity=database_identity,
+        )
+        return {
+            "report": self.keys.sign(AUDIT_REPORT_PURPOSE, report)
+        }
+
+    def _audit_provenance(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        raise RuntimeError(
+            "Authority provenance requires authenticated request binding"
+        )
 
     def _diagnostics(
         self, payload: dict[str, Any], client_sid: str
@@ -714,6 +771,7 @@ class AuthorityServiceCore:
                 "provider-launch-claim",
                 "provider-start",
                 "provider-completion",
+                AUDIT_REPORT_PURPOSE,
             },
         )
         return {"valid": self.keys.verify(purpose, payload["record"])}
@@ -934,6 +992,11 @@ def _canonical_path(value: object, label: str) -> str:
 
 
 def _object_id(result: dict[str, Any]) -> str | None:
+    report = result.get("report")
+    if isinstance(report, dict) and isinstance(
+        report.get("audit_operation_id"), str
+    ):
+        return str(report["audit_operation_id"])
     for key in ("attempt_id", "registration_id", "qualification_id"):
         value = result.get(key)
         if isinstance(value, str):

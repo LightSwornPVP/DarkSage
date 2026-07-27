@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,17 @@ class _SidAndAttributes(ctypes.Structure):
 
 class _TokenUser(ctypes.Structure):
     _fields_ = [("User", _SidAndAttributes)]
+
+
+class _TokenMandatoryLabel(ctypes.Structure):
+    _fields_ = [("Label", _SidAndAttributes)]
+
+
+@dataclass(frozen=True, slots=True)
+class WindowsTokenIdentity:
+    sid: str
+    restricted: bool
+    integrity_rid: int
 
 
 def current_process_sid() -> str:
@@ -46,6 +58,10 @@ def process_sid(process_id: int) -> str:
 
 
 def named_pipe_client_sid(pipe: int) -> str:
+    return named_pipe_client_identity(pipe).sid
+
+
+def named_pipe_client_identity(pipe: int) -> WindowsTokenIdentity:
     if os.name != "nt":
         raise RuntimeError("Windows identity is unavailable")
     advapi32 = _advapi32()
@@ -65,7 +81,12 @@ def named_pipe_client_sid(pipe: int) -> str:
                 "authority client token cannot be opened: "
                 f"{ctypes.get_last_error()}"
             )
-        return _token_sid(_handle_value(token))
+        token_value = _handle_value(token)
+        return WindowsTokenIdentity(
+            _token_sid(token_value),
+            bool(advapi32.IsTokenRestricted(token)),
+            _token_integrity_rid(token_value),
+        )
     finally:
         if token.value:
             _kernel32().CloseHandle(token)
@@ -131,6 +152,36 @@ def _token_sid(token: int) -> str:
     return _sid_string(user.User.Sid)
 
 
+def _token_integrity_rid(token: int) -> int:
+    advapi32 = _advapi32()
+    needed = wintypes.DWORD()
+    advapi32.GetTokenInformation(
+        token, TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(needed)
+    )
+    if not needed.value:
+        raise PermissionError("Windows token integrity is unavailable")
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetTokenInformation(
+        token,
+        TOKEN_INTEGRITY_LEVEL,
+        buffer,
+        needed,
+        ctypes.byref(needed),
+    ):
+        raise PermissionError(
+            f"Windows token integrity cannot be read: {ctypes.get_last_error()}"
+        )
+    label = ctypes.cast(
+        buffer, ctypes.POINTER(_TokenMandatoryLabel)
+    ).contents
+    count = int(advapi32.GetSidSubAuthorityCount(label.Label.Sid)[0])
+    if count <= 0:
+        raise PermissionError("Windows token integrity SID is invalid")
+    return int(
+        advapi32.GetSidSubAuthority(label.Label.Sid, count - 1)[0]
+    )
+
+
 def _sid_string(sid: int) -> str:
     advapi32 = _advapi32()
     value = wintypes.LPWSTR()
@@ -190,6 +241,17 @@ def _advapi32() -> Any:
         ctypes.POINTER(wintypes.DWORD),
     ]
     advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.IsTokenRestricted.argtypes = [wintypes.HANDLE]
+    advapi32.IsTokenRestricted.restype = wintypes.BOOL
+    advapi32.GetSidSubAuthorityCount.argtypes = [wintypes.LPVOID]
+    advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(
+        ctypes.c_ubyte
+    )
+    advapi32.GetSidSubAuthority.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
     advapi32.ConvertSidToStringSidW.argtypes = [
         wintypes.LPVOID,
         ctypes.POINTER(wintypes.LPWSTR),

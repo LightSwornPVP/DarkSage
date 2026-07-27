@@ -1,164 +1,224 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import re
+import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
-from keeper.authority_service.provider_identity import account_rights
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-
-SERVICE_ROOT = Path(r"C:\ProgramData\Keeper\AuthorityService")
-DEFAULT_EVIDENCE_ROOT = Path(
-    r"C:\ProgramData\Keeper\ClientExchange"
-    r"\S_1_5_21_2426456460_2159068531_2397302861_1001\evidence"
+from keeper.authority_service.client import (
+    DEFAULT_PIPE_NAME,
+    AuthorityServiceClient,
+)
+from keeper.authority_service.provenance import (
+    AUDIT_REPORT_PURPOSE,
+    source_package_content_sha256,
 )
 
 
-def audit(
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def verify_live_provenance(
+    *,
     expected_source_commit: str,
-    evidence_root: Path,
-    excluded_evidence_root: Path | None,
+    source_root: Path,
+    client: AuthorityServiceClient,
+    service_query: Callable[[], dict[str, str]],
+    protected_read_denied: Callable[[Path], bool],
 ) -> dict[str, Any]:
-    manifest_path = SERVICE_ROOT / "audit" / "machine-artifacts.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest["source_commit"] != expected_source_commit:
-        raise PermissionError("installed source commit differs")
-    identity = manifest["provider_identity"]
-    if (
-        identity["state"] != "PROVISIONED"
-        or identity["account_name"] != "KeeperAuthorityPvd"
-    ):
-        raise PermissionError("provider identity is not provisioned")
-    expected_provider_rights = {
-        "SeBatchLogonRight",
-        "SeDenyInteractiveLogonRight",
-        "SeDenyRemoteInteractiveLogonRight",
-    }
-    provider_rights = set(account_rights("KeeperAuthorityPvd"))
-    if not expected_provider_rights.issubset(provider_rights):
-        raise PermissionError("provider account rights differ")
-    expected_service_rights = {
-        "SeAssignPrimaryTokenPrivilege",
-        "SeIncreaseQuotaPrivilege",
-    }
-    service_rights = set(
-        account_rights(r"NT SERVICE\KeeperAuthority")
+    if not _COMMIT.fullmatch(expected_source_commit):
+        raise ValueError("expected source commit must be a full SHA-1")
+    source_root = source_root.resolve(strict=True)
+    report = client.audit_provenance()
+    if not client.verify(AUDIT_REPORT_PURPOSE, report):
+        raise PermissionError(
+            "Authority provenance report authentication is invalid"
+        )
+    reported_commit = str(
+        report["package_source_provenance"]["installed_source_commit"]
     )
-    if not expected_service_rights.issubset(service_rights):
-        raise PermissionError("service process rights differ")
-    config_path = SERVICE_ROOT / "config" / "service.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    if (
-        config["schema_version"] != 2
-        or config["provider_account_name"] != "KeeperAuthorityPvd"
+    if reported_commit != expected_source_commit:
+        raise PermissionError(
+            "installed Authority source commit differs from candidate"
+        )
+    repository_commit = _git_head(source_root)
+    if repository_commit != expected_source_commit:
+        raise PermissionError(
+            "candidate repository HEAD differs from expected commit"
+        )
+    candidate_content_digest = source_package_content_sha256(source_root)
+    if report["package"]["content_sha256"] != candidate_content_digest:
+        raise PermissionError(
+            "installed Authority package content differs from candidate source"
+        )
+    if report["overall_result"] != "PASS":
+        raise PermissionError(
+            f"Authority provenance result is {report['overall_result']}"
+        )
+    if any(
+        item.get("result") != "PASS"
+        for item in report["artifact_results"]
     ):
-        raise PermissionError("Authority Service configuration differs")
-    credential = Path(config["provider_credential_path"])
+        raise PermissionError(
+            "one or more Authority provenance artifacts did not pass"
+        )
+    query = service_query()
+    qc = query["configuration"].casefold()
+    state = query["state"].casefold()
+    service = report["service"]
     if (
-        hashlib.sha256(credential.read_bytes()).hexdigest()
-        != identity["credential_sha256"]
+        "running" not in state
+        or str(service["account_name"]).casefold() not in qc
+        or str(service["binary_path"]).casefold() not in qc
+        or "demand_start" not in qc
     ):
-        raise PermissionError("provider credential digest differs")
-    artifacts = manifest["artifacts"]
-
-    def recorded(path: Path) -> None:
-        resolved = str(path.resolve())
-        matches = [
-            item for item in artifacts if item.get("path") == resolved
-        ]
-        if not matches:
-            raise PermissionError(f"unrecorded machine artifact: {resolved}")
-        if path.is_file():
-            content = path.read_bytes()
-            digest = hashlib.sha256(content).hexdigest()
-            if not any(
-                item.get("sha256") == digest
-                and item.get("size") == len(content)
-                for item in matches
-            ):
-                raise PermissionError(
-                    f"machine artifact digest differs: {resolved}"
-                )
-
-    package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
-    recorded(package)
-    if (
-        manifest["upgrades"][-1]["source_commit"]
-        != manifest["source_commit"]
-    ):
-        raise PermissionError("latest package upgrade provenance differs")
-    excluded = (
-        excluded_evidence_root.resolve()
-        if excluded_evidence_root is not None
-        else None
-    )
-    recorded_roots = 0
-    recorded_paths = 0
-    for root in evidence_root.glob("restricted-*"):
-        if excluded is not None and root.resolve() == excluded:
-            continue
-        recorded_roots += 1
-        for path in (root, *root.rglob("*")):
-            recorded(path)
-            recorded_paths += 1
-    key_path = (
-        SERVICE_ROOT
-        / "data"
-        / "keys"
-        / "key-v1"
-        / "authority"
-        / "authority-key-v1.bin"
-    )
-    recorded(key_path)
-    if not key_path.is_file():
-        raise PermissionError("Authority Service key is unavailable")
+        raise PermissionError(
+            "live Windows service configuration differs from report"
+        )
+    manifest_path = Path(str(report["machine_manifest"]["path"]))
+    if not protected_read_denied(manifest_path):
+        raise PermissionError(
+            "protected Authority manifest is directly readable"
+        )
     return {
-        "source_commit": manifest["source_commit"],
-        "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
-        "provider_account_sid": identity["sid"],
-        "provider_rights": sorted(provider_rights),
-        "service_rights": sorted(service_rights),
-        "configuration_schema": config["schema_version"],
-        "service_key_preserved": True,
-        "recorded_restricted_roots": recorded_roots,
-        "recorded_restricted_paths": recorded_paths,
-        "status": "PASS",
+        "audit_operation_id": report["audit_operation_id"],
+        "generated_at": report["generated_at"],
+        "expected_source_commit": expected_source_commit,
+        "reported_source_commit": reported_commit,
+        "candidate_package_content_sha256": candidate_content_digest,
+        "installed_package_sha256": report["package"]["sha256"],
+        "machine_manifest_sha256": report["machine_manifest"]["sha256"],
+        "configuration_sha256": report["configuration"]["sha256"],
+        "service_name": service["name"],
+        "service_account": service["account_name"],
+        "service_account_sid": service["account_sid"],
+        "provider_account": report["identities"][
+            "provider_account_name"
+        ],
+        "provider_account_sid": report["identities"][
+            "provider_account_sid"
+        ],
+        "authority_key_id": report["authority_key"]["key_id"],
+        "authority_key_version": report["authority_key"]["key_version"],
+        "database_schema_sha256": report["database_schema"][
+            "schema_sha256"
+        ],
+        "acl_policy_sha256": report["acl_policy"]["policy_sha256"],
+        "report_authentication": "PASS",
+        "request_binding": "PASS",
+        "candidate_source_match": "PASS",
+        "windows_service_query": "PASS",
+        "protected_root_direct_read": "DENIED",
+        "overall_result": "PASS",
+        "report": report,
     }
+
+
+def _git_head(source_root: Path) -> str:
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={source_root.as_posix()}",
+            "-C",
+            str(source_root),
+            "rev-parse",
+            "HEAD",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise OSError("candidate repository commit is unavailable")
+    return result.stdout.strip()
+
+
+def _windows_service_query() -> dict[str, str]:
+    configuration = _run_sc(["qc", "KeeperAuthority"])
+    state = _run_sc(["query", "KeeperAuthority"])
+    return {"configuration": configuration, "state": state}
+
+
+def _run_sc(arguments: list[str]) -> str:
+    result = subprocess.run(
+        ["sc.exe", *arguments],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        shell=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise OSError("KeeperAuthority service query failed")
+    return result.stdout
+
+
+def _protected_read_denied(path: Path) -> bool:
+    try:
+        path.read_bytes()
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return False
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser()
+    result = argparse.ArgumentParser(prog="audit-keeper-authority")
     result.add_argument("--expected-source-commit", required=True)
     result.add_argument(
-        "--evidence-root", type=Path, default=DEFAULT_EVIDENCE_ROOT
+        "--source-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
     )
-    result.add_argument("--exclude-evidence-root", type=Path)
+    result.add_argument("--pipe-name", default=DEFAULT_PIPE_NAME)
+    result.add_argument("--timeout-seconds", type=float, default=30.0)
     return result
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
     options = parser().parse_args(arguments)
     try:
-        result = audit(
-            options.expected_source_commit,
-            options.evidence_root.resolve(strict=True),
-            (
-                options.exclude_evidence_root.resolve(strict=True)
-                if options.exclude_evidence_root is not None
-                else None
+        result = verify_live_provenance(
+            expected_source_commit=options.expected_source_commit,
+            source_root=options.source_root,
+            client=AuthorityServiceClient(
+                options.pipe_name,
+                timeout_seconds=options.timeout_seconds,
             ),
+            service_query=_windows_service_query,
+            protected_read_denied=_protected_read_denied,
         )
     except (
         FileNotFoundError,
         KeyError,
         OSError,
         PermissionError,
+        RuntimeError,
         TypeError,
         ValueError,
     ) as error:
-        print(f"FAIL: {error}")
+        print(
+            json.dumps(
+                {
+                    "overall_result": "FAIL",
+                    "error": str(error),
+                },
+                sort_keys=True,
+            )
+        )
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

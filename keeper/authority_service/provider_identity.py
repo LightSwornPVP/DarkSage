@@ -101,6 +101,10 @@ def provider_account_sid(account_name: str = PROVIDER_ACCOUNT_NAME) -> str | Non
         _netapi32().NetApiBufferFree(pointer)
 
 
+def account_sid(account_name: str) -> str:
+    return _lookup_account_sid(account_name)[0]
+
+
 def create_provider_account(
     password: str, account_name: str = PROVIDER_ACCOUNT_NAME
 ) -> str:

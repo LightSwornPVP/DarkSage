@@ -14,6 +14,7 @@ from keeper.authority_service.protocol import (
     encode_frame,
     parse_response,
 )
+from keeper.authority_service.provenance import validate_provenance_report
 
 
 DEFAULT_PIPE_NAME = r"\\.\pipe\KeeperAuthority-v1"
@@ -37,6 +38,9 @@ class AuthorityServiceClient:
         self, operation: Operation, payload: dict[str, Any]
     ) -> dict[str, Any]:
         request = Request.create(operation, payload)
+        return self._send(request)
+
+    def _send(self, request: Request) -> dict[str, Any]:
         if self._test_transport is not None:
             return self._test_transport(request)
         if os.name != "nt":
@@ -51,6 +55,15 @@ class AuthorityServiceClient:
 
     def diagnostics(self) -> dict[str, Any]:
         return self.request(Operation.DIAGNOSTICS, {})
+
+    def audit_provenance(self) -> dict[str, Any]:
+        request = Request.create(Operation.AUDIT_PROVENANCE, {})
+        result = self._send(request)
+        if set(result) != {"report"}:
+            raise RuntimeError(
+                "Authority provenance response fields are invalid"
+            )
+        return validate_provenance_report(result["report"], request)
 
     def register_provider(self, provider_id: str, executable: Path) -> dict[str, Any]:
         return self.request(

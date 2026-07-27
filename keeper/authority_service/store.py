@@ -10,6 +10,14 @@ from typing import Any, Iterator
 
 
 SERVICE_SCHEMA_VERSION = 2
+_EXPECTED_TABLES = {
+    "attempts",
+    "audit_log",
+    "qualifications",
+    "registrations",
+    "replay_guard",
+    "service_meta",
+}
 
 
 class AuthorityStore:
@@ -274,6 +282,65 @@ class AuthorityStore:
                 "detail,created_at) VALUES(?,?,?,?,?,?)",
                 (event_id, event_type, client_sid, object_id, safe_detail, _now()),
             )
+
+    def schema_identity(self) -> dict[str, Any]:
+        if not self.path.is_file():
+            raise FileNotFoundError("authority database is unavailable")
+        connection = sqlite3.connect(
+            f"{self.path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            timeout=30,
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute(
+                "SELECT value FROM service_meta WHERE key='schema_version'"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("authority database schema version is missing")
+            version = int(row["value"])
+            definitions = [
+                {
+                    "type": str(item["type"]),
+                    "name": str(item["name"]),
+                    "table": str(item["tbl_name"]),
+                    "sql": " ".join(str(item["sql"]).split()),
+                }
+                for item in connection.execute(
+                    "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                    "WHERE sql IS NOT NULL ORDER BY type,name"
+                ).fetchall()
+            ]
+            tables = {
+                str(item["name"])
+                for item in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+                if not str(item["name"]).startswith("sqlite_")
+            }
+            journal_mode = str(
+                connection.execute("PRAGMA journal_mode").fetchone()[0]
+            ).casefold()
+        finally:
+            connection.close()
+        serialized = json.dumps(
+            definitions, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return {
+            "schema_version": version,
+            "schema_sha256": hashlib.sha256(serialized).hexdigest(),
+            "journal_mode": journal_mode,
+            "table_names_sha256": hashlib.sha256(
+                json.dumps(sorted(tables), separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "schema_matches_expected": (
+                version == SERVICE_SCHEMA_VERSION
+                and tables == _EXPECTED_TABLES
+                and journal_mode == "wal"
+            ),
+        }
 
     def backup(self, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)

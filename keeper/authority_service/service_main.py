@@ -12,6 +12,7 @@ from keeper.authority_service.client import DEFAULT_PIPE_NAME
 from keeper.authority_service.core import AuthorityServiceCore
 from keeper.authority_service.ipc_server import NamedPipeAuthorityServer
 from keeper.authority_service.observer import ServiceProviderObserver
+from keeper.authority_service.provenance import AuthorityProvenanceReporter
 
 
 SERVICE_NAME = "KeeperAuthority"
@@ -147,7 +148,14 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
         str(config["provider_account_name"]),
         Path(config["provider_credential_path"]),
     )
-    core = AuthorityServiceCore(Path(config["service_root"]), observer=observer)
+    core = AuthorityServiceCore(
+        Path(config["service_root"]),
+        observer=observer,
+        provenance_reporter=AuthorityProvenanceReporter(
+            config_path.parent.parent,
+            config_path,
+        ),
+    )
     return NamedPipeAuthorityServer(
         core,
         str(config["authorized_client_sid"]),
