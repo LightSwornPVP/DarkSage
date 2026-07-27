@@ -6,15 +6,17 @@ from pathlib import Path
 import pytest
 
 from keeper.executive.enums import TaskStatus
-from keeper.executive.models import SpecialistProfile
+from keeper.executive.models import ExecutiveTask, ProjectCharter, SpecialistProfile
 from keeper.executive.planning import WorkflowPlanner
 from keeper.executive.specialists import (
+    GlobalProjectBrief,
     GuidanceBuilder,
     ReviewOrchestrator,
     SpecialistGateway,
     SpecialistOrchestrator,
     SpecialistResult,
     SpecialistSelector,
+    TaskGuidance,
 )
 from tests.keeper.executive.test_intake_charters import approved_project
 
@@ -40,13 +42,20 @@ class FakeGateway(SpecialistGateway):
         self.brief_deliverables: tuple[str, ...] = ()
         self.guidance_scope: tuple[str, ...] = ()
 
-    def execute(self, specialist, brief, guidance):  # type: ignore[no-untyped-def]
+    def execute(
+        self,
+        specialist: SpecialistProfile,
+        brief: GlobalProjectBrief,
+        guidance: TaskGuidance,
+    ) -> SpecialistResult:
         self.brief_deliverables = brief.deliverables
         self.guidance_scope = guidance.allowed_scope
         return self.result
 
 
-def setup_task(tmp_path: Path):
+def setup_task(
+    tmp_path: Path,
+) -> tuple[ProjectCharter, ExecutiveTask, SpecialistProfile]:
     service, project, charter = approved_project(tmp_path)
     _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
     task = replace(tasks[0], status=TaskStatus.READY.value)
@@ -54,7 +63,15 @@ def setup_task(tmp_path: Path):
     return charter, task, specialist
 
 
-def result_for(task, specialist, *, evidence=("evidence:test",), claims=None, role=None, scope=None):  # type: ignore[no-untyped-def]
+def result_for(
+    task: ExecutiveTask,
+    specialist: SpecialistProfile,
+    *,
+    evidence: tuple[str, ...] = ("evidence:test",),
+    claims: dict[str, object] | None = None,
+    role: str | None = None,
+    scope: tuple[str, ...] | None = None,
+) -> SpecialistResult:
     return SpecialistResult(
         task.task_id, specialist.provider_id, specialist.model_id,
         specialist.session_id, "COMPLETED", task.expected_outputs, evidence,

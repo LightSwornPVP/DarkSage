@@ -7,6 +7,7 @@ import pytest
 from keeper.app.storage import KeeperStore
 from keeper.executive.charters import CharterService
 from keeper.executive.intake import ConversationIntake
+from keeper.executive.models import ProjectCharter, ProjectRecord
 from keeper.executive.repository import ExecutiveRepository
 
 
@@ -16,7 +17,9 @@ def service(tmp_path: Path) -> CharterService:
     return CharterService(ExecutiveRepository(store))
 
 
-def approved_project(tmp_path: Path) -> tuple[CharterService, object, object]:
+def approved_project(
+    tmp_path: Path,
+) -> tuple[CharterService, ProjectRecord, ProjectCharter]:
     charter_service = service(tmp_path)
     intake = ConversationIntake().extract(
         f"I want a small application called Pocket List in {tmp_path}. "

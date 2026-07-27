@@ -6,6 +6,7 @@ from pathlib import Path
 from keeper.executive.authority import AuthorityEvaluator
 from keeper.executive.enums import TaskStatus
 from keeper.executive.models import SpecialistProfile
+from keeper.executive.repository import ExecutiveRepository
 from keeper.executive.planning import TaskReadiness, WorkflowPlanner
 from tests.keeper.executive.test_intake_charters import approved_project
 
@@ -101,7 +102,7 @@ def test_stale_charter_task_cannot_become_ready(tmp_path: Path) -> None:
     assert "CHARTER_REVISION_REQUIRED" in readiness.reasons[-1]
 
 
-def charter_service_repository(tmp_path: Path):
+def charter_service_repository(tmp_path: Path) -> ExecutiveRepository:
     from keeper.app.storage import KeeperStore
     from keeper.executive.repository import ExecutiveRepository
 

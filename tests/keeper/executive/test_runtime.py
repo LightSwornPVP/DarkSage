@@ -9,7 +9,11 @@ from keeper.app.storage import KeeperStore
 from keeper.executive.models import SpecialistProfile
 from keeper.executive.repository import ExecutiveRepository
 from keeper.executive.runtime import ExecutiveRuntime
-from keeper.executive.specialists import SpecialistResult
+from keeper.executive.specialists import (
+    GlobalProjectBrief,
+    SpecialistResult,
+    TaskGuidance,
+)
 from keeper.executive.surfaces import StatusSurface
 from tests.keeper.executive.test_intake_charters import approved_project
 
@@ -19,7 +23,12 @@ class RuntimeGateway:
         self.calls: list[str] = []
         self.fail_once = True
 
-    def execute(self, specialist, brief, guidance):  # type: ignore[no-untyped-def]
+    def execute(
+        self,
+        specialist: SpecialistProfile,
+        brief: GlobalProjectBrief,
+        guidance: TaskGuidance,
+    ) -> SpecialistResult:
         self.calls.append(guidance.task_id)
         verification = (
             ("failed",)

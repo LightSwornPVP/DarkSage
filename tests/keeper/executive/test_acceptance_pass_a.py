@@ -121,6 +121,7 @@ def test_scenario_e_charter_expansion_requires_new_approval(tmp_path: Path) -> N
         reason="Expanded delivery",
         authority_basis="Founder request",
     )
+    assert project.active_charter_revision is not None
     assert revised.revision == project.active_charter_revision + 1
     assert not service.repository.approvals(project.project_id, revised.revision)
 
