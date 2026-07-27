@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.3
+
+- Require protected, pre-existing provider registration before command-provider
+  discovery can report a provider as available.
+- Preserve authoritative Windows launcher and batch-script component identities
+  through adapter construction and launch evidence.
+- Treat every unresolved durable execution-started attempt as indeterminate and
+  non-retry-safe when provider evidence is missing, malformed, duplicated, or
+  inconsistent.
+
 ## 0.5.2
 
 - Added post-validation Windows replacement and junction-retarget integration

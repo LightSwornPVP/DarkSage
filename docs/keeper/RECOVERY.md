@@ -38,6 +38,11 @@ tree, or uncertain termination outcome also remains blocked and is not retry-saf
 A missing process may be eligible for an explicitly authorized retry of the exact
 interrupted stage. Unfinished work is never silently removed.
 
+A durable `EXECUTION_STARTED` provider attempt remains authoritative even when its
+filesystem `run.json` is missing or unreadable. Provider evidence is corroborating
+evidence only. Missing, malformed, duplicated, inaccessible, or identity-mismatched
+evidence is recorded as indeterminate and is never retry-safe.
+
 Inspect the recorded workspace and Git state before retrying a blocked task.
 Keeper preserves dirty and failed worktrees. `cleanup-worktrees PATH` removes only
 a clean registered worktree and refuses dirty work.

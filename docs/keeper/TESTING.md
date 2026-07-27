@@ -32,6 +32,12 @@ Linux fallback execution uses a sealed in-memory file descriptor and has a
 capability-gated substitution regression; other non-Windows kernels fail closed
 when sealed descriptor execution is unavailable.
 
+Provider-discovery regressions use marker-writing configured commands and verify
+that diagnostics and first-run discovery never invoke content before immutable
+registration validation. Batch registration tests separately corrupt launcher and
+script digests and sizes. Recovery tests delete, corrupt, duplicate, and mismatch
+provider evidence after durable execution-start persistence.
+
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
 events, invokes the dashboard Refresh button, verifies the visible status update, and
 writes structured evidence beneath the selected data directory when Tcl/Tk is
