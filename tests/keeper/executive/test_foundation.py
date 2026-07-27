@@ -45,7 +45,7 @@ def charter(workspace: Path) -> ProjectCharter:
         ("no spending",), (), (), None, "spending prohibited", 0, ("filesystem",),
         ("mock",), (), (), (str(workspace),), ("no secrets",), "LOW",
         "FULL_DELEGATION", envelope, ("pause on ambiguity",), ("independent review",),
-        ("test results",), ("all tasks complete",), 1, "ACTIVE", None, None, (),
+        ("test results",), ("all tasks complete",), 1, "APPROVED", None, None, (),
         "founder", "approval-1", now, now,
     )
 
