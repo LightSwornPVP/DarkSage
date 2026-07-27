@@ -63,6 +63,7 @@ class _LsaObjectAttributes(ctypes.Structure):
     _fields_ = [
         ("Length", wintypes.ULONG),
         ("RootDirectory", wintypes.HANDLE),
+        ("ObjectName", wintypes.LPVOID),
         ("Attributes", wintypes.ULONG),
         ("SecurityDescriptor", wintypes.LPVOID),
         ("SecurityQualityOfService", wintypes.LPVOID),
