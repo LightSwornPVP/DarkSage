@@ -40,7 +40,7 @@ def process_sid(process_id: int) -> str:
             f"authority client process cannot be inspected: {ctypes.get_last_error()}"
         )
     try:
-        return _process_sid(int(process))
+        return _process_sid(_handle_value(process))
     finally:
         kernel32.CloseHandle(process)
 
@@ -147,3 +147,10 @@ def _advapi32() -> Any:
     ]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
     return advapi32
+
+
+def _handle_value(handle: object) -> int:
+    value = getattr(handle, "value", handle)
+    if not isinstance(value, int) or value <= 0:
+        raise OSError("Windows handle is invalid")
+    return value

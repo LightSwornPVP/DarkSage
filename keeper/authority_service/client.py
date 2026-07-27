@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import time
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Callable
@@ -94,24 +95,35 @@ class AuthorityServiceClient:
 
 def _connect(pipe_name: str, timeout_seconds: float) -> int:
     kernel32 = _kernel32()
-    milliseconds = max(1, int(timeout_seconds * 1000))
-    if not kernel32.WaitNamedPipeW(pipe_name, milliseconds):
-        error = ctypes.get_last_error()
-        raise TimeoutError(f"Keeper Authority Service is unavailable: {error}")
-    handle = kernel32.CreateFileW(
-        pipe_name,
-        0xC0000000,
-        0,
-        None,
-        3,
-        0,
-        None,
-    )
-    if handle in {None, ctypes.c_void_p(-1).value}:
-        raise PermissionError(
-            f"Keeper Authority Service connection was rejected: {ctypes.get_last_error()}"
+    deadline = time.monotonic() + timeout_seconds
+    last_error = 2
+    while time.monotonic() < deadline:
+        remaining = max(1, int((deadline - time.monotonic()) * 1000))
+        if not kernel32.WaitNamedPipeW(pipe_name, min(remaining, 250)):
+            last_error = ctypes.get_last_error()
+            if last_error in {2, 121, 231}:
+                time.sleep(0.01)
+                continue
+            raise PermissionError(
+                f"Keeper Authority Service connection was rejected: {last_error}"
+            )
+        handle = kernel32.CreateFileW(
+            pipe_name,
+            0xC0000000,
+            0,
+            None,
+            3,
+            0,
+            None,
         )
-    return int(handle)
+        if handle not in {None, ctypes.c_void_p(-1).value}:
+            return int(handle)
+        last_error = ctypes.get_last_error()
+        if last_error not in {2, 121, 231}:
+            raise PermissionError(
+                f"Keeper Authority Service connection was rejected: {last_error}"
+            )
+    raise TimeoutError(f"Keeper Authority Service is unavailable: {last_error}")
 
 
 def _write_all(handle: int, value: bytes) -> None:

@@ -4,6 +4,7 @@ import ctypes
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import nullcontext
 from ctypes import wintypes
 from typing import Any
 
@@ -56,16 +57,19 @@ class NamedPipeAuthorityServer:
         self.maximum_concurrency = maximum_concurrency
         self.requests_per_minute = requests_per_minute
         self._stop = threading.Event()
+        self.ready = threading.Event()
         self._slots = threading.BoundedSemaphore(maximum_concurrency)
         self._rate_lock = threading.Lock()
         self._request_times: dict[str, deque[float]] = defaultdict(deque)
         self._threads: set[threading.Thread] = set()
+        self.accepted_connections = 0
 
     def serve_forever(self) -> None:
         first = True
         while not self._stop.is_set():
             pipe = self._create_pipe(first)
             first = False
+            self.ready.set()
             kernel32 = _kernel32()
             connected = bool(kernel32.ConnectNamedPipe(pipe, None))
             error = ctypes.get_last_error()
@@ -74,6 +78,7 @@ class NamedPipeAuthorityServer:
                 if self._stop.is_set():
                     break
                 raise OSError(error, "Keeper Authority named-pipe accept failed")
+            self.accepted_connections += 1
             thread = threading.Thread(
                 target=self._serve_connection,
                 args=(int(pipe),),
@@ -85,24 +90,34 @@ class NamedPipeAuthorityServer:
 
     def stop(self) -> None:
         self._stop.set()
+        _poke_pipe(self.pipe_name)
         # The service host may terminate after SCM stop timeout; active requests are
         # bounded by provider/request timeouts and never receive a partially signed result.
         for thread in tuple(self._threads):
-            thread.join(timeout=5)
+            if thread.ident is not None:
+                thread.join(timeout=5)
 
     def _serve_connection(self, pipe: int) -> None:
         request_id = "0" * 32
         try:
+            request = parse_request(
+                decode_frame(lambda length: _read(pipe, length))
+            )
+            request_id = request.request_id
             client_sid = self._authenticated_client_sid(pipe)
             self._rate_limit(client_sid)
             if not self._slots.acquire(timeout=5):
                 raise PermissionError("authority service concurrency limit reached")
             try:
-                request = parse_request(
-                    decode_frame(lambda length: _read(pipe, length))
+                observer = self.core.observer
+                binding = (
+                    observer.bind_client(pipe)
+                    if observer is not None
+                    and hasattr(observer, "bind_client")
+                    else nullcontext()
                 )
-                request_id = request.request_id
-                result = self.core.dispatch(request, client_sid)
+                with binding:
+                    result = self.core.dispatch(request, client_sid)
                 response = success_response(request_id, result)
             finally:
                 self._slots.release()
@@ -226,6 +241,15 @@ def _write(handle: int, value: bytes) -> None:
         offset += int(written.value)
 
 
+def _poke_pipe(pipe_name: str) -> None:
+    kernel32 = _kernel32()
+    handle = kernel32.CreateFileW(
+        pipe_name, 0xC0000000, 0, None, 3, 0, None
+    )
+    if handle not in {None, ctypes.c_void_p(-1).value}:
+        kernel32.CloseHandle(handle)
+
+
 def _kernel32() -> Any:
     kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateNamedPipeW.argtypes = [
@@ -239,6 +263,16 @@ def _kernel32() -> Any:
         ctypes.POINTER(_SecurityAttributes),
     ]
     kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
     kernel32.ConnectNamedPipe.restype = wintypes.BOOL
     kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
