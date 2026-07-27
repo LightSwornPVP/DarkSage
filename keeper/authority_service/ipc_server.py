@@ -11,6 +11,7 @@ from typing import Any
 from keeper.authority_service.client import DEFAULT_PIPE_NAME
 from keeper.authority_service.core import AuthorityServiceCore
 from keeper.authority_service.protocol import (
+    Operation,
     decode_frame,
     encode_frame,
     error_response,
@@ -114,6 +115,13 @@ class NamedPipeAuthorityServer:
                     observer.bind_client(pipe)
                     if observer is not None
                     and hasattr(observer, "bind_client")
+                    and request.operation
+                    in {
+                        Operation.REGISTER_PROVIDER,
+                        Operation.BEGIN_QUALIFICATION,
+                        Operation.EXECUTE_PROVIDER,
+                        Operation.RECORD_PROVIDER_START,
+                    }
                     else nullcontext()
                 )
                 with binding:

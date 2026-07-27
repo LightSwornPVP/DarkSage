@@ -180,6 +180,7 @@ class AuthorityServiceInstaller:
             "BUILTIN\\Administrators:(OI)(CI)F",
             f"{service_account}:(OI)(CI)M",
             f"*{client_sid}:(OI)(CI)M",
+            "*S-1-5-12:(OI)(CI)M",
         ]
         _run_recorded(exchange_acl, manifest)
         _run_recorded(
@@ -391,6 +392,60 @@ def upgrade_package(source_root: Path) -> dict[str, Any]:
     }
 
 
+def repair_permissions() -> dict[str, Any]:
+    _require_admin()
+    manifest = _load_completed_manifest()
+    if not _service_exists():
+        raise PermissionError(
+            "KeeperAuthority service registration is unavailable"
+        )
+    client_sid = str(manifest["authorized_client_sid"])
+    exchange_root = (
+        INSTALL_ROOT / "ClientExchange" / _sid_directory(client_sid)
+    )
+    service_account = rf"NT SERVICE\{SERVICE_NAME}"
+    commands = [
+        [
+            "icacls",
+            str(SERVICE_ROOT),
+            "/inheritance:r",
+            "/grant:r",
+            "SYSTEM:(OI)(CI)F",
+            "BUILTIN\\Administrators:(OI)(CI)F",
+            f"{service_account}:(OI)(CI)F",
+        ],
+        [
+            "icacls",
+            str(exchange_root),
+            "/inheritance:r",
+            "/grant:r",
+            "SYSTEM:(OI)(CI)F",
+            "BUILTIN\\Administrators:(OI)(CI)F",
+            f"{service_account}:(OI)(CI)M",
+            f"*{client_sid}:(OI)(CI)M",
+            "*S-1-5-12:(OI)(CI)M",
+        ],
+        [
+            "icacls",
+            str(exchange_root),
+            "/setintegritylevel",
+            "(OI)(CI)L",
+        ],
+    ]
+    for command in commands:
+        _run_recorded(command, manifest)
+    _record_diagnostic_artifacts(manifest, exchange_root)
+    manifest.setdefault("permission_repairs", []).append(
+        {"repaired_at": _now(), "restricted_provider_sid": "S-1-5-12"}
+    )
+    _persist_manifest(manifest)
+    return {
+        "service_root": str(SERVICE_ROOT),
+        "exchange_root": str(exchange_root),
+        "restricted_provider_sid": "S-1-5-12",
+    }
+
+
 def uninstall_preserving_history() -> dict[str, Any]:
     _require_admin()
     if not MANIFEST_PATH.exists():
@@ -420,6 +475,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("install")
     commands.add_parser("resume-install")
     commands.add_parser("upgrade-package")
+    commands.add_parser("repair-permissions")
     commands.add_parser("start")
     commands.add_parser("stop")
     commands.add_parser("restart")
@@ -444,6 +500,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         elif options.command == "upgrade-package":
             value = upgrade_package(options.source_root)
+        elif options.command == "repair-permissions":
+            value = repair_permissions()
         elif options.command == "start":
             start()
             value = {"started": True}
@@ -577,6 +635,24 @@ def _successful_service_create(manifest: dict[str, Any]) -> bool:
         == ["sc.exe", "create", SERVICE_NAME]
         for item in manifest.get("commands", [])
     )
+
+
+def _record_diagnostic_artifacts(
+    manifest: dict[str, Any], exchange_root: Path
+) -> None:
+    evidence_root = exchange_root / "evidence"
+    for root in sorted(evidence_root.glob("restricted-*")):
+        if not root.is_dir() or not root.resolve().is_relative_to(
+            evidence_root.resolve()
+        ):
+            continue
+        for path in (root, *sorted(root.rglob("*"))):
+            if _artifact_recorded(manifest, path):
+                continue
+            if path.is_dir():
+                _record(manifest, "diagnostic-directory", path)
+            elif path.is_file():
+                _record_file(manifest, path)
 
 
 def _load_incomplete_manifest() -> dict[str, Any]:

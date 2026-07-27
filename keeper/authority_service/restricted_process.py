@@ -17,13 +17,13 @@ from typing import Any, Callable, Iterator
 _TOKEN_ALL_ACCESS = 0x000F01FF
 _DISABLE_MAX_PRIVILEGE = 0x1
 _TOKEN_INTEGRITY_LEVEL = 25
-_TOKEN_USER = 1
 _SE_GROUP_INTEGRITY = 0x20
 _SECURITY_IMPERSONATION = 2
 _TOKEN_PRIMARY = 1
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
 _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 _STARTF_USESTDHANDLES = 0x00000100
 _PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
@@ -87,10 +87,6 @@ class _SidAndAttributes(ctypes.Structure):
 
 class _TokenMandatoryLabel(ctypes.Structure):
     _fields_ = [("Label", _SidAndAttributes)]
-
-
-class _TokenUser(ctypes.Structure):
-    _fields_ = [("User", _SidAndAttributes)]
 
 
 class _JobBasicLimitInformation(ctypes.Structure):
@@ -214,58 +210,26 @@ def impersonate_token(token: int) -> Iterator[None]:
 
 def create_restricted_primary_token(token: int) -> int:
     restricted_source = wintypes.HANDLE()
-    administrators_sid = wintypes.LPVOID()
-    users_sid = wintypes.LPVOID()
-    needed = wintypes.DWORD()
-    _advapi32().GetTokenInformation(
-        token, _TOKEN_USER, None, 0, ctypes.byref(needed)
-    )
-    if not needed.value:
-        raise PermissionError("provider token user identity is unavailable")
-    user_buffer = ctypes.create_string_buffer(needed.value)
-    if not _advapi32().GetTokenInformation(
-        token,
-        _TOKEN_USER,
-        user_buffer,
-        needed,
-        ctypes.byref(needed),
-    ):
-        raise PermissionError(
-            f"provider token user identity failed: {ctypes.get_last_error()}"
-        )
-    token_user = ctypes.cast(
-        user_buffer, ctypes.POINTER(_TokenUser)
-    ).contents
+    restricted_code_sid = wintypes.LPVOID()
     if not _advapi32().ConvertStringSidToSidW(
-        "S-1-5-32-545", ctypes.byref(users_sid)
+        "S-1-5-12", ctypes.byref(restricted_code_sid)
     ):
         raise PermissionError(
-            f"users SID creation failed: {ctypes.get_last_error()}"
+            f"restricted-code SID creation failed: {ctypes.get_last_error()}"
         )
-    if not _advapi32().ConvertStringSidToSidW(
-        "S-1-5-32-544", ctypes.byref(administrators_sid)
-    ):
-        _kernel32().LocalFree(users_sid)
-        raise PermissionError(
-            f"administrators SID creation failed: {ctypes.get_last_error()}"
-        )
-    disabled_sids = (_SidAndAttributes * 1)(
-        _SidAndAttributes(administrators_sid, 0)
-    )
-    restricting_sids = (_SidAndAttributes * 2)(
-        _SidAndAttributes(token_user.User.Sid, 0),
-        _SidAndAttributes(users_sid, 0),
+    restricting_sids = (_SidAndAttributes * 1)(
+        _SidAndAttributes(restricted_code_sid, 0)
     )
     try:
         if not _advapi32().CreateRestrictedToken(
             wintypes.HANDLE(token),
             _DISABLE_MAX_PRIVILEGE,
-            1,
-            ctypes.byref(disabled_sids),
-            2,
-            ctypes.byref(restricting_sids),
             0,
             None,
+            0,
+            None,
+            1,
+            ctypes.byref(restricting_sids),
             ctypes.byref(restricted_source),
         ):
             raise PermissionError(
@@ -295,8 +259,7 @@ def create_restricted_primary_token(token: int) -> int:
     finally:
         if restricted_source.value:
             _kernel32().CloseHandle(restricted_source)
-        _kernel32().LocalFree(administrators_sid)
-        _kernel32().LocalFree(users_sid)
+        _kernel32().LocalFree(restricted_code_sid)
 
 
 def run_restricted_process(
@@ -345,6 +308,7 @@ def run_restricted_process(
             _CREATE_SUSPENDED
             | _CREATE_UNICODE_ENVIRONMENT
             | _CREATE_NEW_PROCESS_GROUP
+            | _CREATE_NO_WINDOW
             | _EXTENDED_STARTUPINFO_PRESENT
         )
         if not _advapi32().CreateProcessAsUserW(
@@ -736,14 +700,6 @@ def _advapi32() -> Any:
         ctypes.POINTER(wintypes.HANDLE),
     ]
     advapi32.CreateRestrictedToken.restype = wintypes.BOOL
-    advapi32.GetTokenInformation.argtypes = [
-        wintypes.HANDLE,
-        ctypes.c_int,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.IsTokenRestricted.argtypes = [wintypes.HANDLE]
     advapi32.IsTokenRestricted.restype = wintypes.BOOL
     advapi32.ConvertStringSidToSidW.argtypes = [
