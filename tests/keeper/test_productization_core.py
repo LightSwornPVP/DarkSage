@@ -13,7 +13,7 @@ from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence, verify_evidence
 from keeper.app.service import KeeperApplication
-from keeper.app.storage import ENTITY_TABLES, KeeperStore
+from keeper.app.storage import ENTITY_TABLES, SCHEMA_VERSION, KeeperStore
 from keeper.app.verification_policy import VerificationSpec, validate_semantic_bindings
 from keeper.providers.adapters import (
     ProviderCapabilities,
@@ -62,7 +62,10 @@ def test_store_backup_export_and_legacy_import(tmp_path: Path) -> None:
     assert store.import_legacy_evidence(tmp_path / "legacy") == 1
     assert store.backup(tmp_path / "backup.db").is_file()
     exported = store.export_json(tmp_path / "export.json")
-    assert json.loads(exported.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert (
+        json.loads(exported.read_text(encoding="utf-8"))["schema_version"]
+        == SCHEMA_VERSION
+    )
 
 
 def test_lifecycle_is_deterministic_idempotent_and_recoverable(tmp_path: Path) -> None:
