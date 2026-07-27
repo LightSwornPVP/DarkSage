@@ -144,6 +144,8 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
     observer = ServiceProviderObserver(
         Path(config["provider_root"]),
         Path(config["allowed_evidence_root"]),
+        str(config["provider_account_name"]),
+        Path(config["provider_credential_path"]),
     )
     core = AuthorityServiceCore(Path(config["service_root"]), observer=observer)
     return NamedPipeAuthorityServer(
@@ -165,12 +167,14 @@ def _load_config(path: Path) -> dict[str, Any]:
         "provider_root",
         "allowed_evidence_root",
         "authorized_client_sid",
+        "provider_account_name",
+        "provider_credential_path",
         "pipe_name",
     }
     if (
         not isinstance(value, dict)
         or set(value) != required
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != 2
         or value.get("service_name") != SERVICE_NAME
         or any(
             not isinstance(value.get(key), str) or not value[key]

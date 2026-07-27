@@ -17,7 +17,10 @@ from typing import Any, Callable, Iterator
 _TOKEN_ALL_ACCESS = 0x000F01FF
 _DISABLE_MAX_PRIVILEGE = 0x1
 _TOKEN_INTEGRITY_LEVEL = 25
+_TOKEN_GROUPS = 2
+_TOKEN_USER = 1
 _SE_GROUP_INTEGRITY = 0x20
+_SE_GROUP_ENABLED = 0x00000004
 _SECURITY_IMPERSONATION = 2
 _TOKEN_PRIMARY = 1
 _CREATE_SUSPENDED = 0x00000004
@@ -83,6 +86,17 @@ class _ProcessInformation(ctypes.Structure):
 
 class _SidAndAttributes(ctypes.Structure):
     _fields_ = [("Sid", wintypes.LPVOID), ("Attributes", wintypes.DWORD)]
+
+
+class _TokenGroups(ctypes.Structure):
+    _fields_ = [
+        ("GroupCount", wintypes.DWORD),
+        ("Groups", _SidAndAttributes * 1),
+    ]
+
+
+class _TokenUser(ctypes.Structure):
+    _fields_ = [("User", _SidAndAttributes)]
 
 
 class _TokenMandatoryLabel(ctypes.Structure):
@@ -160,8 +174,8 @@ def restricted_current_process_token() -> Iterator[int]:
 
 
 @contextmanager
-def restricted_named_pipe_client_token(pipe: int) -> Iterator[int]:
-    """Capture the authenticated pipe client and derive a restricted primary token."""
+def authenticated_named_pipe_client_token(pipe: int) -> Iterator[int]:
+    """Capture the authenticated pipe client's impersonation token."""
     if not _advapi32().ImpersonateNamedPipeClient(pipe):
         raise PermissionError(
             f"authority client impersonation failed: {ctypes.get_last_error()}"
@@ -182,13 +196,9 @@ def restricted_named_pipe_client_token(pipe: int) -> Iterator[int]:
             raise PermissionError(
                 f"authority client impersonation could not be reverted: {ctypes.get_last_error()}"
             )
-    restricted = 0
     try:
-        restricted = create_restricted_primary_token(_handle_value(token))
-        yield restricted
+        yield _handle_value(token)
     finally:
-        if restricted:
-            _kernel32().CloseHandle(restricted)
         if token.value:
             _kernel32().CloseHandle(token)
 
@@ -210,25 +220,40 @@ def impersonate_token(token: int) -> Iterator[None]:
 
 def create_restricted_primary_token(token: int) -> int:
     restricted_source = wintypes.HANDLE()
+    administrators_sid = wintypes.LPVOID()
     restricted_code_sid = wintypes.LPVOID()
+    enabled_groups, _groups_buffer = _token_enabled_group_sids(token)
+    user_sid, _user_buffer = _token_user_sid(token)
+    if not _advapi32().ConvertStringSidToSidW(
+        "S-1-5-32-544", ctypes.byref(administrators_sid)
+    ):
+        raise PermissionError(
+            f"administrators SID creation failed: {ctypes.get_last_error()}"
+        )
     if not _advapi32().ConvertStringSidToSidW(
         "S-1-5-12", ctypes.byref(restricted_code_sid)
     ):
+        _kernel32().LocalFree(administrators_sid)
         raise PermissionError(
             f"restricted-code SID creation failed: {ctypes.get_last_error()}"
         )
-    restricting_sids = (_SidAndAttributes * 1)(
+    disabled_sids = (_SidAndAttributes * 1)(
+        _SidAndAttributes(administrators_sid, 0)
+    )
+    restricting_sids = (_SidAndAttributes * (len(enabled_groups) + 2))(
+        _SidAndAttributes(user_sid, 0),
+        *(_SidAndAttributes(sid, 0) for sid in enabled_groups),
         _SidAndAttributes(restricted_code_sid, 0)
     )
     try:
         if not _advapi32().CreateRestrictedToken(
             wintypes.HANDLE(token),
             _DISABLE_MAX_PRIVILEGE,
-            0,
-            None,
-            0,
-            None,
             1,
+            ctypes.byref(disabled_sids),
+            0,
+            None,
+            len(restricting_sids),
             ctypes.byref(restricting_sids),
             ctypes.byref(restricted_source),
         ):
@@ -259,7 +284,66 @@ def create_restricted_primary_token(token: int) -> int:
     finally:
         if restricted_source.value:
             _kernel32().CloseHandle(restricted_source)
+        _kernel32().LocalFree(administrators_sid)
         _kernel32().LocalFree(restricted_code_sid)
+
+
+def _token_enabled_group_sids(
+    token: int,
+) -> tuple[list[int], ctypes.Array[ctypes.c_char]]:
+    needed = wintypes.DWORD()
+    _advapi32().GetTokenInformation(
+        token, _TOKEN_GROUPS, None, 0, ctypes.byref(needed)
+    )
+    if not needed.value:
+        raise PermissionError("provider token groups are unavailable")
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not _advapi32().GetTokenInformation(
+        token,
+        _TOKEN_GROUPS,
+        buffer,
+        needed,
+        ctypes.byref(needed),
+    ):
+        raise PermissionError(
+            f"provider token groups failed: {ctypes.get_last_error()}"
+        )
+    groups = ctypes.cast(buffer, ctypes.POINTER(_TokenGroups)).contents
+    first = ctypes.addressof(groups.Groups)
+    values: list[int] = []
+    for index in range(int(groups.GroupCount)):
+        group = _SidAndAttributes.from_address(
+            first + index * ctypes.sizeof(_SidAndAttributes)
+        )
+        if group.Attributes & _SE_GROUP_ENABLED:
+            values.append(int(group.Sid))
+    if not values:
+        raise PermissionError("provider token has no enabled groups")
+    return values, buffer
+
+
+def _token_user_sid(
+    token: int,
+) -> tuple[int, ctypes.Array[ctypes.c_char]]:
+    needed = wintypes.DWORD()
+    _advapi32().GetTokenInformation(
+        token, _TOKEN_USER, None, 0, ctypes.byref(needed)
+    )
+    if not needed.value:
+        raise PermissionError("provider token user is unavailable")
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not _advapi32().GetTokenInformation(
+        token,
+        _TOKEN_USER,
+        buffer,
+        needed,
+        ctypes.byref(needed),
+    ):
+        raise PermissionError(
+            f"provider token user failed: {ctypes.get_last_error()}"
+        )
+    user = ctypes.cast(buffer, ctypes.POINTER(_TokenUser)).contents
+    return int(user.User.Sid), buffer
 
 
 def run_restricted_process(
@@ -702,6 +786,14 @@ def _advapi32() -> Any:
     advapi32.CreateRestrictedToken.restype = wintypes.BOOL
     advapi32.IsTokenRestricted.argtypes = [wintypes.HANDLE]
     advapi32.IsTokenRestricted.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertStringSidToSidW.argtypes = [
         wintypes.LPCWSTR,
         ctypes.POINTER(wintypes.LPVOID),

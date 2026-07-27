@@ -13,6 +13,17 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from keeper.authority_service.client import AuthorityServiceClient
+from keeper.authority_service.provider_identity import (
+    PROVIDER_ACCOUNT_NAME,
+    PROVIDER_ACCOUNT_RIGHTS,
+    create_provider_account,
+    generate_provider_password,
+    grant_provider_account_rights,
+    protect_provider_password,
+    provider_account_sid,
+    restricted_provider_identity_token,
+    unprotect_provider_password,
+)
 from keeper.authority_service.service_main import SERVICE_NAME
 from keeper.authority_service.windows_identity import current_process_sid
 from keeper.recovery import atomic_write_json
@@ -21,6 +32,7 @@ from keeper.recovery import atomic_write_json
 INSTALL_ROOT = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Keeper"
 SERVICE_ROOT = INSTALL_ROOT / "AuthorityService"
 MANIFEST_PATH = SERVICE_ROOT / "audit" / "machine-artifacts.json"
+PROVIDER_CREDENTIAL_PATH = SERVICE_ROOT / "config" / "provider-identity.bin"
 
 
 class AuthorityServiceInstaller:
@@ -105,6 +117,20 @@ class AuthorityServiceInstaller:
                 _record(manifest, "directory", directory)
             _persist_manifest(manifest)
 
+        bootstrap_acl = [
+            "icacls",
+            str(SERVICE_ROOT),
+            "/inheritance:r",
+            "/grant:r",
+            "SYSTEM:(OI)(CI)F",
+            "BUILTIN\\Administrators:(OI)(CI)F",
+        ]
+        if service_exists:
+            bootstrap_acl.append(
+                rf"NT SERVICE\{SERVICE_NAME}:(OI)(CI)F"
+            )
+        _run_recorded(bootstrap_acl, manifest)
+        provider_sid = _ensure_provider_identity(manifest)
         runtime = SERVICE_ROOT / "bin" / "runtime"
         self._copy_runtime(runtime, manifest, resume=resume)
         package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
@@ -127,12 +153,14 @@ class AuthorityServiceInstaller:
             atomic_write_json(
                 config,
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "service_name": SERVICE_NAME,
                     "service_root": str(SERVICE_ROOT / "data"),
                     "provider_root": str(exchange_root / "provider-work"),
                     "allowed_evidence_root": str(exchange_root / "evidence"),
                     "authorized_client_sid": client_sid,
+                    "provider_account_name": PROVIDER_ACCOUNT_NAME,
+                    "provider_credential_path": str(PROVIDER_CREDENTIAL_PATH),
                     "pipe_name": r"\\.\pipe\KeeperAuthority-v1",
                 },
             )
@@ -180,6 +208,7 @@ class AuthorityServiceInstaller:
             "BUILTIN\\Administrators:(OI)(CI)F",
             f"{service_account}:(OI)(CI)M",
             f"*{client_sid}:(OI)(CI)M",
+            f"*{provider_sid}:(OI)(CI)M",
             "*S-1-5-12:(OI)(CI)M",
         ]
         _run_recorded(exchange_acl, manifest)
@@ -392,6 +421,99 @@ def upgrade_package(source_root: Path) -> dict[str, Any]:
     }
 
 
+def provision_provider_identity() -> dict[str, Any]:
+    _require_admin()
+    manifest = _load_completed_manifest()
+    query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
+    if "RUNNING" in query.stdout or "START_PENDING" in query.stdout:
+        raise PermissionError(
+            "KeeperAuthority must be stopped before provider identity migration"
+        )
+    provider_sid = _ensure_provider_identity(manifest)
+    config = SERVICE_ROOT / "config" / "service.json"
+    if not config.is_file() or not _recorded_file_matches(manifest, config):
+        raise PermissionError(
+            "Authority Service configuration does not match its manifest"
+        )
+    try:
+        value = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError(
+            "Authority Service configuration is invalid"
+        ) from error
+    expected_v1 = {
+        "schema_version",
+        "service_name",
+        "service_root",
+        "provider_root",
+        "allowed_evidence_root",
+        "authorized_client_sid",
+        "pipe_name",
+    }
+    expected_v2 = expected_v1 | {
+        "provider_account_name",
+        "provider_credential_path",
+    }
+    if (
+        not isinstance(value, dict)
+        or frozenset(value)
+        not in {frozenset(expected_v1), frozenset(expected_v2)}
+        or value.get("schema_version") not in {1, 2}
+        or value.get("service_name") != SERVICE_NAME
+    ):
+        raise PermissionError(
+            "Authority Service configuration cannot be safely migrated"
+        )
+    if value["schema_version"] == 1:
+        old_digest = hashlib.sha256(config.read_bytes()).hexdigest()
+        backup_path = (
+            SERVICE_ROOT / "backups" / f"service-{old_digest}.json"
+        )
+        if backup_path.exists():
+            if not _recorded_file_matches(manifest, backup_path):
+                raise PermissionError(
+                    "Authority Service configuration backup is untrusted"
+                )
+        else:
+            shutil.copy2(config, backup_path)
+            _record_file(manifest, backup_path)
+        value.update(
+            {
+                "schema_version": 2,
+                "provider_account_name": PROVIDER_ACCOUNT_NAME,
+                "provider_credential_path": str(PROVIDER_CREDENTIAL_PATH),
+            }
+        )
+        atomic_write_json(config, value)
+        _record_file(manifest, config)
+        manifest.setdefault("configuration_migrations", []).append(
+            {
+                "migrated_at": _now(),
+                "from_schema": 1,
+                "to_schema": 2,
+                "backup_path": str(backup_path),
+            }
+        )
+        _persist_manifest(manifest)
+    elif (
+        value.get("provider_account_name") != PROVIDER_ACCOUNT_NAME
+        or value.get("provider_credential_path")
+        != str(PROVIDER_CREDENTIAL_PATH)
+    ):
+        raise PermissionError(
+            "Authority Service provider identity configuration differs"
+        )
+    result = repair_permissions()
+    return {
+        "provider_account_name": PROVIDER_ACCOUNT_NAME,
+        "provider_account_sid": provider_sid,
+        "provider_account_rights": list(PROVIDER_ACCOUNT_RIGHTS),
+        "provider_credential_path": str(PROVIDER_CREDENTIAL_PATH),
+        "configuration_schema": 2,
+        "permissions": result,
+    }
+
+
 def repair_permissions() -> dict[str, Any]:
     _require_admin()
     manifest = _load_completed_manifest()
@@ -404,6 +526,23 @@ def repair_permissions() -> dict[str, Any]:
         INSTALL_ROOT / "ClientExchange" / _sid_directory(client_sid)
     )
     service_account = rf"NT SERVICE\{SERVICE_NAME}"
+    identity = manifest.get("provider_identity")
+    provider_sid = (
+        str(identity["sid"])
+        if isinstance(identity, dict)
+        and identity.get("state") == "PROVISIONED"
+        and isinstance(identity.get("sid"), str)
+        else None
+    )
+    exchange_grants = [
+        "SYSTEM:(OI)(CI)F",
+        "BUILTIN\\Administrators:(OI)(CI)F",
+        f"{service_account}:(OI)(CI)M",
+        f"*{client_sid}:(OI)(CI)M",
+    ]
+    if provider_sid is not None:
+        exchange_grants.append(f"*{provider_sid}:(OI)(CI)M")
+    exchange_grants.append("*S-1-5-12:(OI)(CI)M")
     commands = [
         [
             "icacls",
@@ -419,11 +558,7 @@ def repair_permissions() -> dict[str, Any]:
             str(exchange_root),
             "/inheritance:r",
             "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "BUILTIN\\Administrators:(OI)(CI)F",
-            f"{service_account}:(OI)(CI)M",
-            f"*{client_sid}:(OI)(CI)M",
-            "*S-1-5-12:(OI)(CI)M",
+            *exchange_grants,
         ],
         [
             "icacls",
@@ -436,13 +571,18 @@ def repair_permissions() -> dict[str, Any]:
         _run_recorded(command, manifest)
     _record_diagnostic_artifacts(manifest, exchange_root)
     manifest.setdefault("permission_repairs", []).append(
-        {"repaired_at": _now(), "restricted_provider_sid": "S-1-5-12"}
+        {
+            "repaired_at": _now(),
+            "restricted_provider_sid": "S-1-5-12",
+            "provider_account_sid": provider_sid,
+        }
     )
     _persist_manifest(manifest)
     return {
         "service_root": str(SERVICE_ROOT),
         "exchange_root": str(exchange_root),
         "restricted_provider_sid": "S-1-5-12",
+        "provider_account_sid": provider_sid,
     }
 
 
@@ -475,6 +615,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("install")
     commands.add_parser("resume-install")
     commands.add_parser("upgrade-package")
+    commands.add_parser("provision-provider-identity")
     commands.add_parser("repair-permissions")
     commands.add_parser("start")
     commands.add_parser("stop")
@@ -500,6 +641,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         elif options.command == "upgrade-package":
             value = upgrade_package(options.source_root)
+        elif options.command == "provision-provider-identity":
+            value = provision_provider_identity()
         elif options.command == "repair-permissions":
             value = repair_permissions()
         elif options.command == "start":
@@ -653,6 +796,95 @@ def _record_diagnostic_artifacts(
                 _record(manifest, "diagnostic-directory", path)
             elif path.is_file():
                 _record_file(manifest, path)
+
+
+def _ensure_provider_identity(manifest: dict[str, Any]) -> str:
+    identity = manifest.get("provider_identity")
+    if identity is not None and not isinstance(identity, dict):
+        raise PermissionError("provider identity manifest is malformed")
+    actual_sid = provider_account_sid(PROVIDER_ACCOUNT_NAME)
+    if identity is None:
+        if actual_sid is not None:
+            raise PermissionError(
+                "unrecorded Keeper provider account already exists"
+            )
+        if PROVIDER_CREDENTIAL_PATH.exists():
+            raise PermissionError(
+                "unrecorded Keeper provider credential already exists"
+            )
+        password = generate_provider_password()
+        protect_provider_password(password, PROVIDER_CREDENTIAL_PATH)
+        _record_file(manifest, PROVIDER_CREDENTIAL_PATH)
+        identity = {
+            "account_name": PROVIDER_ACCOUNT_NAME,
+            "credential_path": str(PROVIDER_CREDENTIAL_PATH),
+            "credential_sha256": hashlib.sha256(
+                PROVIDER_CREDENTIAL_PATH.read_bytes()
+            ).hexdigest(),
+            "state": "CREDENTIAL_PROTECTED",
+            "created_at": _now(),
+        }
+        manifest["provider_identity"] = identity
+        _persist_manifest(manifest)
+    if (
+        identity.get("account_name") != PROVIDER_ACCOUNT_NAME
+        or identity.get("credential_path") != str(PROVIDER_CREDENTIAL_PATH)
+        or identity.get("credential_sha256")
+        != hashlib.sha256(PROVIDER_CREDENTIAL_PATH.read_bytes()).hexdigest()
+        or not _recorded_file_matches(manifest, PROVIDER_CREDENTIAL_PATH)
+        or identity.get("state")
+        not in {"CREDENTIAL_PROTECTED", "ACCOUNT_CREATED", "PROVISIONED"}
+    ):
+        raise PermissionError("provider identity manifest cannot be trusted")
+    password = unprotect_provider_password(PROVIDER_CREDENTIAL_PATH)
+    account_created = actual_sid is None
+    if actual_sid is None:
+        actual_sid = create_provider_account(
+            password, PROVIDER_ACCOUNT_NAME
+        )
+        identity.update(
+            {
+                "sid": actual_sid,
+                "state": "ACCOUNT_CREATED",
+                "account_created_at": _now(),
+            }
+        )
+        _persist_manifest(manifest)
+    rights = grant_provider_account_rights(PROVIDER_ACCOUNT_NAME)
+    if not account_created and (
+        identity.get("state") == "CREDENTIAL_PROTECTED"
+        or identity.get("sid") != actual_sid
+    ):
+        # A crash may occur after NetUserAdd and before the manifest update.
+        # Prove the recorded credential belongs to that exact account before
+        # adopting the recovered state.
+        with restricted_provider_identity_token(
+            PROVIDER_ACCOUNT_NAME, PROVIDER_CREDENTIAL_PATH
+        ):
+            pass
+        identity.update(
+            {
+                "sid": actual_sid,
+                "state": "ACCOUNT_CREATED",
+                "account_recovered_at": _now(),
+            }
+        )
+        _persist_manifest(manifest)
+    with restricted_provider_identity_token(
+        PROVIDER_ACCOUNT_NAME, PROVIDER_CREDENTIAL_PATH
+    ):
+        pass
+    identity.update(
+        {
+            "sid": actual_sid,
+            "state": "PROVISIONED",
+            "rights": list(rights),
+            "rights_verified_at": _now(),
+        }
+    )
+    _persist_manifest(manifest)
+    password = "\0" * len(password)
+    return actual_sid
 
 
 def _load_incomplete_manifest() -> dict[str, Any]:

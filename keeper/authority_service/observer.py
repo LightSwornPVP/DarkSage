@@ -16,9 +16,12 @@ from keeper.authority_service.core import (
     ProcessObservation,
     QualificationObservation,
 )
+from keeper.authority_service.provider_identity import (
+    restricted_provider_identity_token,
+)
 from keeper.authority_service.restricted_process import (
+    authenticated_named_pipe_client_token,
     impersonate_token,
-    restricted_named_pipe_client_token,
     run_restricted_process,
 )
 from keeper.authority_service.windows_identity import process_image
@@ -29,9 +32,19 @@ from keeper.providers.adapters import create_provider_registration
 class ServiceProviderObserver:
     """OS-backed observations available only inside the Authority Service host."""
 
-    def __init__(self, provider_root: Path, allowed_evidence_root: Path) -> None:
+    def __init__(
+        self,
+        provider_root: Path,
+        allowed_evidence_root: Path,
+        provider_account_name: str,
+        provider_credential_path: Path,
+    ) -> None:
         self.provider_root = provider_root.resolve()
         self.allowed_evidence_root = allowed_evidence_root.resolve()
+        self.provider_account_name = provider_account_name
+        self.provider_credential_path = provider_credential_path.resolve(
+            strict=True
+        )
         self.provider_root.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._active_lock = threading.Lock()
@@ -42,12 +55,18 @@ class ServiceProviderObserver:
     def bind_client(self, pipe: int) -> Iterator[None]:
         if getattr(self._local, "token", None) is not None:
             raise RuntimeError("authority observer token is already bound")
-        with restricted_named_pipe_client_token(pipe) as token:
-            self._local.token = token
-            try:
-                yield
-            finally:
-                self._local.token = None
+        with authenticated_named_pipe_client_token(pipe) as client_token:
+            with restricted_provider_identity_token(
+                self.provider_account_name,
+                self.provider_credential_path,
+            ) as restricted_token:
+                self._local.client_token = client_token
+                self._local.token = restricted_token
+                try:
+                    yield
+                finally:
+                    self._local.client_token = None
+                    self._local.token = None
 
     def qualify(
         self, registration: dict[str, Any], challenge: str
@@ -124,7 +143,7 @@ class ServiceProviderObserver:
     def register_provider(
         self, provider_id: str, executable: Path, client_sid: str
     ) -> dict[str, Any]:
-        with impersonate_token(self._token()):
+        with impersonate_token(self._client_token()):
             return create_provider_registration(
                 provider_id, executable, authorized_by=client_sid
             )
@@ -331,6 +350,14 @@ class ServiceProviderObserver:
         value = getattr(self._local, "token", None)
         if not isinstance(value, int) or value <= 0:
             raise PermissionError("authority client restricted token is unavailable")
+        return value
+
+    def _client_token(self) -> int:
+        value = getattr(self._local, "client_token", None)
+        if not isinstance(value, int) or value <= 0:
+            raise PermissionError(
+                "authority authenticated client token is unavailable"
+            )
         return value
 
     def _exchange_path(self, value: object, label: str) -> Path:

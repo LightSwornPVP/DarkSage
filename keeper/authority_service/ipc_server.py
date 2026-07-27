@@ -168,11 +168,12 @@ class NamedPipeAuthorityServer:
     def _create_pipe(self, first: bool) -> int:
         descriptor = wintypes.LPVOID()
         # Owner/SYSTEM and the configured desktop SID can use the pipe. The
-        # mandatory medium label rejects low-integrity restricted providers.
+        # mandatory medium label rejects both reads and writes from
+        # low-integrity restricted providers.
         sddl = (
             "D:P(A;;GA;;;SY)(A;;GA;;;OW)"
             f"(A;;GRGW;;;{self.authorized_client_sid})"
-            "S:(ML;;NW;;;ME)"
+            "S:(ML;;NRNW;;;ME)"
         )
         if not _advapi32().ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, ctypes.byref(descriptor), None
