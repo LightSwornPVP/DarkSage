@@ -17,6 +17,8 @@ from keeper.executive.models import (
     ProjectRecord,
     WorkflowRecord,
 )
+from keeper.executive.enums import ExecutiveState
+from keeper.executive.state import PROJECT_TRANSITIONS
 
 
 class ExecutiveRepository:
@@ -24,6 +26,22 @@ class ExecutiveRepository:
         self.store = store
 
     def save_project(self, project: ProjectRecord) -> None:
+        existing = self.store.get("executive_projects", project.project_id)
+        target = ExecutiveState(project.state)
+        if existing is None:
+            if target not in {
+                ExecutiveState.INTAKE,
+                ExecutiveState.CLARIFICATION_REQUIRED,
+            }:
+                raise PermissionError(
+                    "new projects must begin in intake or clarification"
+                )
+        else:
+            current = ExecutiveState(ProjectRecord.from_dict(existing).state)
+            if target != current and target not in PROJECT_TRANSITIONS[current]:
+                raise PermissionError(
+                    f"repository rejected executive transition: {current} -> {target}"
+                )
         self.store.upsert("executive_projects", project.project_id, project.to_dict())
 
     def project(self, project_id: str) -> ProjectRecord:

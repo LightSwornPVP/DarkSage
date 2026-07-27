@@ -75,10 +75,27 @@ def test_approved_charter_is_immutable(tmp_path: Path) -> None:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
     repository = ExecutiveRepository(store)
-    repository.save_project(project())
+    repository.save_project(
+        replace(
+            project(),
+            state=ExecutiveState.INTAKE.value,
+            active_charter_id=None,
+            active_charter_revision=None,
+        )
+    )
     repository.insert_approved_charter(charter(tmp_path))
     with pytest.raises(PermissionError):
         repository.save_charter(replace(charter(tmp_path), title="Changed"))
+
+
+def test_repository_rejects_new_terminal_project(tmp_path: Path) -> None:
+    store = KeeperStore(tmp_path / "keeper.db")
+    store.migrate()
+    repository = ExecutiveRepository(store)
+    with pytest.raises(PermissionError, match="begin"):
+        repository.save_project(
+            replace(project(), state=ExecutiveState.COMPLETED.value)
+        )
 
 
 def test_authority_allows_bounded_full_delegation(tmp_path: Path) -> None:
