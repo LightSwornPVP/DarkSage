@@ -13,6 +13,7 @@ import pytest
 
 from keeper.app.service import KeeperApplication
 from keeper.app.storage import KeeperStore
+from keeper.authority import AuthorityKey
 from keeper.cli import main
 from keeper.providers.base import AgentRequest
 from keeper.providers.codex_cli import CliProvider
@@ -338,7 +339,7 @@ def test_standalone_commands_reject_incomplete_registration(
 
 @pytest.mark.parametrize("command", ["start", "run-next"])
 def test_standalone_commands_accept_complete_current_registration(
-    tmp_path: Path, command: str
+    tmp_path: Path, command: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = Path(os.environ.get("COMSPEC", "cmd.exe")).resolve(strict=True)
     workflow = tmp_path / ".ai-workflow"
@@ -368,21 +369,53 @@ def test_standalone_commands_accept_complete_current_registration(
         "started_at": "2026-07-26T00:00:00+00:00",
         "finished_at": "2026-07-26T00:00:01+00:00",
         "exit_status": 0,
-        "raw_version_output": "controlled 1.0",
-        "normalized_version": "controlled 1.0",
+        "raw_version_output": "controlled-provider 1.0",
+        "normalized_version": "controlled-provider 1.0",
         "qualification_method": "protected-registered-launch",
         "qualification_result": "qualified",
         "authorized_by": "standalone-test",
         "ownership": {"launch_nonce": "standalone-qualification"},
     }
     qualification["evidence_digest"] = qualification_evidence_digest(qualification)
-    registration = apply_protected_qualification(registration, qualification)
+    protected = tmp_path / "protected"
+    authority = AuthorityKey(protected)
+    start = authority.sign(
+        "provider-qualification-start",
+        {
+            "id": "qualification:standalone-test:start",
+            "kind": "provider_qualification_started",
+            "schema_version": 1,
+            "registration_id": registration["trusted_registration_id"],
+            "provider_id": registration["logical_provider_id"],
+            "authorization_reference": "standalone-test",
+            "event_challenge": "standalone-qualification",
+            "started_at": "2026-07-26T00:00:00+00:00",
+        },
+    )
+    qualification["authorization_reference"] = start["id"]
+    qualification["event_challenge"] = start["event_challenge"]
+    qualification["evidence_digest"] = qualification_evidence_digest(qualification)
+    qualification = authority.sign("provider-qualification", qualification)
+    registration = apply_protected_qualification(
+        registration,
+        qualification,
+        authority_verifier=authority.verify,
+        expected_challenge=str(start["event_challenge"]),
+        expected_authorization_reference=str(start["id"]),
+    )
+    protected_store = KeeperStore(protected / "keeper.db")
+    protected_store.migrate()
+    protected_store.insert_immutable(
+        "artifacts", str(qualification["id"]), qualification
+    )
+    protected_store.insert_immutable("artifacts", str(start["id"]), start)
+    monkeypatch.setattr("keeper.cli.default_data_directory", lambda: protected)
     (workflow / "config.json").write_text(
         json.dumps(
             {
                 "provider_command": provider_command,
                 "provider_registration": registration,
-                "provider_qualification_evidence": qualification,
+                "provider_qualification_reference": qualification["id"],
             }
         ),
         encoding="utf-8",

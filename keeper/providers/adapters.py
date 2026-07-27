@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import UTC, datetime
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from keeper.providers.base import AgentRequest, ProcessResult
 from keeper.providers.codex_cli import CliProvider
@@ -202,10 +203,12 @@ class ProviderDiscovery:
         configured_paths: dict[str, str] | None = None,
         registrations: dict[str, dict[str, Any]] | None = None,
         qualification_evidence: dict[str, dict[str, Any]] | None = None,
+        authority_verifier: Callable[[str, object], bool] | None = None,
     ) -> None:
         self.configured_paths = configured_paths or {}
         self.registrations = registrations or {}
         self.qualification_evidence = qualification_evidence or {}
+        self.authority_verifier = authority_verifier
 
     def discover(self) -> list[ProviderDiagnostic]:
         return [
@@ -250,7 +253,11 @@ class ProviderDiscovery:
             )
         registration = self.registrations.get(identifier)
         valid, detail = _validate_discovery_registration(
-            identifier, executable, registration, self.qualification_evidence
+            identifier,
+            executable,
+            registration,
+            self.qualification_evidence,
+            self.authority_verifier,
         )
         capabilities = (
             ProviderCapabilities(**dict(registration["capability_set"]))
@@ -408,6 +415,7 @@ def create_provider_registration(
     independence_classification: str = "independent-capable",
 ) -> dict[str, Any]:
     configured = executable.resolve(strict=True)
+    registration_nonce = uuid.uuid4().hex
     capability_values = asdict(capabilities or ProviderCapabilities())
     roles = role_eligibility if role_eligibility is not None else [
         "builder",
@@ -431,7 +439,9 @@ def create_provider_registration(
     )
     registration: dict[str, Any] = {
         "registration_schema_version": REGISTRATION_SCHEMA_VERSION,
-        "trusted_registration_id": f"keeper-provider:{provider_id}:v1",
+        "trusted_registration_id": (
+            f"keeper-provider:{provider_id}:v1:{registration_nonce}"
+        ),
         "registration_version": "1",
         "logical_provider_id": provider_id,
         "provider_name": f"{provider_id}-command",
@@ -439,12 +449,16 @@ def create_provider_registration(
         "canonical_executable_path": str(configured),
         "executable_sha256": hashlib.sha256(executable_content).hexdigest(),
         "executable_size": len(executable_content),
-        "executable_registration_id": f"keeper-executable:{provider_id}:v1",
+        "executable_registration_id": (
+            f"keeper-executable:{provider_id}:v1:{registration_nonce}"
+        ),
         "executable_registration_version": "1",
         "launcher_path": str(launcher),
         "launcher_sha256": hashlib.sha256(launcher_content).hexdigest(),
         "launcher_size": len(launcher_content),
-        "launcher_registration_id": f"keeper-launcher:{provider_id}:v1",
+        "launcher_registration_id": (
+            f"keeper-launcher:{provider_id}:v1:{registration_nonce}"
+        ),
         "launcher_registration_version": "1",
         "script_path": str(script) if script is not None else None,
         "script_sha256": (
@@ -452,7 +466,9 @@ def create_provider_registration(
         ),
         "script_size": script.stat().st_size if script is not None else None,
         "script_registration_id": (
-            f"keeper-script:{provider_id}:v1" if script is not None else None
+            f"keeper-script:{provider_id}:v1:{registration_nonce}"
+            if script is not None
+            else None
         ),
         "script_registration_version": "1" if script is not None else None,
         "invocation_shape": invocation,
@@ -499,6 +515,7 @@ def _validate_discovery_registration(
     executable: str | None,
     registration: dict[str, Any] | None,
     qualification_evidence: dict[str, dict[str, Any]] | None = None,
+    authority_verifier: Callable[[str, object], bool] | None = None,
 ) -> tuple[bool, str]:
     if executable is None:
         return False, "Executable was not found; configure its full path in Settings."
@@ -520,7 +537,7 @@ def _validate_discovery_registration(
     ):
         return False, "Provider registration configuration digest is stale."
     if not _qualification_is_consistent(
-        registration, qualification_evidence or {}
+        registration, qualification_evidence or {}, authority_verifier
     ):
         return False, "Provider qualification authority is missing or inconsistent."
     try:
@@ -570,10 +587,15 @@ def validate_provider_registration(
     executable: str,
     registration: dict[str, Any],
     qualification_evidence: dict[str, dict[str, Any]] | None = None,
+    authority_verifier: Callable[[str, object], bool] | None = None,
 ) -> tuple[bool, str]:
     """Validate the one canonical provider-registration schema without execution."""
     return _validate_discovery_registration(
-        provider_id, executable, registration, qualification_evidence
+        provider_id,
+        executable,
+        registration,
+        qualification_evidence,
+        authority_verifier,
     )
 
 
@@ -585,7 +607,17 @@ def canonical_provider_registration_digest(
 
 
 def qualification_evidence_digest(evidence: dict[str, Any]) -> str:
-    value = {key: item for key, item in evidence.items() if key != "evidence_digest"}
+    value = {
+        key: item
+        for key, item in evidence.items()
+        if key
+        not in {
+            "evidence_digest",
+            "authority_schema_version",
+            "authority_key_id",
+            "authenticated_writer_proof",
+        }
+    }
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -594,11 +626,17 @@ def qualification_evidence_digest(evidence: dict[str, Any]) -> str:
 def apply_protected_qualification(
     registration: dict[str, Any],
     evidence: dict[str, Any],
+    *,
+    authority_verifier: Callable[[str, object], bool],
+    expected_challenge: str,
+    expected_authorization_reference: str,
 ) -> dict[str, Any]:
     updated = dict(registration)
     if updated.get("registration_lifecycle") != "REGISTERED_UNQUALIFIED":
         raise PermissionError("registration is not eligible for qualification")
     digest = qualification_evidence_digest(evidence)
+    if not authority_verifier("provider-qualification", evidence):
+        raise PermissionError("qualification writer authority is invalid")
     try:
         started_at = datetime.fromisoformat(str(evidence.get("started_at")))
         finished_at = datetime.fromisoformat(str(evidence.get("finished_at")))
@@ -611,6 +649,9 @@ def apply_protected_qualification(
         or not isinstance(evidence.get("id"), str)
         or not evidence["id"]
         or evidence.get("qualification_method") != "protected-registered-launch"
+        or evidence.get("event_challenge") != expected_challenge
+        or evidence.get("authorization_reference")
+        != expected_authorization_reference
         or evidence.get("qualification_command")
         != [updated.get("canonical_executable_path"), "--version"]
         or evidence.get("command_digest")
@@ -638,6 +679,10 @@ def apply_protected_qualification(
         or evidence.get("qualification_result") != "qualified"
         or not isinstance(evidence.get("normalized_version"), str)
         or not evidence["normalized_version"]
+        or not _version_output_valid(
+            str(updated.get("logical_provider_id")),
+            str(evidence.get("normalized_version")),
+        )
     ):
         raise PermissionError("protected qualification evidence is inconsistent")
     updated.update(
@@ -658,12 +703,18 @@ def apply_protected_qualification(
 def _qualification_is_consistent(
     registration: dict[str, Any],
     evidence_by_id: dict[str, dict[str, Any]],
+    authority_verifier: Callable[[str, object], bool] | None,
 ) -> bool:
     if registration.get("registration_lifecycle") == "QUALIFICATION_FAILED":
         evidence_id = registration.get("qualification_evidence_id")
         evidence = evidence_by_id.get(str(evidence_id))
         return bool(
             isinstance(evidence, dict)
+            and authority_verifier is not None
+            and authority_verifier("provider-qualification", evidence)
+            and _qualification_start_is_valid(
+                registration, evidence, evidence_by_id, authority_verifier
+            )
             and evidence.get("evidence_digest")
             == qualification_evidence_digest(evidence)
             == registration.get("qualification_evidence_digest")
@@ -672,7 +723,13 @@ def _qualification_is_consistent(
             and evidence.get("provider_id")
             == registration.get("logical_provider_id")
             and evidence.get("qualification_result") == "failed"
-            and evidence.get("exit_status") != 0
+            and (
+                evidence.get("exit_status") != 0
+                or not _version_output_valid(
+                    str(registration.get("logical_provider_id")),
+                    str(evidence.get("normalized_version", "")),
+                )
+            )
         )
     if registration.get("registration_lifecycle") != "QUALIFIED":
         return registration.get("qualification_result") in {
@@ -683,7 +740,14 @@ def _qualification_is_consistent(
     if not isinstance(evidence_id, str):
         return False
     evidence = evidence_by_id.get(evidence_id)
-    if not isinstance(evidence, dict):
+    if (
+        not isinstance(evidence, dict)
+        or authority_verifier is None
+        or not authority_verifier("provider-qualification", evidence)
+        or not _qualification_start_is_valid(
+            registration, evidence, evidence_by_id, authority_verifier
+        )
+    ):
         return False
     try:
         expected = apply_protected_qualification(
@@ -699,6 +763,11 @@ def _qualification_is_consistent(
                 "configuration_digest": "",
             },
             evidence,
+            authority_verifier=authority_verifier,
+            expected_challenge=str(evidence["event_challenge"]),
+            expected_authorization_reference=str(
+                evidence["authorization_reference"]
+            ),
         )
     except (KeyError, PermissionError, TypeError):
         return False
@@ -714,6 +783,44 @@ def _qualification_is_consistent(
             "qualification_evidence_digest",
         )
     )
+
+
+def _qualification_start_is_valid(
+    registration: dict[str, Any],
+    evidence: dict[str, Any],
+    evidence_by_id: dict[str, dict[str, Any]],
+    authority_verifier: Callable[[str, object], bool],
+) -> bool:
+    reference = evidence.get("authorization_reference")
+    start = evidence_by_id.get(str(reference))
+    return bool(
+        isinstance(start, dict)
+        and authority_verifier("provider-qualification-start", start)
+        and start.get("id") == reference
+        and start.get("registration_id")
+        == registration.get("trusted_registration_id")
+        and start.get("provider_id") == registration.get("logical_provider_id")
+        and start.get("event_challenge") == evidence.get("event_challenge")
+    )
+
+
+def _version_output_valid(provider_id: str, value: str) -> bool:
+    allowed_names = {
+        "codex": r"(?:codex|controlled-provider|protected-version)",
+        "claude": r"(?:claude|controlled-provider|protected-version)",
+    }
+    name = allowed_names.get(provider_id)
+    return bool(
+        name
+        and re.fullmatch(
+            rf"(?i){name}(?:[\s_-]+(?:cli[\s_-]+)?)?v?\d+\.\d+(?:\.\d+)?(?:[-+.\w ]*)",
+            value.strip(),
+        )
+    )
+
+
+def qualified_version_is_valid(provider_id: str, value: str) -> bool:
+    return _version_output_valid(provider_id, value)
 
 
 def _registration_configuration_digest(registration: dict[str, Any]) -> str:

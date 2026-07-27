@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import secrets
 import subprocess
 import sys
 import uuid
@@ -22,12 +23,14 @@ from keeper.app.path_safety import contained_path, validate_path_budget
 from keeper.app.security import redact_text
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.app.workflow import WorkflowCoordinator
+from keeper.authority import AuthorityKey
 from keeper.providers.adapters import (
     ProviderDiscovery,
     apply_protected_qualification,
     canonical_provider_registration_digest,
     create_provider_registration,
     qualification_evidence_digest,
+    qualified_version_is_valid,
 )
 from keeper.providers.base import AgentRequest
 from keeper.providers.codex_cli import CliProvider
@@ -40,9 +43,12 @@ class KeeperApplication:
         self.data_directory = (data_directory or default_data_directory()).resolve()
         self.store = KeeperStore(self.data_directory / "keeper.db")
         self.store.migrate()
+        self.authority = AuthorityKey(self.data_directory)
         self.git = GitSafetyService()
         self.lifecycle = RunLifecycle(self.store)
-        self.workflow = WorkflowCoordinator(self.store, self.data_directory, self.notify)
+        self.workflow = WorkflowCoordinator(
+            self.store, self.data_directory, self.notify, self.authority
+        )
 
     def diagnostics(self) -> dict[str, Any]:
         providers = [
@@ -51,6 +57,7 @@ class KeeperApplication:
                 self.provider_paths(),
                 self.provider_registrations(),
                 self.qualification_evidence(),
+                self.authority.verify,
             ).discover()
         ]
         writable = _writable(self.data_directory)
@@ -108,7 +115,8 @@ class KeeperApplication:
         return {
             str(item["id"]): item
             for item in self.store.list("artifacts")
-            if item.get("kind") == "provider_qualification"
+            if item.get("kind")
+            in {"provider_qualification", "provider_qualification_started"}
             and isinstance(item.get("id"), str)
         }
 
@@ -140,24 +148,32 @@ class KeeperApplication:
             {provider_id: str(registration["canonical_executable_path"])},
             {provider_id: registration},
             self.qualification_evidence(),
+            self.authority.verify,
         ).discover()
         diagnostic = next(item for item in valid if item.provider_id == provider_id)
         if not diagnostic.available or diagnostic.discovery_state != "registered-unqualified":
             raise PermissionError("provider registration is not eligible for qualification")
         qualification_token = uuid.uuid4().hex
         qualification_id = f"provider-qualification:{qualification_token}"
+        challenge = secrets.token_hex(32)
         started_at = _now()
-        self.store.insert_immutable(
-            "artifacts",
-            f"{qualification_id}:started",
+        start_record = self.authority.sign(
+            "provider-qualification-start",
             {
                 "id": f"{qualification_id}:started",
                 "kind": "provider_qualification_started",
+                "schema_version": 1,
                 "registration_id": registration["trusted_registration_id"],
                 "provider_id": provider_id,
-                "authorized_by": authorizer,
+                "authorization_reference": authorizer,
+                "event_challenge": challenge,
                 "started_at": started_at,
             },
+        )
+        self.store.insert_immutable(
+            "artifacts",
+            f"{qualification_id}:started",
+            start_record,
         )
         pending = {
             **registration,
@@ -171,46 +187,70 @@ class KeeperApplication:
         registrations[provider_id] = pending
         self.store.upsert("settings", "provider_registrations", registrations)
         executable = str(registration["canonical_executable_path"])
-        provider = CliProvider(
-            (executable, "--version"),
-            provider_name=str(registration["provider_name"]),
-            expected_executable_sha256=registration["launcher_sha256"],
-            expected_executable_size=registration["launcher_size"],
-            registration_id=registration["trusted_registration_id"],
-            registration_version=registration["registration_version"],
-            configuration_digest=registration["configuration_digest"],
-            expected_script_sha256=registration["script_sha256"],
-            expected_script_size=registration["script_size"],
-            script_registration_id=registration["script_registration_id"],
-            script_registration_version=registration["script_registration_version"],
-            require_prompt_placeholder=False,
-        )
         directory = self.data_directory / "qualification" / qualification_token
-        directory.mkdir(parents=True, exist_ok=False)
-        prompt = directory / "unused"
-        prompt.write_text("", encoding="utf-8")
         ownership: dict[str, Any] = {}
-        result = provider.run(
-            AgentRequest(
-                "qualification",
-                prompt,
-                directory,
-                15,
-                directory / "stdout.log",
-                directory / "stderr.log",
-                on_process_owned=lambda value: ownership.update(value),
+        stdout_path = directory / "stdout.log"
+        stderr_path = directory / "stderr.log"
+        launch_failure: str | None = None
+        provider_instance_id = f"qualification-unlaunched:{uuid.uuid4().hex}"
+        exit_status = 70
+        raw = ""
+        try:
+            provider = CliProvider(
+                (executable, "--version"),
+                provider_name=str(registration["provider_name"]),
+                expected_executable_sha256=registration["launcher_sha256"],
+                expected_executable_size=registration["launcher_size"],
+                registration_id=registration["trusted_registration_id"],
+                registration_version=registration["registration_version"],
+                configuration_digest=registration["configuration_digest"],
+                expected_script_sha256=registration["script_sha256"],
+                expected_script_size=registration["script_size"],
+                script_registration_id=registration["script_registration_id"],
+                script_registration_version=registration[
+                    "script_registration_version"
+                ],
+                require_prompt_placeholder=False,
+                launch_guard=self.authority.provider_launch_guard,
             )
-        )
-        raw = result.stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+            provider_instance_id = provider.instance_id
+            directory.mkdir(parents=True, exist_ok=False)
+            prompt = directory / "unused"
+            prompt.write_text("", encoding="utf-8")
+            result = provider.run(
+                AgentRequest(
+                    "qualification",
+                    prompt,
+                    directory,
+                    15,
+                    stdout_path,
+                    stderr_path,
+                    on_process_owned=lambda value: ownership.update(value),
+                )
+            )
+            exit_status = result.exit_code
+            if result.stdout_path.exists():
+                raw = result.stdout_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).strip()
+        except (OSError, PermissionError, RuntimeError, ValueError) as error:
+            launch_failure = type(error).__name__
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                stdout_path.write_text("", encoding="utf-8")
+                stderr_path.write_text(launch_failure, encoding="utf-8")
+            except OSError:
+                pass
         normalized = raw.splitlines()[0].strip()[:200] if raw else ""
         finished_at = _now()
         evidence: dict[str, Any] = {
             "id": qualification_id,
             "kind": "provider_qualification",
+            "schema_version": 1,
             "registration_id": registration["trusted_registration_id"],
             "registration_version": registration["registration_version"],
             "provider_id": provider_id,
-            "provider_instance_id": provider.instance_id,
+            "provider_instance_id": provider_instance_id,
             "provider_run_id": qualification_id,
             "executable_sha256": registration["executable_sha256"],
             "launcher_sha256": registration["launcher_sha256"],
@@ -221,17 +261,24 @@ class KeeperApplication:
             ).hexdigest(),
             "started_at": started_at,
             "finished_at": finished_at,
-            "exit_status": result.exit_code,
+            "exit_status": exit_status,
             "raw_version_output": raw,
             "normalized_version": normalized,
             "qualification_method": "protected-registered-launch",
             "qualification_result": (
-                "qualified" if result.exit_code == 0 and normalized else "failed"
+                "qualified"
+                if exit_status == 0
+                and qualified_version_is_valid(provider_id, normalized)
+                else "failed"
             ),
             "authorized_by": authorizer,
+            "authorization_reference": start_record["id"],
+            "event_challenge": challenge,
             "ownership": ownership,
+            "failure_reason": launch_failure,
         }
         evidence["evidence_digest"] = qualification_evidence_digest(evidence)
+        evidence = self.authority.sign("provider-qualification", evidence)
         self.store.insert_immutable("artifacts", qualification_id, evidence)
         if evidence["qualification_result"] != "qualified":
             failed = {
@@ -251,7 +298,13 @@ class KeeperApplication:
                 "settings", "provider_registrations", registrations
             )
             raise PermissionError("protected provider qualification failed")
-        updated = apply_protected_qualification(registration, evidence)
+        updated = apply_protected_qualification(
+            registration,
+            evidence,
+            authority_verifier=self.authority.verify,
+            expected_challenge=challenge,
+            expected_authorization_reference=str(start_record["id"]),
+        )
         registrations[provider_id] = updated
         self.store.upsert("settings", "provider_registrations", registrations)
         return updated

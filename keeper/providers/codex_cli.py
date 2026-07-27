@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
@@ -36,6 +37,7 @@ class CliProvider(AgentProvider):
         script_registration_version: str | None = None,
         before_process_create: Callable[[Path], None] | None = None,
         require_prompt_placeholder: bool = True,
+        launch_guard: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
         self.command_script: Path | None = None
         if (
@@ -59,6 +61,7 @@ class CliProvider(AgentProvider):
         self.script_registration_version = script_registration_version
         self.before_process_create = before_process_create
         self.require_prompt_placeholder = require_prompt_placeholder
+        self.launch_guard = launch_guard
         self.instance_id = uuid.uuid4().hex
         self._active_process: subprocess.Popen[str] | None = None
         self._active_job: int | None = None
@@ -126,6 +129,11 @@ class CliProvider(AgentProvider):
         return resolved, content
 
     def run(self, request: AgentRequest) -> ProcessResult:
+        guard = self.launch_guard() if self.launch_guard is not None else nullcontext()
+        with guard:
+            return self._run_guarded(request)
+
+    def _run_guarded(self, request: AgentRequest) -> ProcessResult:
         registered_path, registered_content = self._validated_executable()
         request.stdout_path.parent.mkdir(parents=True, exist_ok=True)
         retained_executable_handles: list[int] = []

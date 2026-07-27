@@ -4,6 +4,7 @@ import ctypes
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ from keeper.app.path_safety import validate_path_budget
 from keeper.app.reporting import finalize_evidence
 from keeper.app.storage import KeeperStore
 from keeper.app.verification_policy import trusted_bash_launcher
+from keeper.authority import AuthorityKey
 from keeper.config import KeeperConfig
 from keeper.models.task import Task
 from keeper.orchestrator import Keeper
@@ -34,6 +36,7 @@ from keeper.providers.adapters import (
     route_provider,
 )
 from keeper.providers.base import AgentProvider
+from keeper.providers.codex_cli import CliProvider
 from keeper.providers.mock import MockProvider
 from keeper.providers.ollama import OllamaProvider
 from keeper.providers.routing import ProviderRouter
@@ -71,11 +74,13 @@ class WorkflowCoordinator:
         store: KeeperStore,
         data_directory: Path,
         notify: Callable[[str, str, str], dict[str, Any]],
+        authority: AuthorityKey,
     ) -> None:
         self.store = store
         self.data_directory = data_directory
         self.lifecycle = RunLifecycle(store)
         self.notify = notify
+        self.authority = authority
         self._active: dict[str, ActiveRun] = {}
         self._lock = threading.Lock()
         self.startup_recovery = self.recover_interrupted_runs()
@@ -784,6 +789,9 @@ class WorkflowCoordinator:
             else _domain_task(stored, run_id)
         )
         routed_providers: dict[str, AgentProvider] = dict(providers)
+        for provider in {id(item): item for item in providers.values()}.values():
+            if isinstance(provider, CliProvider):
+                provider.launch_guard = self.authority.provider_launch_guard
         router = ProviderRouter(routed_providers, routes)
         observer = _LifecycleObserver(
             self.lifecycle, run_id, cancel, pause, self.notify
@@ -1010,9 +1018,11 @@ class WorkflowCoordinator:
         paths["__qualification_evidence__"] = {
             str(item["id"]): item
             for item in self.store.list("artifacts")
-            if item.get("kind") == "provider_qualification"
+            if item.get("kind")
+            in {"provider_qualification", "provider_qualification_started"}
             and isinstance(item.get("id"), str)
         }
+        paths["__authority_verifier__"] = self.authority.verify
         return paths
 
     def _finalize_report(
@@ -1504,6 +1514,7 @@ class WorkflowCoordinator:
                     "stable_registration": route.get("stable_registration"),
                     "executable": route.get("executable"),
                     "executable_sha256": route.get("executable_sha256"),
+                    "completion_challenge": secrets.token_hex(32),
                     "status": "EXECUTION_STARTED",
                 }
             )
@@ -1526,6 +1537,8 @@ class WorkflowCoordinator:
             completion: dict[str, Any] = {
                 "id": f"provider-completion:{run_id}:{provider_run_id}",
                 "kind": "provider_completion",
+                "schema_version": 1,
+                "completion_challenge": current.get("completion_challenge"),
                 "keeper_run_id": run_id,
                 "task_id": current.get("task_id"),
                 "stage_id": current.get("stage_id"),
@@ -1556,10 +1569,12 @@ class WorkflowCoordinator:
                     event.get("result", "failed")
                 ).upper(),
                 "completion_event_id": uuid.uuid4().hex,
-                "trusted_writer": "keeper-agent-runner",
+                "lifecycle_transaction_id": uuid.uuid4().hex,
                 "transaction_recorded_at": _now(),
+                "process_ownership": current.get("process_ownership"),
             }
             completion["integrity_digest"] = _protected_record_digest(completion)
+            completion = self.authority.sign("provider-completion", completion)
             self.store.insert_immutable(
                 "artifacts", str(completion["id"]), completion
             )
@@ -1669,6 +1684,7 @@ class WorkflowCoordinator:
                 if isinstance(attempt.get("stable_registration"), dict)
                 else None
             ),
+            "completion_challenge": attempt.get("completion_challenge"),
         }
         if any(
             value is None or completion.get(key) != value
@@ -1685,6 +1701,25 @@ class WorkflowCoordinator:
             return {
                 "status": "INTEGRITY_MISMATCH",
                 "detail": "protected completion integrity digest is invalid",
+                "record": completion,
+            }
+        if not self.authority.verify("provider-completion", completion):
+            return {
+                "status": "AUTHENTICATION_FAILED",
+                "detail": "protected completion writer authentication is invalid",
+                "record": completion,
+            }
+        challenge = completion.get("completion_challenge")
+        challenge_uses = [
+            item
+            for item in self.store.list("artifacts")
+            if item.get("kind") == "provider_completion"
+            and item.get("completion_challenge") == challenge
+        ]
+        if not isinstance(challenge, str) or not challenge or len(challenge_uses) != 1:
+            return {
+                "status": "CHALLENGE_REPLAY",
+                "detail": "completion challenge is missing or reused",
                 "record": completion,
             }
         if not isinstance(evidence, dict):
@@ -1975,10 +2010,16 @@ def _select_routes(
         return _mock_routes(str(stored.get("mock_scenario", "repair")))
     registrations = configured_paths.get("__registrations__", {})
     qualification_evidence = configured_paths.get("__qualification_evidence__", {})
+    authority_verifier = configured_paths.get("__authority_verifier__")
     paths = {
         str(key): str(value)
         for key, value in configured_paths.items()
-        if key not in {"__registrations__", "__qualification_evidence__"}
+        if key
+        not in {
+            "__registrations__",
+            "__qualification_evidence__",
+            "__authority_verifier__",
+        }
     }
     diagnostics = ProviderDiscovery(
         paths,
@@ -2000,6 +2041,7 @@ def _select_routes(
             if isinstance(qualification_evidence, dict)
             else {}
         ),
+        authority_verifier if callable(authority_verifier) else None,
     ).discover()
     real_diagnostics = [
         item
@@ -2785,7 +2827,15 @@ def _terminal_evidence_complete(value: dict[str, Any], status: str) -> bool:
 
 def _protected_record_digest(value: dict[str, Any]) -> str:
     protected = {
-        key: item for key, item in value.items() if key != "integrity_digest"
+        key: item
+        for key, item in value.items()
+        if key
+        not in {
+            "integrity_digest",
+            "authority_schema_version",
+            "authority_key_id",
+            "authenticated_writer_proof",
+        }
     }
     return hashlib.sha256(
         json.dumps(protected, sort_keys=True, separators=(",", ":")).encode("utf-8")

@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from keeper.agent_runner import AgentRunner
+from keeper.app.storage import KeeperStore, default_data_directory
+from keeper.authority import AuthorityKey
 from keeper.config import KeeperConfig
 from keeper.orchestrator import Keeper
 from keeper.providers.codex_cli import CliProvider
@@ -26,19 +28,39 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
             raise PermissionError("provider command is missing")
         executable = config.provider_command[0]
         provider_id = str(registration.get("logical_provider_id") or "")
+        reference = config.provider_qualification_reference
+        if not reference:
+            raise PermissionError(
+                "standalone provider qualification reference is missing"
+            )
+        protected_root = default_data_directory().resolve()
+        protected_store = KeeperStore(protected_root / "keeper.db")
+        protected_store.migrate()
+        evidence = protected_store.get("artifacts", reference)
+        start_evidence = (
+            protected_store.get(
+                "artifacts", str(evidence.get("authorization_reference"))
+            )
+            if isinstance(evidence, dict)
+            else None
+        )
+        authority = AuthorityKey(protected_root)
         valid, detail = validate_provider_registration(
             provider_id,
             executable,
             registration,
             (
                 {
-                    str(config.provider_qualification_evidence["id"]):
-                    config.provider_qualification_evidence
+                    str(evidence["id"]): evidence,
+                    str(start_evidence["id"]): start_evidence,
                 }
-                if isinstance(config.provider_qualification_evidence, dict)
-                and isinstance(config.provider_qualification_evidence.get("id"), str)
+                if isinstance(evidence, dict)
+                and isinstance(evidence.get("id"), str)
+                and isinstance(start_evidence, dict)
+                and isinstance(start_evidence.get("id"), str)
                 else {}
             ),
+            authority.verify,
         )
         if not valid:
             raise PermissionError(f"provider registration is invalid: {detail}")
@@ -71,6 +93,7 @@ def build_keeper(root: Path, mock: bool = False) -> Keeper:
             script_registration_version=registration.get(
                 "script_registration_version"
             ),
+            launch_guard=authority.provider_launch_guard,
         )
         provider.validate()
         return provider
