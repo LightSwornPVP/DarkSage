@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,13 @@ class SemanticAuthorityTransport:
         self.wrong_completion_field: tuple[str, str] | None = None
         self.ignore_cancel_completion = False
         self.fail_review_once = False
+        self.normalized_result_override: str | None = None
+        self.review_normalized_result_override: str | None = None
+        self.review_disposition = "ACCEPTED"
+        self.malformed_review = False
+        self.omit_author_artifact = False
+        self.wrong_review_artifact = False
+        self.mutate_artifact_during_review = False
         self.started: threading.Event | None = None
         self.release: threading.Event | None = None
         self._lock = threading.RLock()
@@ -212,8 +221,135 @@ class SemanticAuthorityTransport:
                 return {"attempt_id": attempt_id, "cancelled": True}
             if self.raise_after_side_effect:
                 raise RuntimeError("provider response lost after side effect")
+            normalized_result = (
+                self.review_normalized_result_override
+                if attempt["role"] == "reviewer"
+                and self.review_normalized_result_override is not None
+                else self.normalized_result_override or "completed"
+            )
+            if normalized_result == "completed":
+                prompt = json.loads(
+                    Path(str(attempt["prompt_path"])).read_text(encoding="utf-8")
+                )
+                stdout = Path(str(attempt["stdout_path"]))
+                stderr = Path(str(attempt["stderr_path"]))
+                stderr.write_text("", encoding="utf-8")
+                if attempt["role"] == "reviewer":
+                    disposition = (
+                        "REPAIR_REQUIRED"
+                        if self.fail_review_once
+                        else self.review_disposition
+                    )
+                    review = {
+                        "schema_version": 1,
+                        "review_id": f"review:{attempt_id}",
+                        "review_attempt_id": attempt_id,
+                        "reviewer_registration": attempt["registration_id"],
+                        "reviewer_qualification": prompt[
+                            "provider_qualification_id"
+                        ],
+                        "reviewer_independence_identity": attempt[
+                            "provider_instance_id"
+                        ],
+                        "project_id": prompt["global_brief"]["project_id"],
+                        "charter_revision": prompt["global_brief"][
+                            "charter_revision"
+                        ],
+                        "workflow_id": attempt["keeper_run_id"].split(":")[-1],
+                        "task_id": prompt["task_guidance"]["task_id"],
+                        "author_attempt_id": prompt["author_attempt_id"],
+                        "artifact_identity": (
+                            f"file-set:{prompt['task_guidance']['task_id']}"
+                        ),
+                        "artifact_digest": (
+                            "0" * 64
+                            if self.wrong_review_artifact
+                            else prompt["artifact_revision_digest"]
+                        ),
+                        "evidence_digest": hashlib.sha256(
+                            f"review:{attempt_id}".encode()
+                        ).hexdigest(),
+                        "review_criteria_version": "keeper-review-v1",
+                        "review_criteria_digest": prompt[
+                            "review_criteria_digest"
+                        ],
+                        "review_disposition": disposition,
+                        "findings": (
+                            []
+                            if disposition == "ACCEPTED"
+                            else [
+                                {
+                                    "finding_id": "finding-1",
+                                    "severity": "High",
+                                    "title": "repair required",
+                                    "description": "deterministic review fixture",
+                                }
+                            ]
+                        ),
+                        "failed_criteria": (
+                            [] if disposition == "ACCEPTED" else ["criterion-1"]
+                        ),
+                        "required_repairs": (
+                            [] if disposition == "ACCEPTED" else ["repair-1"]
+                        ),
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                    if self.malformed_review:
+                        review.pop("review_disposition")
+                    stdout.write_text(json.dumps(review), encoding="utf-8")
+                    if self.mutate_artifact_during_review:
+                        artifacts = sorted(
+                            Path(str(attempt["workspace"]))
+                            .joinpath(".keeper-artifacts")
+                            .glob("*.json")
+                        )
+                        if artifacts:
+                            artifacts[-1].write_text(
+                                "mutated during review", encoding="utf-8"
+                            )
+                else:
+                    relative = (
+                        Path(".keeper-artifacts")
+                        / f"{hashlib.sha256(attempt_id.encode()).hexdigest()}.json"
+                    )
+                    artifact = Path(str(attempt["workspace"])) / relative
+                    if not self.omit_author_artifact:
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_text(
+                            json.dumps(
+                                {
+                                    "attempt_id": attempt_id,
+                                    "task_id": attempt["task_id"],
+                                },
+                                sort_keys=True,
+                            ),
+                            encoding="utf-8",
+                        )
+                    stdout.write_text(
+                        json.dumps(
+                            {
+                                "status": "completed",
+                                "files_changed": [relative.as_posix()],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+            else:
+                Path(str(attempt["stdout_path"])).write_text("", encoding="utf-8")
+                Path(str(attempt["stderr_path"])).write_text(
+                    normalized_result, encoding="utf-8"
+                )
+            stdout_bytes = Path(str(attempt["stdout_path"])).read_bytes()
+            stderr_bytes = Path(str(attempt["stderr_path"])).read_bytes()
             evidence_digest = hashlib.sha256(
-                f"evidence:{attempt_id}".encode()
+                json.dumps(
+                    {
+                        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+                        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
             ).hexdigest()
             completion = self._sign(
                 "provider-completion",
@@ -226,18 +362,13 @@ class SemanticAuthorityTransport:
                     "role": attempt["role"],
                     "registration_id": attempt["registration_id"],
                     "provider_instance_id": attempt["provider_instance_id"],
-                    "normalized_result": (
-                        "failed"
-                        if self.fail_review_once
-                        and attempt["role"] == "independent reviewer"
-                        else "completed"
-                    ),
+                    "normalized_result": normalized_result,
                     "provider_evidence_digest": evidence_digest,
                 },
             )
             if (
                 self.fail_review_once
-                and attempt["role"] == "independent reviewer"
+                and attempt["role"] == "reviewer"
             ):
                 self.fail_review_once = False
             if self.unsigned_completion:

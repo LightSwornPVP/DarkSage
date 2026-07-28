@@ -207,7 +207,6 @@ def test_repaired_artifact_requires_a_new_current_review(
     assert first.status == "REPAIR_REQUIRED"
     assert first.retry_count == 1
     assert len(first_reviews) == 1
-
     runtime.resume(project.project_id)
     runtime.progress(project.project_id)
     repaired = service.repository.task(first.task_id)
@@ -228,3 +227,104 @@ def test_repaired_artifact_requires_a_new_current_review(
         first_reviews[0]["artifact_revision_digest"],
         repaired.artifact_digest,
     }
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    ["failed", "timed_out", "canceled", "terminated", "launch_failed"],
+)
+def test_non_successful_author_execution_never_enters_review(
+    tmp_path: Path,
+    terminal: str,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    authority.normalized_result_override = terminal
+    state = runtime.progress(project.project_id)
+    first = service.repository.tasks(project.project_id)[0]
+    assert state.state == "BLOCKED"
+    assert first.status in {"FAILED", "CANCELED"}
+    assert first.review_attempt_id is None
+    assert first.status != "COMPLETED"
+
+
+def test_successful_author_without_actual_artifact_fails_closed(
+    tmp_path: Path,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    authority.omit_author_artifact = True
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    state = runtime.progress(project.project_id)
+    first = service.repository.tasks(project.project_id)[0]
+    assert state.state == "BLOCKED"
+    assert first.status == "UNCERTAIN"
+    assert first.review_attempt_id is None
+
+
+@pytest.mark.parametrize(
+    ("disposition", "expected_status"),
+    [
+        ("REJECTED", "REPAIR_REQUIRED"),
+        ("REPAIR_REQUIRED", "REPAIR_REQUIRED"),
+        ("INDETERMINATE", "REPAIR_REQUIRED"),
+    ],
+)
+def test_successful_review_process_does_not_imply_semantic_acceptance(
+    tmp_path: Path,
+    disposition: str,
+    expected_status: str,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
+    authority.review_disposition = disposition
+    state = runtime.progress(project.project_id)
+    architecture = next(
+        task
+        for task in service.repository.tasks(project.project_id)
+        if task.title == "Architecture"
+    )
+    assert state.state == "BLOCKED"
+    assert architecture.status == expected_status
+    assert architecture.status != "COMPLETED"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["malformed", "wrong-artifact", "process-failed", "stale-artifact"],
+)
+def test_review_binding_or_process_failure_cannot_accept(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
+    if mode == "malformed":
+        authority.malformed_review = True
+    elif mode == "wrong-artifact":
+        authority.wrong_review_artifact = True
+    elif mode == "process-failed":
+        authority.review_normalized_result_override = "failed"
+    else:
+        authority.mutate_artifact_during_review = True
+    state = runtime.progress(project.project_id)
+    architecture = next(
+        task
+        for task in service.repository.tasks(project.project_id)
+        if task.title == "Architecture"
+    )
+    assert state.state == "BLOCKED"
+    assert architecture.status != "COMPLETED"

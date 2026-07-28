@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from pathlib import Path
 
 from keeper.executive.authority import (
     AuthorityEvaluator,
@@ -11,6 +12,7 @@ from keeper.executive.authority_gateway import (
     AuthorityExecutionPlan,
     ProductionAuthorityBackedSpecialistGateway,
     SemanticAuthorityTestGateway,
+    artifact_digest_from_files,
 )
 from keeper.executive.enums import ExecutiveState, TaskStatus
 from keeper.executive.models import (
@@ -295,7 +297,13 @@ class ExecutiveRuntime:
             expected_revision=running.revision,
             result=asdict(result),
         )
-        self._record_author_evidence(imported, result.completion_digest)
+        self._record_author_evidence(imported, result.evidence_digest)
+        if imported.status != TaskStatus.REVIEW_REQUIRED:
+            return self._pause(
+                self.repository.project(project_id),
+                ExecutiveState.BLOCKED,
+                imported.result_disposition or "Provider execution failed.",
+            )
         if imported.status == TaskStatus.CANCELED:
             return self.repository.project(project_id)
         return self._review(project, charter, imported, author)
@@ -402,6 +410,14 @@ class ExecutiveRuntime:
                 ExecutiveState.BLOCKED,
                 "Author artifact evidence is missing.",
             )
+        try:
+            self._recheck_artifact(task)
+        except PermissionError:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "Author artifact changed after authenticated completion.",
+            )
         review_task_id = (
             f"{task.task_id}:review:r{task.revision}:"
             f"{artifact_digest[:16]}"
@@ -411,11 +427,11 @@ class ExecutiveRuntime:
             charter,
             reviewer,
             task_id=review_task_id,
-            role="independent reviewer",
+            role="reviewer",
             artifact_revision_digest=artifact_digest,
             review_instructions=(
                 "Review the exact bound artifact and evidence revision.",
-                "Return success only when every charter review criterion passes.",
+                "Return a structured semantic review disposition.",
                 "Do not approve your own session or attempt.",
             ),
         )
@@ -433,6 +449,7 @@ class ExecutiveRuntime:
             )
             self._recheck_review(claimed, artifact_digest)
             result = self.gateway.execute(plan)
+            self._recheck_artifact(claimed)
         except BaseException as error:
             try:
                 self.repository.transition_review(
@@ -469,7 +486,7 @@ class ExecutiveRuntime:
                 (
                     result.authority_attempt_id,
                     result.completion_digest,
-                    result.artifact_digest,
+                    result.structured_review_digest or "",
                 ),
                 None,
                 utc_now(),
@@ -602,9 +619,18 @@ class ExecutiveRuntime:
         )
         if imported.status == TaskStatus.CANCELED:
             self._record_author_evidence(
-                imported, completion.completion_digest
+                imported, completion.evidence_digest
             )
             return self.repository.project(project.project_id)
+        if imported.status != TaskStatus.REVIEW_REQUIRED:
+            self._record_author_evidence(
+                imported, completion.evidence_digest
+            )
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                imported.result_disposition or "Provider execution failed.",
+            )
         profiles = self.gateway.specialists(charter)
         author = next(
             (
@@ -623,7 +649,7 @@ class ExecutiveRuntime:
                 "Completed provider identity is no longer Authority-qualified.",
             )
         self._record_author_evidence(
-            imported, completion.completion_digest
+            imported, completion.evidence_digest
         )
         return self._review(project, charter, imported, author)
 
@@ -644,6 +670,7 @@ class ExecutiveRuntime:
                 ExecutiveState.BLOCKED,
                 "Independent review awaits Authority reconciliation.",
             )
+        self._recheck_artifact(task)
         disposition = self.repository.accept_review_completion(
             task.task_id,
             expected_revision=task.revision,
@@ -657,6 +684,27 @@ class ExecutiveRuntime:
                 or "Independent review requires repair.",
             )
         return project
+
+    def _recheck_artifact(self, task: ExecutiveTask) -> None:
+        if task.authority_attempt_id is None or task.artifact_digest is None:
+            raise PermissionError("task has no author artifact binding")
+        attempt = self.repository.execution_attempt(task.authority_attempt_id)
+        identity = attempt.get("artifact_identity")
+        files = attempt.get("artifact_files")
+        if (
+            not isinstance(identity, str)
+            or not isinstance(files, list)
+            or not all(isinstance(item, str) for item in files)
+            or not isinstance(attempt.get("workspace"), str)
+        ):
+            raise PermissionError("author artifact manifest is unavailable")
+        current = artifact_digest_from_files(
+            identity,
+            Path(str(attempt["workspace"])),
+            tuple(files),
+        )
+        if current != task.artifact_digest:
+            raise PermissionError("author artifact digest changed")
 
     def _recheck_launch(
         self,

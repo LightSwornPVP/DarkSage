@@ -755,6 +755,19 @@ class ExecutiveRepository:
             attempt_payload, attempt_hash = self._entity_in_transaction(
                 connection, "executive_execution_attempts", attempt_id
             )
+            if (
+                attempt_payload.get("state") == "COMPLETED"
+                and task.status
+                in {
+                    TaskStatus.REVIEW_REQUIRED,
+                    TaskStatus.REPAIR_REQUIRED,
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                }
+                and attempt_payload.get("completion_digest")
+                == result.get("completion_digest")
+            ):
+                return task
             late = (
                 project.state == ExecutiveState.CANCELED
                 or task.status == TaskStatus.CANCELED
@@ -803,12 +816,69 @@ class ExecutiveRepository:
                 }
             ):
                 raise PermissionError("completion import is stale")
-            artifact_digest = str(result["artifact_digest"])
+            terminal = result.get("terminal_disposition")
+            if terminal != "SUCCEEDED":
+                failed_attempt = {
+                    **attempt_payload,
+                    "state": str(terminal or "UNCERTAIN"),
+                    "completion_digest": result.get("completion_digest"),
+                    "evidence_digest": result.get("evidence_digest"),
+                    "updated_at": timestamp,
+                }
+                target = (
+                    TaskStatus.CANCELED
+                    if terminal == "CANCELED"
+                    else TaskStatus.FAILED
+                )
+                failed = replace(
+                    task,
+                    status=target.value,
+                    result_disposition=f"AUTHORITY_{terminal or 'UNCERTAIN'}",
+                    revision=task.revision + 1,
+                    attempt_history=task.attempt_history
+                    + (
+                        {
+                            "authority_attempt_id": attempt_id,
+                            "state": str(terminal or "UNCERTAIN"),
+                            "completion_digest": result.get("completion_digest"),
+                            "recorded_at": timestamp,
+                        },
+                    ),
+                    updated_at=timestamp,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_execution_attempts",
+                    attempt_id,
+                    attempt_hash,
+                    failed_attempt,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_tasks",
+                    task.task_id,
+                    task_hash,
+                    failed.to_dict(),
+                )
+                return failed
+            artifact_digest = result.get("artifact_digest")
+            if (
+                not isinstance(artifact_digest, str)
+                or len(artifact_digest) != 64
+                or not isinstance(result.get("artifact_identity"), str)
+                or not isinstance(result.get("artifact_files"), (list, tuple))
+                or not result.get("artifact_files")
+                or not isinstance(result.get("evidence_digest"), str)
+            ):
+                raise PermissionError("successful completion has no authenticated artifact")
             completed_attempt = {
                 **attempt_payload,
                 "state": "COMPLETED",
                 "completion_digest": result["completion_digest"],
                 "artifact_digest": artifact_digest,
+                "artifact_identity": result["artifact_identity"],
+                "artifact_files": list(result["artifact_files"]),
+                "evidence_digest": result["evidence_digest"],
                 "updated_at": timestamp,
             }
             imported = replace(
@@ -1053,31 +1123,92 @@ class ExecutiveRepository:
                 task.review_attempt_id,
             )
             if (
-                review_payload.get("state")
-                not in {"EXECUTION_STARTED", "COMPLETION_PENDING", "UNCERTAIN"}
-                or result.get("task_id")
+                result.get("task_id")
                 != review_payload.get("review_task_id")
                 or result.get("session_id")
                 != review_payload.get("reviewer_session_id")
                 or result.get("registration_id")
                 != review_payload.get("reviewer_registration_id")
+            ):
+                raise PermissionError("review completion identity binding is invalid")
+            if result.get("terminal_disposition") != "SUCCEEDED":
+                failed_review = {
+                    **review_payload,
+                    "state": str(
+                        result.get("terminal_disposition") or "UNCERTAIN"
+                    ),
+                    "completion_digest": result.get("completion_digest"),
+                    "evidence_digest": result.get("evidence_digest"),
+                    "disposition": "INDETERMINATE",
+                    "updated_at": timestamp,
+                }
+                failed_task = replace(
+                    task,
+                    status=(
+                        TaskStatus.FAILED.value
+                        if task.retry_count >= task.max_retries
+                        else TaskStatus.REPAIR_REQUIRED.value
+                    ),
+                    provider_id=None,
+                    model_id=None,
+                    session_id=None,
+                    authority_attempt_id=None,
+                    artifact_digest=None,
+                    review_attempt_id=None,
+                    retry_count=task.retry_count + 1,
+                    result_disposition=(
+                        "INDEPENDENT_REVIEW_PROCESS_FAILED"
+                    ),
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_reviews",
+                    str(review_payload["review_attempt_id"]),
+                    review_hash,
+                    failed_review,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_tasks",
+                    task.task_id,
+                    task_hash,
+                    failed_task.to_dict(),
+                )
+                return failed_task
+            if (
+                review_payload.get("state")
+                not in {"EXECUTION_STARTED", "COMPLETION_PENDING", "UNCERTAIN"}
                 or review_payload.get("reviewer_session_id")
                 == review_payload.get("author_session_id")
                 or review_payload.get("review_attempt_id")
                 == review_payload.get("author_attempt_id")
                 or review_payload.get("artifact_revision_digest")
                 != task.artifact_digest
+                or result.get("author_attempt_id")
+                != review_payload.get("author_attempt_id")
+                or result.get("artifact_digest") != task.artifact_digest
+                or not isinstance(result.get("structured_review_digest"), str)
+                or result.get("review_disposition")
+                not in {
+                    "ACCEPTED",
+                    "REPAIR_REQUIRED",
+                    "REJECTED",
+                    "INDETERMINATE",
+                }
             ):
                 raise PermissionError(
                     "review completion independence or artifact binding is invalid"
                 )
-            accepted = result.get("normalized_result") == "completed"
+            accepted = result.get("review_disposition") == "ACCEPTED"
             review_updated = {
                 **review_payload,
                 "state": "COMPLETED",
-                "findings_digest": result["artifact_digest"],
+                "findings_digest": result["structured_review_digest"],
                 "completion_digest": result["completion_digest"],
-                "disposition": "ACCEPTED" if accepted else "REPAIR_REQUIRED",
+                "evidence_digest": result["evidence_digest"],
+                "disposition": result["review_disposition"],
                 "updated_at": timestamp,
             }
             if accepted:

@@ -60,6 +60,8 @@ class AuthorityExecutionPlan:
     expected_outputs_digest: str
     expected_evidence_digest: str
     artifact_revision_digest: str | None
+    author_attempt_id: str | None
+    review_criteria_digest: str | None
     reservation_payload: dict[str, Any]
 
     def binding(self) -> dict[str, Any]:
@@ -80,7 +82,14 @@ class AuthenticatedExecutionResult:
     registration_id: str
     executable_digest: str
     normalized_result: str
-    artifact_digest: str
+    terminal_disposition: str
+    artifact_identity: str | None
+    artifact_digest: str | None
+    artifact_files: tuple[str, ...]
+    evidence_digest: str
+    review_disposition: str | None
+    structured_review_digest: str | None
+    author_attempt_id: str | None
     completion_digest: str
     authenticated: bool
 
@@ -245,6 +254,9 @@ class AuthorityBackedSpecialistGateway:
             ).to_dict(),
             "review_instructions": review_instructions,
             "artifact_revision_digest": artifact_revision_digest,
+            "author_attempt_id": task.authority_attempt_id,
+            "review_criteria_version": "keeper-review-v1",
+            "review_criteria_digest": _digest(review_instructions),
             "provider_registration_id": binding.registration_id,
             "provider_qualification_id": binding.qualification_id,
         }
@@ -267,6 +279,10 @@ class AuthorityBackedSpecialistGateway:
             "expected_outputs_digest": expected_outputs_digest,
             "expected_evidence_digest": expected_evidence_digest,
             "artifact_revision_digest": artifact_revision_digest,
+            "author_attempt_id": task.authority_attempt_id,
+            "review_criteria_digest": _digest(review_instructions)
+            if review_instructions
+            else None,
         }
         provider_run_id = f"executive-{_digest(binding_material)[:32]}"
         keeper_run_id = (
@@ -332,6 +348,8 @@ class AuthorityBackedSpecialistGateway:
             expected_outputs_digest,
             expected_evidence_digest,
             artifact_revision_digest,
+            task.authority_attempt_id,
+            _digest(review_instructions) if review_instructions else None,
             reservation_payload,
         )
 
@@ -436,6 +454,40 @@ class AuthorityBackedSpecialistGateway:
             raise PermissionError(
                 "Authority evidence digest is not canonical SHA-256"
             )
+        terminal = {
+            "completed": "SUCCEEDED",
+            "failed": "FAILED",
+            "canceled": "CANCELED",
+            "cancelled": "CANCELED",
+            "timed_out": "TIMED_OUT",
+            "terminated": "TERMINATED",
+            "launch_failed": "LAUNCH_FAILED",
+            "uncertain": "UNCERTAIN",
+        }.get(str(completion.get("normalized_result", "")).casefold(), "UNCERTAIN")
+        stdout_path = Path(str(plan.reservation_payload["stdout_path"]))
+        stderr_path = Path(str(plan.reservation_payload["stderr_path"]))
+        observed_evidence = _execution_evidence_digest(stdout_path, stderr_path)
+        if observed_evidence != evidence_digest:
+            raise PermissionError("Authority evidence digest does not match provider output")
+
+        artifact_identity: str | None = None
+        artifact_digest: str | None = None
+        artifact_files: tuple[str, ...] = ()
+        review_disposition: str | None = None
+        structured_review_digest: str | None = None
+        author_attempt_id: str | None = None
+        if terminal == "SUCCEEDED":
+            output = _strict_provider_output(stdout_path)
+            if plan.role == "reviewer":
+                review_disposition, structured_review_digest, author_attempt_id = (
+                    _validate_review_output(plan, output)
+                )
+                artifact_identity = str(output["artifact_identity"])
+                artifact_digest = str(output["artifact_digest"])
+            else:
+                artifact_identity, artifact_digest, artifact_files = (
+                    _artifact_from_output(plan, output)
+                )
         return AuthenticatedExecutionResult(
             plan.authority_attempt_id,
             plan.task_id,
@@ -447,7 +499,14 @@ class AuthorityBackedSpecialistGateway:
             plan.registration_id,
             plan.executable_digest,
             str(completion.get("normalized_result", "")),
+            terminal,
+            artifact_identity,
+            artifact_digest,
+            artifact_files,
             evidence_digest,
+            review_disposition,
+            structured_review_digest,
+            author_attempt_id,
             _digest(completion),
             True,
         )
@@ -520,3 +579,125 @@ def _digest(value: object) -> str:
             default=str,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _execution_evidence_digest(stdout_path: Path, stderr_path: Path) -> str:
+    evidence = {
+        "stdout_sha256": hashlib.sha256(
+            stdout_path.read_bytes() if stdout_path.exists() else b""
+        ).hexdigest(),
+        "stderr_sha256": hashlib.sha256(
+            stderr_path.read_bytes() if stderr_path.exists() else b""
+        ).hexdigest(),
+    }
+    return _digest(evidence)
+
+
+def _strict_provider_output(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError("provider structured output is unavailable or malformed") from error
+    if not isinstance(value, dict):
+        raise PermissionError("provider structured output must be an object")
+    return value
+
+
+def _artifact_from_output(
+    plan: AuthorityExecutionPlan,
+    output: dict[str, Any],
+) -> tuple[str, str, tuple[str, ...]]:
+    if set(output) != {"status", "files_changed"} or output.get("status") not in {
+        "completed",
+        "resolved",
+    }:
+        raise PermissionError("successful author output schema is invalid")
+    files = output.get("files_changed")
+    if not isinstance(files, list) or not files or not all(
+        isinstance(item, str) and item for item in files
+    ):
+        raise PermissionError("successful author output has no artifact files")
+    relative_files: list[str] = []
+    workspace = Path(plan.workspace).resolve()
+    for item in files:
+        candidate = Path(item)
+        path = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (workspace / candidate).resolve()
+        )
+        if not path.is_relative_to(workspace) or not path.is_file():
+            raise PermissionError("author artifact is missing or outside the workspace")
+        relative = path.relative_to(workspace).as_posix()
+        relative_files.append(relative)
+    identity = f"file-set:{plan.task_id}:{plan.task_revision}"
+    normalized_files = tuple(sorted(relative_files))
+    return identity, artifact_digest_from_files(
+        identity, workspace, normalized_files
+    ), normalized_files
+
+
+def artifact_digest_from_files(
+    identity: str,
+    workspace: Path,
+    files: tuple[str, ...],
+) -> str:
+    root = workspace.resolve()
+    manifest: list[dict[str, Any]] = []
+    for relative in files:
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise PermissionError("bound author artifact is missing or outside workspace")
+        content = path.read_bytes()
+        manifest.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        )
+    manifest.sort(key=lambda item: str(item["path"]))
+    return _digest(
+        {"identity": identity, "files": manifest}
+    )
+
+
+def _validate_review_output(
+    plan: AuthorityExecutionPlan,
+    output: dict[str, Any],
+) -> tuple[str, str, str]:
+    required = {
+        "schema_version", "review_id", "review_attempt_id",
+        "reviewer_registration", "reviewer_qualification",
+        "reviewer_independence_identity", "project_id", "charter_revision",
+        "workflow_id", "task_id", "author_attempt_id", "artifact_identity",
+        "artifact_digest", "evidence_digest", "review_criteria_version",
+        "review_criteria_digest", "review_disposition", "findings",
+        "failed_criteria", "required_repairs", "timestamp",
+    }
+    if set(output) != required:
+        raise PermissionError("structured review result fields are invalid")
+    disposition = output.get("review_disposition")
+    if disposition not in {
+        "ACCEPTED", "REPAIR_REQUIRED", "REJECTED", "INDETERMINATE"
+    }:
+        raise PermissionError("structured review disposition is invalid")
+    if (
+        output.get("schema_version") != 1
+        or output.get("review_attempt_id") != plan.authority_attempt_id
+        or output.get("reviewer_registration") != plan.registration_id
+        or output.get("reviewer_qualification") != plan.qualification_id
+        or output.get("project_id") != plan.project_id
+        or output.get("charter_revision") != plan.charter_revision
+        or output.get("workflow_id") != plan.workflow_id
+        or output.get("task_id") != plan.task_id.split(":review:r", 1)[0]
+        or output.get("author_attempt_id") != plan.author_attempt_id
+        or output.get("artifact_digest") != plan.artifact_revision_digest
+        or output.get("review_criteria_version") != "keeper-review-v1"
+        or output.get("review_criteria_digest") != plan.review_criteria_digest
+        or not isinstance(output.get("findings"), list)
+        or not isinstance(output.get("failed_criteria"), list)
+        or not isinstance(output.get("required_repairs"), list)
+    ):
+        raise PermissionError("structured review result binding is invalid")
+    return str(disposition), _digest(output), str(output["author_attempt_id"])

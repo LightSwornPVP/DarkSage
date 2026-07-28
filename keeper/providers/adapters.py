@@ -1106,6 +1106,40 @@ def _domain_schema(role: str) -> dict[str, Any]:
             },
         }
         required.append("findings")
+    if role == "reviewer":
+        review_fields: dict[str, Any] = {
+            "schema_version": {"type": "integer", "const": 1},
+            "review_id": {"type": "string"},
+            "review_attempt_id": {"type": "string"},
+            "reviewer_registration": {"type": "string"},
+            "reviewer_qualification": {"type": "string"},
+            "reviewer_independence_identity": {"type": "string"},
+            "project_id": {"type": "string"},
+            "charter_revision": {"type": "integer"},
+            "workflow_id": {"type": "string"},
+            "task_id": {"type": "string"},
+            "author_attempt_id": {"type": "string"},
+            "artifact_identity": {"type": "string"},
+            "artifact_digest": {"type": "string"},
+            "evidence_digest": {"type": "string"},
+            "review_criteria_version": {"type": "string", "const": "keeper-review-v1"},
+            "review_criteria_digest": {"type": "string"},
+            "review_disposition": {
+                "type": "string",
+                "enum": [
+                    "ACCEPTED", "REPAIR_REQUIRED", "REJECTED", "INDETERMINATE"
+                ],
+            },
+            "failed_criteria": {"type": "array", "items": {"type": "string"}},
+            "required_repairs": {"type": "array", "items": {"type": "string"}},
+            "timestamp": {"type": "string"},
+        }
+        properties.update(review_fields)
+        required.extend(review_fields)
+        required.remove("status")
+        required.remove("files_changed")
+        properties.pop("status")
+        properties.pop("files_changed")
     if role == "post_repair_reviewer":
         properties["dispositions"] = {
             "type": "array",
