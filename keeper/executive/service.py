@@ -12,34 +12,66 @@ from keeper.executive.authority_gateway import (
 from keeper.executive.charters import CharterService
 from keeper.executive.founder_auth import ProductionFounderAuthenticator
 from keeper.executive.intake import ConversationIntake, IntakeResult
-from keeper.executive.models import MemoryRecord, ProjectCharter, ProjectRecord, utc_now
-from keeper.executive.repository import ExecutiveRepository, new_id
+from keeper.executive.models import (
+    ApprovalRecord,
+    FounderApprovalChallenge,
+    FounderApprovalEvent,
+    MemoryRecord,
+    ProjectCharter,
+    ProjectRecord,
+    utc_now,
+)
+from keeper.executive.enums import FounderApprovalIntent
+from keeper.executive.founder_auth import ProductionApprovalConfirmation
+from keeper.executive.repository import ProductionExecutiveRepository, new_id
 from keeper.executive.runtime import ExecutiveRuntime
 from keeper.executive.surfaces import ProjectStatusView, StatusSurface
 
 
 class KeeperExecutive:
-    """Conversation-first application facade for future desktop clients."""
+    """Narrow production facade; trusted repository state is never exposed."""
+
+    __repository: ProductionExecutiveRepository
+    __charters: CharterService
+    __intake: ConversationIntake
+    __sealed: bool
+    __slots__ = ("__repository", "__charters", "__intake", "__sealed")
 
     def __init__(self, database: Path) -> None:
+        object.__setattr__(self, "_KeeperExecutive__sealed", False)
         store = KeeperStore(database)
         store.migrate()
         authenticator = ProductionFounderAuthenticator(
             database.parent / "founder-auth" / "proof-key.dpapi"
         )
-        self.repository = ExecutiveRepository(
-            store, founder_authenticator=authenticator
+        repository = ProductionExecutiveRepository(store, authenticator)
+        object.__setattr__(self, "_KeeperExecutive__repository", repository)
+        object.__setattr__(
+            self,
+            "_KeeperExecutive__charters",
+            CharterService.production(repository, authenticator),
         )
-        self.charters = CharterService.production(
-            self.repository, authenticator
+        object.__setattr__(
+            self, "_KeeperExecutive__intake", ConversationIntake()
         )
-        self.intake = ConversationIntake()
+        object.__setattr__(self, "_KeeperExecutive__sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_KeeperExecutive__sealed", False):
+            raise AttributeError("KeeperExecutive production composition is immutable")
+        object.__setattr__(self, name, value)
+
+    def _trusted_repository(self) -> ProductionExecutiveRepository:
+        repository = self.__repository
+        if type(repository) is not ProductionExecutiveRepository:
+            raise RuntimeError("production Executive repository composition is invalid")
+        return repository
 
     def begin(self, message: str) -> tuple[ProjectRecord, IntakeResult]:
-        result = self.intake.extract(message)
-        project = self.charters.create_project(result)
+        result = self.__intake.extract(message)
+        project = self.__charters.create_project(result)
         interaction_id = new_id("interaction")
-        self.repository.save_conversation(
+        self._trusted_repository().save_conversation(
             interaction_id,
             {
                 "interaction_id": interaction_id,
@@ -50,7 +82,7 @@ class KeeperExecutive:
             },
         )
         for field_name, item in result.fields.items():
-            self.repository.insert_memory(
+            self._trusted_repository().insert_memory(
                 MemoryRecord(
                     new_id("memory"),
                     project.project_id,
@@ -88,10 +120,40 @@ class KeeperExecutive:
             if founder_revisions
             else intake
         )
-        return self.charters.draft(self.repository.project(project_id), revised)
+        return self.__charters.draft(self._trusted_repository().project(project_id), revised)
+
+    def propose_charter(self, charter: ProjectCharter) -> ProjectCharter:
+        return self.__charters.propose(charter)
+
+    def request_charter_approval(
+        self, charter: ProjectCharter
+    ) -> FounderApprovalChallenge:
+        return self.__charters.request_approval(charter)
+
+    def authenticate_founder(
+        self, challenge: FounderApprovalChallenge
+    ) -> ProductionApprovalConfirmation:
+        confirmation = self.__charters.authenticate(challenge)
+        if type(confirmation) is not ProductionApprovalConfirmation:
+            raise RuntimeError("production Founder confirmation type is invalid")
+        return confirmation
+
+    def confirm_charter_approval(
+        self,
+        challenge_id: str,
+        confirmation: ProductionApprovalConfirmation,
+    ) -> tuple[ProjectCharter, ApprovalRecord, FounderApprovalEvent]:
+        return self.__charters.confirm_approval(
+            challenge_id,
+            intent=FounderApprovalIntent.APPROVE_CHARTER,
+            confirmation=confirmation,
+        )
+
+    def activate_charter(self, charter: ProjectCharter) -> ProjectRecord:
+        return self.__charters.activate(charter)
 
     def status(self, project_id: str) -> ProjectStatusView:
-        return StatusSurface(self.repository).project(project_id)
+        return StatusSurface(self._trusted_repository()).project(project_id)
 
     def production_runtime(
         self,
@@ -111,4 +173,4 @@ class KeeperExecutive:
             provider_bindings,
             exchange_root,
         )
-        return ExecutiveRuntime.production(self.repository, gateway)
+        return ExecutiveRuntime.production(self._trusted_repository(), gateway)

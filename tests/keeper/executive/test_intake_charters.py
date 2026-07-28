@@ -11,7 +11,7 @@ from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import ProjectCharter, ProjectRecord
 from keeper.executive.models import utc_now
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import TestExecutiveRepository
 from keeper.executive.surfaces import StatusSurface
 
 
@@ -19,9 +19,7 @@ def service(tmp_path: Path) -> CharterService:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
     authenticator = TestFounderAuthenticator()
-    repository = ExecutiveRepository(
-        store, founder_authenticator=authenticator
-    )
+    repository = TestExecutiveRepository(store, authenticator)
     return CharterService.for_test(repository, authenticator)
 
 

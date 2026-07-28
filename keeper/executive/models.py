@@ -94,6 +94,12 @@ class AuthorityEnvelope(StrictRecord):
             len(self.currency) != 3 or not self.currency.isalpha()
         ):
             raise ValueError("currency must be a three-letter code")
+        for value in (
+            *self.allowed_actions,
+            *self.separately_approvable_actions,
+            *self.denied_actions,
+        ):
+            ActionCategory(value)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> AuthorityEnvelope:
@@ -101,9 +107,12 @@ class AuthorityEnvelope(StrictRecord):
         normalized.setdefault("currency", None)
         data = cls._validated_data(normalized)
         for key in (
-            "allowed_actions",
-            "separately_approvable_actions",
-            "denied_actions",
+            "allowed_actions", "separately_approvable_actions", "denied_actions"
+        ):
+            data[key] = tuple(
+                ActionCategory(item).value for item in data[key]
+            )
+        for key in (
             "allowed_workspaces",
             "allowed_tools",
             "allowed_providers",
@@ -192,6 +201,8 @@ class ProjectCharter(StrictRecord):
     founder_approval_event_id: str | None = None
     founder_approval_event_digest: str | None = None
     founder_authenticated_session_id: str | None = None
+    founder_authorization_capability: dict[str, Any] | None = None
+    founder_authorization_capability_digest: str | None = None
 
     FIELDS = frozenset(
         {
@@ -208,6 +219,8 @@ class ProjectCharter(StrictRecord):
             "created_at", "updated_at",
             "founder_approval_event_id", "founder_approval_event_digest",
             "founder_authenticated_session_id",
+            "founder_authorization_capability",
+            "founder_authorization_capability_digest",
         }
     )
     TUPLE_FIELDS = (
@@ -226,9 +239,14 @@ class ProjectCharter(StrictRecord):
         validate_timestamp(self.created_at, "created_at")
         validate_timestamp(self.updated_at, "updated_at")
         if self.status in {CharterStatus.APPROVED, CharterStatus.ACTIVE} and (
-            not self.founder_approval_identity or not self.founder_approval_record_id
+            not self.founder_approval_identity
+            or not self.founder_approval_record_id
+            or not isinstance(self.founder_authorization_capability, dict)
+            or not self.founder_authorization_capability_digest
         ):
-            raise ValueError("approved charters require a Founder approval record")
+            raise ValueError(
+                "approved charters require a Founder approval and capability"
+            )
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ProjectCharter:
@@ -236,6 +254,8 @@ class ProjectCharter(StrictRecord):
         normalized.setdefault("founder_approval_event_id", None)
         normalized.setdefault("founder_approval_event_digest", None)
         normalized.setdefault("founder_authenticated_session_id", None)
+        normalized.setdefault("founder_authorization_capability", None)
+        normalized.setdefault("founder_authorization_capability_digest", None)
         data = cls._validated_data(normalized)
         for key in cls.TUPLE_FIELDS:
             data[key] = tuple(data[key])
@@ -290,6 +310,10 @@ class ApprovalRecord(StrictRecord):
     def from_dict(cls, value: dict[str, Any]) -> ApprovalRecord:
         data = cls._validated_data(value)
         data["scope"] = tuple(data["scope"])
+        if data["action_category"] is not None:
+            data["action_category"] = ActionCategory(
+                data["action_category"]
+            ).value
         return cls(**data)
 
 
@@ -404,7 +428,7 @@ class FounderApprovalEvent(StrictRecord):
             or not self.authenticated_session_id
             or not self.machine_identity
             or self.application_identity != "KEEPER_EXECUTIVE"
-            or self.proof_version != 1
+            or self.proof_version != 2
             or not self.source_user_interaction_id
         ):
             raise ValueError("Founder approval event is invalid")
@@ -605,6 +629,7 @@ class ProposedAction(StrictRecord):
         }.items():
             normalized.setdefault(key, default)
         data = cls._validated_data(normalized)
+        data["category"] = ActionCategory(data["category"]).value
         data["scope"] = tuple(data["scope"])
         data["effect_classes"] = tuple(data["effect_classes"])
         return cls(**data)
@@ -768,6 +793,9 @@ class ExecutiveTask(StrictRecord):
         }.items():
             normalized.setdefault(key, default)
         data = cls._validated_data(normalized)
+        data["authority_category"] = ActionCategory(
+            data["authority_category"]
+        ).value
         for key in cls.TUPLE_FIELDS:
             data[key] = tuple(data[key])
         effects = data["action_effects"]

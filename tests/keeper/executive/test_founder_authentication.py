@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -10,6 +11,7 @@ from keeper.executive.charters import CharterService
 from keeper.executive.enums import ActionCategory, ApprovalKind, FounderApprovalIntent
 from keeper.executive.founder_auth import (
     ProductionFounderAuthenticator,
+    TestApprovalConfirmation,
     TestFounderAuthenticator,
 )
 from keeper.executive.models import (
@@ -17,7 +19,11 @@ from keeper.executive.models import (
     ProjectCharter,
     ProposedAction,
 )
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import (
+    ExecutiveRepository,
+    ProductionExecutiveRepository,
+    TestExecutiveRepository,
+)
 from tests.keeper.executive.test_intake_charters import approved_project
 
 
@@ -42,14 +48,8 @@ def test_challenge_id_or_missing_authenticator_result_cannot_confirm(
             challenge.challenge_id,
             intent=FounderApprovalIntent.APPROVE_CHARTER,
         )
-    repository = ExecutiveRepository(KeeperStore(tmp_path / "keeper.db"))
-    confirmation = charter_service.authenticate(challenge)
-    with pytest.raises(PermissionError, match="not configured"):
-        repository.confirm_charter_approval(
-            challenge_id=challenge.challenge_id,
-            confirmation=confirmation,
-            explicit_intent=FounderApprovalIntent.APPROVE_CHARTER,
-        )
+    with pytest.raises(TypeError, match="ProductionExecutiveRepository"):
+        ExecutiveRepository(KeeperStore(tmp_path / "keeper.db"))
 
 
 @pytest.mark.parametrize(
@@ -72,7 +72,8 @@ def test_modified_challenge_response_is_rejected(
     charter_service, proposed = _proposed(tmp_path)
     challenge = charter_service.request_approval(proposed)
     confirmation = charter_service.authenticate(challenge)
-    modified = replace(confirmation, **{field: value})
+    assert isinstance(confirmation, TestApprovalConfirmation)
+    modified = replace(confirmation, **cast(Any, {field: value}))
     with pytest.raises(PermissionError, match="proof|match"):
         charter_service.confirm_approval(
             challenge.challenge_id,
@@ -255,32 +256,28 @@ def test_production_and_test_authenticators_are_structurally_sealed(
     test_authenticator = TestFounderAuthenticator()
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
-    test_repository = ExecutiveRepository(
-        store, founder_authenticator=test_authenticator
-    )
+    test_repository = TestExecutiveRepository(store, test_authenticator)
     with pytest.raises(TypeError, match="composition"):
         CharterService.production(test_repository, test_authenticator)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="not trusted"):
-        ExecutiveRepository(store, founder_authenticator=lambda _: None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="ProductionExecutiveRepository"):
+        ExecutiveRepository(store, founder_authenticator=lambda _: None)
     test_service = CharterService.for_test(
         test_repository, test_authenticator
     )
     with pytest.raises(AttributeError, match="immutable"):
-        test_service._CharterService__authenticator = test_authenticator  # type: ignore[attr-defined]
+        test_service._CharterService__authenticator = test_authenticator
     monkeypatch.setenv("KEEPER_FOUNDER_AUTH_BYPASS", "LOCAL_FOUNDER")
-    unconfigured = ExecutiveRepository(store)
     another_service, another_proposed = _proposed(tmp_path / "other")
     another_challenge = another_service.request_approval(another_proposed)
     test_confirmation = another_service.authenticate(another_challenge)
-    with pytest.raises(PermissionError, match="not configured"):
-        unconfigured.register_founder_session(
-            challenge_id=another_challenge.challenge_id,
-            confirmation=test_confirmation,
-        )
 
     production = ProductionFounderAuthenticator(
         tmp_path / "production-proof-key.dpapi"
     )
+    with pytest.raises(TypeError, match="production authenticator"):
+        ProductionExecutiveRepository(store, test_authenticator)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="test authenticator"):
+        TestExecutiveRepository(store, production)  # type: ignore[arg-type]
     with pytest.raises(PermissionError, match="non-production"):
         production.verify(another_challenge, test_confirmation)
 

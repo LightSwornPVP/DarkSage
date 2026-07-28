@@ -269,24 +269,12 @@ class AuthorityBackedSpecialistGateway:
         ):
             raise PermissionError("launch delegation identity is unavailable")
         authorization_generation = charter.revision
-        authorization_expires_at = (
-            datetime.now(UTC) + timedelta(minutes=15)
-        ).isoformat()
+        capability = charter.founder_authorization_capability
+        capability_digest = charter.founder_authorization_capability_digest
+        if not isinstance(capability, dict) or not capability_digest:
+            raise PermissionError("Founder authorization capability is unavailable")
         authorization_result = self._authority.authorize_project_launch(
-            project_id=task.project_id,
-            charter_id=task.charter_id,
-            charter_revision=task.charter_revision,
-            delegation_id=charter.founder_approval_record_id,
-            founder_approval_event_id=charter.founder_approval_event_id,
-            founder_approval_event_digest=(
-                charter.founder_approval_event_digest
-            ),
-            founder_authenticated_session_id=(
-                charter.founder_authenticated_session_id
-            ),
-            founder_principal_sid=charter.founder_approval_identity,
-            authorization_generation=authorization_generation,
-            expires_at=authorization_expires_at,
+            founder_capability=capability,
         )
         launch_authorization = authorization_result.get("authorization")
         if (
@@ -310,10 +298,17 @@ class AuthorityBackedSpecialistGateway:
             != charter.founder_approval_identity
             or launch_authorization.get("authorization_generation")
             != authorization_generation
+            or launch_authorization.get("founder_capability_id")
+            != capability.get("capability_id")
+            or launch_authorization.get("founder_capability_digest")
+            != capability_digest
         ):
             raise PermissionError(
                 "Authority project launch authorization is invalid"
             )
+        authorization_expires_at = str(
+            launch_authorization["expires_at"]
+        )
         prompt = {
             "global_brief": GuidanceBuilder.global_brief(charter).to_dict(),
             "task_guidance": GuidanceBuilder.task_guidance(

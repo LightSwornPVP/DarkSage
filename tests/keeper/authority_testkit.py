@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from keeper.authority_service.client import AuthorityServiceClient
 from keeper.authority_service.core import (
@@ -20,8 +20,85 @@ from keeper.authority_service.core import (
     QualificationObservation,
 )
 from keeper.authority_service.protocol import Request
+from keeper.executive.founder_capability import (
+    FounderCapabilityClaims,
+    TestFounderCapabilityIssuer,
+    TestFounderCapabilityVerifier,
+)
 from keeper.providers.adapters import _domain_schema
 from keeper.providers.adapters import create_provider_registration
+
+
+def _text_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def make_test_founder_capability(
+    project_id: str,
+    generation: int = 1,
+    suffix: str = "one",
+    *,
+    charter_id: str | None = None,
+    claim_overrides: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    event_id = f"event:{project_id}:{suffix}"
+    approval_id = f"approval:{project_id}:{suffix}"
+    challenge_id = f"challenge:{project_id}:{suffix}"
+    claim_values: dict[str, object] = {
+        "capability_id": f"capability:{project_id}:{suffix}",
+        "project_id": project_id,
+        "charter_id": charter_id or f"charter-{generation}",
+        "charter_revision": generation,
+        "authorization_kind": "PROJECT_LAUNCH",
+        "protected_action": "DELEGATE_CHARTER",
+        "action_digest": _text_digest(f"action:{project_id}:{suffix}"),
+        "approval_digest": _text_digest(f"approval-digest:{project_id}:{suffix}"),
+        "approval_event_digest": _text_digest(event_id),
+        "founder_principal_sid": "S-1-5-21-KEEPER-TEST",
+        "founder_authenticated_session_id": f"session:{project_id}:{suffix}",
+        "approval_event_id": event_id,
+        "approval_record_id": approval_id,
+        "challenge_id": challenge_id,
+        "challenge_proof_digest": _text_digest(f"proof:{project_id}:{suffix}"),
+        "authorization_generation": generation,
+        "revocation_epoch": generation - 1,
+        "issued_at": _now(),
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "usage": "ONE_TIME_GENERATION",
+        "machine_identity": "keeper-test-machine",
+        "application_identity": "KEEPER_EXECUTIVE",
+    }
+    if claim_overrides:
+        claim_values.update(claim_overrides)
+    confirmation_unsigned: dict[str, object] = {
+        "session_id": claim_values["founder_authenticated_session_id"],
+        "principal_sid": claim_values["founder_principal_sid"],
+        "account_name": "KEEPER-TEST\\Founder",
+        "authentication_method": "TEST_CHALLENGE_HMAC",
+        "authenticated_at": claim_values["issued_at"],
+        "expires_at": claim_values["expires_at"],
+        "machine_identity": claim_values["machine_identity"],
+        "application_identity": claim_values["application_identity"],
+        "process_identity": "test-authority-capability-fixture",
+        "challenge_id": claim_values["challenge_id"],
+        "challenge_nonce": f"nonce:{project_id}:{suffix}",
+        "project_id": claim_values["project_id"],
+        "charter_id": claim_values["charter_id"],
+        "charter_revision": claim_values["charter_revision"],
+        "approval_action": "APPROVE_CHARTER",
+        "bound_digest": claim_values["action_digest"],
+        "source_user_interaction_id": f"interaction:{project_id}:{suffix}",
+        "proof_version": 2,
+    }
+    issuer = TestFounderCapabilityIssuer()
+    proof = issuer.sign_confirmation(confirmation_unsigned)
+    if not claim_overrides or "challenge_proof_digest" not in claim_overrides:
+        claim_values["challenge_proof_digest"] = hashlib.sha256(
+            proof.encode("ascii")
+        ).hexdigest()
+    claims = FounderCapabilityClaims(**cast(Any, claim_values))
+    confirmation = {**confirmation_unsigned, "proof": proof}
+    return issuer.issue(claims, confirmation).to_dict()
 
 
 class _TestObserver:
@@ -269,8 +346,11 @@ class TestAuthorityClient(AuthorityServiceClient):
         root = data_directory.resolve()
         observer = _TestObserver(root / "test-authority-exchange")
         self.core = AuthorityServiceCore(
-            root / "test-authority-service", observer=observer
+            root / "test-authority-service",
+            observer=observer,
+            founder_capability_verifier=TestFounderCapabilityVerifier(),
         )
+        self.__launch_lock = threading.Lock()
         super().__init__(
             test_transport=lambda request: self.core.dispatch(
                 request, "S-1-5-21-KEEPER-TEST"
@@ -283,26 +363,34 @@ class TestAuthorityClient(AuthorityServiceClient):
     def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
         if "launch_authorization_id" not in identity:
             project_id = f"test-project:{identity['keeper_run_id']}"
-            expires_at = "2099-01-01T00:00:00+00:00"
-            authorized = self.authorize_project_launch(
-                project_id=project_id,
-                charter_id="test-charter",
-                charter_revision=1,
-                delegation_id="test-delegation",
-                founder_approval_event_id=f"test-event:{project_id}",
-                founder_approval_event_digest=hashlib.sha256(
-                    f"test-event:{project_id}".encode()
-                ).hexdigest(),
-                founder_authenticated_session_id="test-session",
-                founder_principal_sid="S-1-5-21-KEEPER-TEST",
-                authorization_generation=1,
-                expires_at=expires_at,
-            )["authorization"]
+            authorization_id = (
+                f"launch-authorization:{project_id}:generation:1"
+            )
+            with self.__launch_lock:
+                authorized = self.core.store.get(
+                    "launch_authorizations", authorization_id
+                )
+                if authorized is None:
+                    response = self.authorize_project_launch(
+                        founder_capability=make_test_founder_capability(
+                            project_id,
+                            1,
+                            "implicit",
+                            charter_id="test-charter",
+                        )
+                    )
+                    authorized = cast(
+                        dict[str, Any], response["authorization"]
+                    )
+                elif authorized.get("service_state") != "ACTIVE":
+                    raise PermissionError(
+                        "implicit test launch authorization is not active"
+                    )
             identity.update(
                 {
                     "launch_authorization_id": authorized["id"],
                     "authorization_generation": 1,
-                    "delegation_id": "test-delegation",
+                    "delegation_id": authorized["delegation_id"],
                     "founder_approval_event_id": authorized[
                         "founder_approval_event_id"
                     ],

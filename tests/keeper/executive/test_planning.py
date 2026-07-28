@@ -7,7 +7,7 @@ from keeper.executive.authority import AuthorityEvaluator
 from keeper.executive.enums import TaskStatus
 from keeper.executive.models import SpecialistProfile
 from keeper.executive.models import utc_now
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import TestExecutiveRepository
 from keeper.executive.planning import TaskReadiness, WorkflowPlanner
 from tests.keeper.executive.test_intake_charters import approved_project, explicitly_approve
 
@@ -45,7 +45,7 @@ def test_research_workflow_is_not_software_pipeline(tmp_path: Path) -> None:
     store.migrate()
     authenticator = TestFounderAuthenticator()
     service = CharterService.for_test(
-        ExecutiveRepository(store, founder_authenticator=authenticator),
+        TestExecutiveRepository(store, authenticator),
         authenticator,
     )
     intake = ConversationIntake.revise(
@@ -126,10 +126,10 @@ def test_stale_charter_task_cannot_become_ready(tmp_path: Path) -> None:
     assert "CHARTER_REVISION_REQUIRED" in readiness.reasons[-1]
 
 
-def charter_service_repository(tmp_path: Path) -> ExecutiveRepository:
+def charter_service_repository(tmp_path: Path) -> TestExecutiveRepository:
     from keeper.app.storage import KeeperStore
-    from keeper.executive.repository import ExecutiveRepository
+    from keeper.executive.founder_auth import TestFounderAuthenticator
 
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
-    return ExecutiveRepository(store)
+    return TestExecutiveRepository(store, TestFounderAuthenticator())

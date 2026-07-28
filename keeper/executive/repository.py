@@ -34,6 +34,11 @@ from keeper.executive.models import (
     WorkflowRecord,
     utc_now,
 )
+from keeper.executive.founder_capability import (
+    FounderAuthorizationCapability,
+    FounderCapabilityClaims,
+    capability_digest,
+)
 from keeper.executive.founder_auth import (
     ApprovalConfirmation,
     FounderAuthenticator,
@@ -45,21 +50,65 @@ from keeper.executive.state import PROJECT_TRANSITIONS, TASK_TRANSITIONS
 
 
 class ExecutiveRepository:
-    __slots__ = ("store", "__founder_authenticator")
+    __slots__ = (
+        "__store", "__founder_authenticator", "__mode", "__sealed",
+    )
+    __store: KeeperStore
+    __founder_authenticator: FounderAuthenticator
+    __mode: str
+    __sealed: bool
 
-    def __init__(
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError(
+            "use ProductionExecutiveRepository or TestExecutiveRepository"
+        )
+
+    def _initialize(
         self,
         store: KeeperStore,
-        *,
-        founder_authenticator: FounderAuthenticator | None = None,
+        founder_authenticator: FounderAuthenticator,
+        mode: str,
     ) -> None:
-        if founder_authenticator is not None and type(founder_authenticator) not in {
-            ProductionFounderAuthenticator,
-            TestFounderAuthenticator,
-        }:
-            raise TypeError("Founder authenticator type is not trusted")
-        self.store = store
-        self.__founder_authenticator = founder_authenticator
+        if getattr(self, "_ExecutiveRepository__sealed", False):
+            raise AttributeError("Executive repository is already initialized")
+        object.__setattr__(self, "_ExecutiveRepository__sealed", False)
+        store.bind_executive_repository_mode(mode)
+        object.__setattr__(self, "_ExecutiveRepository__store", store)
+        object.__setattr__(
+            self,
+            "_ExecutiveRepository__founder_authenticator",
+            founder_authenticator,
+        )
+        object.__setattr__(self, "_ExecutiveRepository__mode", mode)
+        object.__setattr__(self, "_ExecutiveRepository__sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_ExecutiveRepository__sealed", False):
+            raise AttributeError("Executive repository composition is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def store(self) -> KeeperStore:
+        if type(self) is not TestExecutiveRepository:
+            raise AttributeError(
+                "production repository does not expose mutable storage"
+            )
+        return self.__store
+
+    def _trusted_authenticator(self) -> FounderAuthenticator:
+        authenticator = self.__founder_authenticator
+        expected = (
+            ProductionFounderAuthenticator
+            if type(self) is ProductionExecutiveRepository
+            else TestFounderAuthenticator
+            if type(self) is TestExecutiveRepository
+            else None
+        )
+        if expected is None or type(authenticator) is not expected:
+            raise PermissionError(
+                "repository Founder authenticator composition is invalid"
+            )
+        return authenticator
 
     def save_project(
         self,
@@ -67,7 +116,7 @@ class ExecutiveRepository:
         *,
         expected: ProjectRecord | None = None,
     ) -> None:
-        existing = self.store.get("executive_projects", project.project_id)
+        existing = self.__store.get("executive_projects", project.project_id)
         target = ExecutiveState(project.state)
         if existing is None:
             if target not in {
@@ -120,11 +169,11 @@ class ExecutiveRepository:
         *,
         expected: ProjectCharter | None = None,
     ) -> None:
-        existing = self.store.get("project_charters", charter.charter_id)
+        existing = self.__store.get("project_charters", charter.charter_id)
         if existing is None:
             if charter.status != CharterStatus.DRAFT:
                 raise PermissionError("new charters must begin as drafts")
-            if self.store.get("executive_projects", charter.project_id) is None:
+            if self.__store.get("executive_projects", charter.project_id) is None:
                 raise PermissionError("charter project does not exist")
             self._insert_trusted_entity(
                 "project_charters", charter.charter_id, charter.to_dict()
@@ -177,7 +226,7 @@ class ExecutiveRepository:
     ) -> FounderApprovalChallenge:
         """Create a one-use challenge for explicit local-Founder confirmation."""
         requested = datetime.now(UTC)
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             charter_payload, _ = self._entity_in_transaction(
                 connection, "project_charters", charter_id
@@ -224,10 +273,8 @@ class ExecutiveRepository:
         confirmation: ApprovalConfirmation,
     ) -> FounderAuthenticatedSession:
         """Verify a separately produced proof and durably register its session."""
-        authenticator = self.__founder_authenticator
-        if authenticator is None:
-            raise PermissionError("Founder authentication is not configured")
-        with self.store.connect() as connection:
+        authenticator = self._trusted_authenticator()
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             challenge_payload, _ = self._entity_in_transaction(
                 connection,
@@ -255,7 +302,7 @@ class ExecutiveRepository:
 
     def revoke_founder_session(self, session_id: str) -> None:
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             payload, payload_hash = self._entity_in_transaction(
                 connection,
@@ -309,11 +356,9 @@ class ExecutiveRepository:
             or confirmation is None
         ):
             raise PermissionError("explicit charter approval intent is required")
-        authenticator = self.__founder_authenticator
-        if authenticator is None:
-            raise PermissionError("Founder authentication is not configured")
+        authenticator = self._trusted_authenticator()
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             challenge_payload, challenge_hash = self._entity_in_transaction(
                 connection,
@@ -440,18 +485,8 @@ class ExecutiveRepository:
                 charter_digest,
                 event_id,
             )
-            approved = replace(
-                charter,
-                status=CharterStatus.APPROVED.value,
-                founder_approval_identity=session.principal_sid,
-                founder_approval_record_id=approval_id,
-                founder_approval_event_id=event_id,
-                founder_approval_event_digest=canonical_digest(
-                    event.to_dict()
-                ),
-                founder_authenticated_session_id=session.session_id,
-                updated_at=timestamp,
-            )
+            event_digest = canonical_digest(event.to_dict())
+            approval_digest = canonical_digest(approval.to_dict())
             self._insert_entity(
                 connection,
                 "executive_founder_approval_events",
@@ -471,13 +506,6 @@ class ExecutiveRepository:
                 charter_id,
                 "approval",
                 approval_id,
-            )
-            self._update_entity_cas(
-                connection,
-                "project_charters",
-                charter_id,
-                charter_hash,
-                approved.to_dict(),
             )
             consumed_challenge = replace(
                 challenge,
@@ -501,6 +529,109 @@ class ExecutiveRepository:
                 session_hash,
                 consumed_session.to_dict(),
             )
+            # Re-read the complete durable approval chain before the
+            # purpose-bound issuer is allowed to create a capability.
+            durable_event = FounderApprovalEvent.from_dict(
+                self._entity_in_transaction(
+                    connection, "executive_founder_approval_events", event_id
+                )[0]
+            )
+            durable_approval = ApprovalRecord.from_dict(
+                self._entity_in_transaction(
+                    connection, "executive_approvals", approval_id
+                )[0]
+            )
+            durable_challenge = FounderApprovalChallenge.from_dict(
+                self._entity_in_transaction(
+                    connection,
+                    "executive_founder_approval_challenges",
+                    challenge.challenge_id,
+                )[0]
+            )
+            durable_session = FounderAuthenticatedSession.from_dict(
+                self._entity_in_transaction(
+                    connection,
+                    "executive_founder_authenticated_sessions",
+                    session.session_id,
+                )[0]
+            )
+            if (
+                durable_event != event
+                or durable_approval != approval
+                or durable_challenge != consumed_challenge
+                or durable_session != consumed_session
+            ):
+                raise PermissionError(
+                    "durable Founder approval state changed before capability issue"
+                )
+            capability_expiration = datetime.fromisoformat(timestamp) + timedelta(
+                minutes=15
+            )
+            if charter.authority_envelope.expires_at is not None:
+                capability_expiration = min(
+                    capability_expiration,
+                    datetime.fromisoformat(
+                        charter.authority_envelope.expires_at
+                    ),
+                )
+            if capability_expiration <= datetime.fromisoformat(timestamp):
+                raise PermissionError("Founder capability expiration is stale")
+            capability = authenticator.issue_authorization_capability(
+                FounderCapabilityClaims(
+                    capability_id=new_id("founder-capability"),
+                    project_id=project_id,
+                    charter_id=charter_id,
+                    charter_revision=charter_revision,
+                    authorization_kind="PROJECT_LAUNCH",
+                    protected_action="DELEGATE_CHARTER",
+                    action_digest=charter_digest,
+                    approval_digest=approval_digest,
+                    approval_event_digest=event_digest,
+                    founder_principal_sid=session.principal_sid,
+                    founder_authenticated_session_id=session.session_id,
+                    approval_event_id=event_id,
+                    approval_record_id=approval_id,
+                    challenge_id=challenge.challenge_id,
+                    challenge_proof_digest=event.challenge_response_digest,
+                    authorization_generation=charter_revision,
+                    revocation_epoch=charter_revision - 1,
+                    issued_at=timestamp,
+                    expires_at=capability_expiration.isoformat(),
+                    usage="ONE_TIME_GENERATION",
+                    machine_identity=session.machine_identity,
+                    application_identity=session.application_identity,
+                ),
+                confirmation,
+            )
+            capability_value = capability.to_dict()
+            capability_value_digest = capability_digest(capability)
+            self._insert_entity(
+                connection,
+                "executive_founder_authorization_capabilities",
+                capability.capability_id,
+                capability_value,
+            )
+            approved = replace(
+                charter,
+                status=CharterStatus.APPROVED.value,
+                founder_approval_identity=session.principal_sid,
+                founder_approval_record_id=approval_id,
+                founder_approval_event_id=event_id,
+                founder_approval_event_digest=event_digest,
+                founder_authenticated_session_id=session.session_id,
+                founder_authorization_capability=capability_value,
+                founder_authorization_capability_digest=(
+                    capability_value_digest
+                ),
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "project_charters",
+                charter_id,
+                charter_hash,
+                approved.to_dict(),
+            )
         return approved, approval, event
 
     def activate_charter(
@@ -512,7 +643,7 @@ class ExecutiveRepository:
     ) -> tuple[ProjectRecord, ProjectCharter, ApprovalRecord]:
         """Reload and activate one exactly approved durable charter revision."""
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             project_payload, project_hash = self._entity_in_transaction(
                 connection, "executive_projects", project_id
@@ -565,12 +696,32 @@ class ExecutiveRepository:
                 "executive_founder_authenticated_sessions",
                 event.authenticated_session_id,
             )
+            capability_value = charter.founder_authorization_capability
+            if not isinstance(capability_value, dict):
+                raise PermissionError("Founder authorization capability is missing")
+            capability = self._trusted_authenticator().verify_authorization_capability(
+                capability_value
+            )
+            stored_capability, _ = self._entity_in_transaction(
+                connection,
+                "executive_founder_authorization_capabilities",
+                capability.capability_id,
+            )
+            if (
+                stored_capability != capability_value
+                or charter.founder_authorization_capability_digest
+                != capability_digest(capability)
+            ):
+                raise PermissionError(
+                    "Founder authorization capability storage is invalid"
+                )
             self._validate_charter_approval(
                 charter,
                 approval,
                 event,
                 FounderApprovalChallenge.from_dict(challenge_payload),
                 FounderAuthenticatedSession.from_dict(session_payload),
+                capability,
                 timestamp,
             )
             current_state = ExecutiveState(project.state)
@@ -613,7 +764,7 @@ class ExecutiveRepository:
     def charters(self, project_id: str) -> list[ProjectCharter]:
         values = [
             ProjectCharter.from_dict(item)
-            for item in self.store.list("project_charters")
+            for item in self.__store.list("project_charters")
             if item.get("project_id") == project_id
         ]
         return sorted(values, key=lambda item: item.revision)
@@ -636,7 +787,7 @@ class ExecutiveRepository:
     def workflows(self, project_id: str) -> list[WorkflowRecord]:
         return [
             WorkflowRecord.from_dict(item)
-            for item in self.store.list("executive_workflows")
+            for item in self.__store.list("executive_workflows")
             if item.get("project_id") == project_id
         ]
 
@@ -649,7 +800,7 @@ class ExecutiveRepository:
         from keeper.executive.authority import validate_durable_task_effects
 
         validate_durable_task_effects(task)
-        existing = self.store.get("executive_tasks", task.task_id)
+        existing = self.__store.get("executive_tasks", task.task_id)
         if existing is None:
             if task.status != TaskStatus.PROPOSED or task.revision != 1:
                 raise PermissionError(
@@ -704,7 +855,7 @@ class ExecutiveRepository:
         """Give one worker a durable attempt binding before Authority launch."""
         attempt_id = str(plan["authority_attempt_id"])
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task_payload, task_hash = self._entity_in_transaction(
                 connection, "executive_tasks", task_id
@@ -827,7 +978,7 @@ class ExecutiveRepository:
         attempt_state: str,
     ) -> ExecutiveTask:
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task_payload, task_hash = self._entity_in_transaction(
                 connection, "executive_tasks", task_id
@@ -880,7 +1031,7 @@ class ExecutiveRepository:
     ) -> ExecutiveTask:
         """Release local authority only when no Authority attempt was created."""
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task_payload, task_hash = self._entity_in_transaction(
                 connection, "executive_tasks", task_id
@@ -990,7 +1141,7 @@ class ExecutiveRepository:
     ) -> ExecutiveTask:
         """Import one authenticated Authority completion without reviving cancel."""
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task_payload, task_hash = self._entity_in_transaction(
                 connection, "executive_tasks", task_id
@@ -1204,7 +1355,7 @@ class ExecutiveRepository:
     ) -> ExecutiveTask:
         timestamp = utc_now()
         review_attempt_id = str(plan["authority_attempt_id"])
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task_payload, task_hash = self._entity_in_transaction(
                 connection, "executive_tasks", task_id
@@ -1286,7 +1437,7 @@ class ExecutiveRepository:
         expected_state: str,
         target_state: str,
     ) -> None:
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             payload, payload_hash = self._entity_in_transaction(
                 connection, "executive_reviews", review_attempt_id
@@ -1313,7 +1464,7 @@ class ExecutiveRepository:
         result: dict[str, Any],
     ) -> ExecutiveTask:
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task_payload, task_hash = self._entity_in_transaction(
                 connection, "executive_tasks", task_id
@@ -1546,14 +1697,14 @@ class ExecutiveRepository:
     def reviews(self, project_id: str) -> list[dict[str, Any]]:
         return [
             item
-            for item in self.store.list("executive_reviews")
+            for item in self.__store.list("executive_reviews")
             if item.get("project_id") == project_id
         ]
 
     def late_results(self, project_id: str) -> list[dict[str, Any]]:
         return [
             item
-            for item in self.store.list("executive_late_results")
+            for item in self.__store.list("executive_late_results")
             if item.get("project_id") == project_id
         ]
 
@@ -1562,7 +1713,7 @@ class ExecutiveRepository:
     ) -> tuple[ProjectRecord, tuple[str, ...]]:
         timestamp = utc_now()
         attempt_ids: list[str] = []
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             project_payload, project_hash = self._entity_in_transaction(
                 connection, "executive_projects", project_id
@@ -1632,7 +1783,7 @@ class ExecutiveRepository:
         """Persist revocation and invalidate every launch-capable local claim."""
         timestamp = utc_now()
         attempt_ids: list[str] = []
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             project_payload, project_hash = self._entity_in_transaction(
                 connection, "executive_projects", project_id
@@ -1717,7 +1868,7 @@ class ExecutiveRepository:
     def tasks(self, project_id: str) -> list[ExecutiveTask]:
         return [
             ExecutiveTask.from_dict(item)
-            for item in self.store.list("executive_tasks")
+            for item in self.__store.list("executive_tasks")
             if item.get("project_id") == project_id
         ]
 
@@ -1762,7 +1913,7 @@ class ExecutiveRepository:
         if kind is ApprovalKind.CHARTER_DURATION:
             raise PermissionError("action approval kind is invalid")
         requested = datetime.now(UTC)
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             charter_payload, _ = self._entity_in_transaction(
                 connection, "project_charters", charter_id
@@ -1827,11 +1978,9 @@ class ExecutiveRepository:
             or confirmation is None
         ):
             raise PermissionError("explicit action approval intent is required")
-        authenticator = self.__founder_authenticator
-        if authenticator is None:
-            raise PermissionError("Founder authentication is not configured")
+        authenticator = self._trusted_authenticator()
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             challenge_payload, challenge_hash = self._entity_in_transaction(
                 connection,
@@ -1995,7 +2144,7 @@ class ExecutiveRepository:
         if action.trusted_source != "DURABLE_WORKFLOW_TASK":
             raise PermissionError("caller-classified action facts are not consumable")
         timestamp = utc_now()
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             consumed, reservation_id = self._consume_action_authority_in_transaction(
                 connection,
@@ -2007,7 +2156,7 @@ class ExecutiveRepository:
         return consumed, reservation_id
 
     def mark_budget_boundary(self, reservation_id: str) -> None:
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             cursor = connection.execute(
                 "UPDATE executive_budget_reservations SET state='CROSSED' "
                 "WHERE reservation_id=? AND state='RESERVED'",
@@ -2017,7 +2166,7 @@ class ExecutiveRepository:
                 raise PermissionError("budget reservation is not crossable")
 
     def release_budget_reservation(self, reservation_id: str) -> None:
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             cursor = connection.execute(
                 "UPDATE executive_budget_reservations SET state='RELEASED' "
                 "WHERE reservation_id=? AND state='RESERVED'",
@@ -2031,7 +2180,7 @@ class ExecutiveRepository:
     def approvals(self, project_id: str, charter_revision: int | None = None) -> list[ApprovalRecord]:
         values = [
             ApprovalRecord.from_dict(item)
-            for item in self.store.list("executive_approvals")
+            for item in self.__store.list("executive_approvals")
             if item.get("project_id") == project_id
         ]
         return [
@@ -2044,7 +2193,7 @@ class ExecutiveRepository:
     ) -> list[FounderApprovalChallenge]:
         return [
             FounderApprovalChallenge.from_dict(item)
-            for item in self.store.list(
+            for item in self.__store.list(
                 "executive_founder_approval_challenges"
             )
             if item.get("project_id") == project_id
@@ -2103,6 +2252,10 @@ class ExecutiveRepository:
         self._insert_trusted_entity("project_memories", record.memory_id, record.to_dict())
         self._relate(record.project_id, "project", record.project_id, "memory", record.memory_id)
 
+    def memory(self, memory_id: str) -> MemoryRecord | None:
+        value = self.__store.get("project_memories", memory_id)
+        return None if value is None else MemoryRecord.from_dict(value)
+
     def memories(
         self,
         project_id: str,
@@ -2115,7 +2268,7 @@ class ExecutiveRepository:
     ) -> list[MemoryRecord]:
         values = [
             MemoryRecord.from_dict(item)
-            for item in self.store.list("project_memories")
+            for item in self.__store.list("project_memories")
             if item.get("project_id") == project_id
         ]
         return [
@@ -2130,14 +2283,14 @@ class ExecutiveRepository:
     def decisions(self, project_id: str) -> list[DecisionRecord]:
         return [
             DecisionRecord.from_dict(item)
-            for item in self.store.list("project_decisions")
+            for item in self.__store.list("project_decisions")
             if item.get("project_id") == project_id
         ]
 
     def assumptions(self, project_id: str) -> list[AssumptionRecord]:
         return [
             AssumptionRecord.from_dict(item)
-            for item in self.store.list("project_assumptions")
+            for item in self.__store.list("project_assumptions")
             if item.get("project_id") == project_id
         ]
 
@@ -2150,12 +2303,12 @@ class ExecutiveRepository:
     def conversations(self, project_id: str) -> list[dict[str, Any]]:
         return [
             item
-            for item in self.store.list("project_conversations")
+            for item in self.__store.list("project_conversations")
             if item.get("project_id") == project_id
         ]
 
     def _required(self, table: str, identifier: str) -> dict[str, Any]:
-        value = self.store.get(table, identifier)
+        value = self.__store.get(table, identifier)
         if value is None:
             raise KeyError(f"{table} record not found: {identifier}")
         return value
@@ -2168,7 +2321,7 @@ class ExecutiveRepository:
         child_kind: str,
         child_id: str,
     ) -> None:
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             self._insert_relation(
                 connection,
                 project_id,
@@ -2187,7 +2340,7 @@ class ExecutiveRepository:
     ) -> None:
         expected_serialized = _serialize(expected)
         expected_hash = _digest_serialized(expected_serialized)
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._update_entity_cas(
                 connection, table, identifier, expected_hash, updated
@@ -2199,7 +2352,7 @@ class ExecutiveRepository:
         identifier: str,
         payload: dict[str, Any],
     ) -> None:
-        with self.store.connect() as connection:
+        with self.__store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._insert_entity(connection, table, identifier, payload)
 
@@ -2351,6 +2504,7 @@ class ExecutiveRepository:
         event: FounderApprovalEvent,
         challenge: FounderApprovalChallenge,
         session: FounderAuthenticatedSession,
+        capability: FounderAuthorizationCapability,
         now: str,
     ) -> None:
         if (
@@ -2412,6 +2566,26 @@ class ExecutiveRepository:
             != session.session_id
             or approval.limits.get("approval_event_digest")
             != canonical_digest(event.to_dict())
+            or capability.project_id != charter.project_id
+            or capability.charter_id != charter.charter_id
+            or capability.charter_revision != charter.revision
+            or capability.action_digest != charter_approval_digest(charter)
+            or capability.approval_digest
+            != canonical_digest(approval.to_dict())
+            or capability.founder_principal_sid != session.principal_sid
+            or capability.founder_authenticated_session_id
+            != session.session_id
+            or capability.approval_event_id != event.event_id
+            or capability.approval_record_id != approval.approval_id
+            or capability.challenge_id != challenge.challenge_id
+            or capability.challenge_proof_digest
+            != event.challenge_response_digest
+            or capability.authorization_generation != charter.revision
+            or capability.revocation_epoch != charter.revision - 1
+            or capability.machine_identity != session.machine_identity
+            or capability.application_identity != session.application_identity
+            or datetime.fromisoformat(capability.expires_at)
+            <= datetime.fromisoformat(now).astimezone(UTC)
         ):
             raise PermissionError(
                 "charter approval authentication or binding is invalid"
@@ -2443,7 +2617,11 @@ class ExecutiveRepository:
             or charter.revision != action.charter_revision
             or charter.status != CharterStatus.ACTIVE
             or approval.approver != session.principal_sid
-            or approval.action_category not in {None, action.category}
+            or (
+                approval.action_category is not None
+                and ActionCategory(approval.action_category)
+                is not ActionCategory(action.category)
+            )
             or not set(action.scope).issubset(set(approval.scope))
             or approval.revoked_at is not None
             or approval.consumed_at is not None
@@ -2685,6 +2863,8 @@ def charter_approval_digest(charter: ProjectCharter) -> str:
         "founder_approval_event_id",
         "founder_approval_event_digest",
         "founder_authenticated_session_id",
+        "founder_authorization_capability",
+        "founder_authorization_capability_digest",
         "updated_at",
     ):
         payload.pop(field_name)
@@ -2726,3 +2906,33 @@ def _serialize(value: dict[str, Any]) -> str:
 
 def _digest_serialized(serialized: str) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+class ProductionExecutiveRepository(ExecutiveRepository):
+    __slots__ = ()
+
+    def __init__(
+        self,
+        store: KeeperStore,
+        founder_authenticator: ProductionFounderAuthenticator,
+    ) -> None:
+        if type(founder_authenticator) is not ProductionFounderAuthenticator:
+            raise TypeError(
+                "production repository requires the exact production authenticator"
+            )
+        self._initialize(store, founder_authenticator, "PRODUCTION")
+
+
+class TestExecutiveRepository(ExecutiveRepository):
+    __slots__ = ()
+    __test__ = False
+
+    def __init__(
+        self,
+        store: KeeperStore,
+        founder_authenticator: TestFounderAuthenticator,
+    ) -> None:
+        if type(founder_authenticator) is not TestFounderAuthenticator:
+            raise TypeError(
+                "test repository requires the exact test authenticator"
+            )
+        self._initialize(store, founder_authenticator, "TEST")

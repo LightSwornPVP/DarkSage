@@ -15,8 +15,9 @@ from keeper.executive.authority_gateway import (
     SemanticAuthorityTestGateway,
     authority_operations,
 )
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import TestExecutiveRepository
 from keeper.executive.runtime import ExecutiveRuntime
+from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.service import KeeperExecutive
 from keeper.executive.surfaces import StatusSurface
 from tests.keeper.executive.authority_semantics import (
@@ -73,7 +74,7 @@ def test_restart_resumes_only_durable_authority_state(
         tmp_path, transport=authority
     )
     resumed = ExecutiveRuntime(
-        ExecutiveRepository(reopened_store), resumed_gateway
+        TestExecutiveRepository(reopened_store, TestFounderAuthenticator()), resumed_gateway
     )
     prior_calls = len(authority.execution_calls)
     resumed.progress(project.project_id)

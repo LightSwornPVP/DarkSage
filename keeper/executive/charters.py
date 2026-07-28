@@ -30,14 +30,18 @@ from keeper.executive.founder_auth import (
 )
 from keeper.executive.repository import (
     ExecutiveRepository,
+    ProductionExecutiveRepository,
+    TestExecutiveRepository,
     new_id,
 )
 from keeper.executive.state import transition_project
 
 
 class CharterService:
-    __slots__ = ("repository", "__authenticator", "__production", "__sealed")
-    repository: ExecutiveRepository
+    __slots__ = (
+        "__repository", "__authenticator", "__production", "__sealed",
+    )
+    __repository: ExecutiveRepository
     __authenticator: ProductionFounderAuthenticator | TestFounderAuthenticator
     __production: bool
     __sealed: bool
@@ -50,17 +54,25 @@ class CharterService:
         *,
         production: bool,
     ) -> None:
-        expected = (
+        expected_authenticator = (
             ProductionFounderAuthenticator
             if production
             else TestFounderAuthenticator
         )
-        if type(authenticator) is not expected:
+        expected_repository = (
+            ProductionExecutiveRepository
+            if production
+            else TestExecutiveRepository
+        )
+        if (
+            type(authenticator) is not expected_authenticator
+            or type(repository) is not expected_repository
+        ):
             raise TypeError(
-                "Founder authenticator does not match the composition mode"
+                "Founder authenticator and repository do not match composition mode"
             )
         object.__setattr__(self, "_CharterService__sealed", False)
-        object.__setattr__(self, "repository", repository)
+        object.__setattr__(self, "_CharterService__repository", repository)
         object.__setattr__(self, "_CharterService__authenticator", authenticator)
         object.__setattr__(self, "_CharterService__production", production)
         object.__setattr__(self, "_CharterService__sealed", True)
@@ -70,10 +82,18 @@ class CharterService:
             raise AttributeError("CharterService authentication composition is immutable")
         object.__setattr__(self, name, value)
 
+    @property
+    def repository(self) -> TestExecutiveRepository:
+        if not isinstance(self.__repository, TestExecutiveRepository):
+            raise AttributeError(
+                "production CharterService does not expose its repository"
+            )
+        return self.__repository
+
     @classmethod
     def production(
         cls,
-        repository: ExecutiveRepository,
+        repository: ProductionExecutiveRepository,
         authenticator: ProductionFounderAuthenticator,
     ) -> CharterService:
         return cls(repository, authenticator, production=True)
@@ -81,7 +101,7 @@ class CharterService:
     @classmethod
     def for_test(
         cls,
-        repository: ExecutiveRepository,
+        repository: TestExecutiveRepository,
         authenticator: TestFounderAuthenticator,
     ) -> CharterService:
         return cls(repository, authenticator, production=False)
@@ -99,11 +119,11 @@ class CharterService:
             now,
             now,
         )
-        self.repository.save_project(project)
+        self.__repository.save_project(project)
         return project
 
     def draft(self, project: ProjectRecord, intake: IntakeResult) -> ProjectCharter:
-        prior = self.repository.charters(project.project_id)
+        prior = self.__repository.charters(project.project_id)
         revision = max((item.revision for item in prior), default=0) + 1
         now = utc_now()
         workspace_values = tuple(str(item) for item in intake.explicit("workspaces", ()))
@@ -138,11 +158,10 @@ class CharterService:
                 ActionCategory.DEPLOY_PRODUCTION,
                 ActionCategory.PUBLISH_PRIVATE,
                 ActionCategory.PUBLISH_PUBLIC,
-                ActionCategory.PUBLISH_EXTERNAL,
-                ActionCategory.PURCHASE, ActionCategory.SPENDING,
-                ActionCategory.SPEND, ActionCategory.PAID_PROVIDER_USE,
+                ActionCategory.PURCHASE,
+                ActionCategory.SPENDING,
             )),
-            tuple(item.value for item in (ActionCategory.DELETE_PROTECTED, ActionCategory.REWRITE_HISTORY, ActionCategory.ACCESS_CREDENTIAL, ActionCategory.CHANGE_SECURITY_BOUNDARY, ActionCategory.ENABLE_LIVE_TRADING, ActionCategory.CHANGE_FINANCIAL_AUTHORITY, ActionCategory.CHANGE_GOVERNANCE, ActionCategory.EXPAND_SCOPE, ActionCategory.IRREVERSIBLE_DESTRUCTIVE)),
+            tuple(item.value for item in (ActionCategory.CREDENTIAL_ACCESS, ActionCategory.SECURITY_BOUNDARY_CHANGE, ActionCategory.HISTORY_REWRITE, ActionCategory.LIVE_TRADING, ActionCategory.FINANCIAL_AUTHORITY_CHANGE, ActionCategory.CHANGE_GOVERNANCE, ActionCategory.EXPAND_SCOPE, ActionCategory.IRREVERSIBLE_DELETE)),
             workspace_values,
             tool_values,
             provider_values,
@@ -192,9 +211,9 @@ class CharterService:
             now,
             now,
         )
-        self.repository.save_charter(charter)
+        self.__repository.save_charter(charter)
         for assumption in charter.assumptions:
-            self.repository.insert_assumption(
+            self.__repository.insert_assumption(
                 AssumptionRecord(
                     new_id("assumption"),
                     project.project_id,
@@ -219,7 +238,7 @@ class CharterService:
             else replace(project, state=ExecutiveState.INTAKE.value),
             ExecutiveState.CHARTER_DRAFT,
         )
-        self.repository.save_project(
+        self.__repository.save_project(
             drafted_project,
             expected=project,
         )
@@ -229,9 +248,9 @@ class CharterService:
         if charter.status != CharterStatus.DRAFT:
             raise PermissionError("only draft charters may be proposed")
         proposed = replace(charter, status=CharterStatus.PROPOSED.value, updated_at=utc_now())
-        self.repository.save_charter(proposed, expected=charter)
-        project = self.repository.project(charter.project_id)
-        self.repository.save_project(
+        self.__repository.save_charter(proposed, expected=charter)
+        project = self.__repository.project(charter.project_id)
+        self.__repository.save_project(
             transition_project(
                 project, ExecutiveState.AWAITING_CHARTER_APPROVAL
             ),
@@ -246,7 +265,7 @@ class CharterService:
         approver: str,
         source_interaction_id: str,
     ) -> tuple[ProjectCharter, ApprovalRecord]:
-        return self.repository.approve_charter(
+        return self.__repository.approve_charter(
             project_id=charter.project_id,
             charter_id=charter.charter_id,
             charter_revision=charter.revision,
@@ -257,7 +276,7 @@ class CharterService:
     def request_approval(
         self, charter: ProjectCharter
     ) -> FounderApprovalChallenge:
-        return self.repository.create_charter_approval_challenge(
+        return self.__repository.create_charter_approval_challenge(
             project_id=charter.project_id,
             charter_id=charter.charter_id,
             charter_revision=charter.revision,
@@ -270,7 +289,7 @@ class CharterService:
         intent: FounderApprovalIntent,
         confirmation: ApprovalConfirmation | None = None,
     ) -> tuple[ProjectCharter, ApprovalRecord, FounderApprovalEvent]:
-        return self.repository.confirm_charter_approval(
+        return self.__repository.confirm_charter_approval(
             challenge_id=challenge_id,
             confirmation=confirmation,
             explicit_intent=intent,
@@ -280,7 +299,7 @@ class CharterService:
         self, challenge: FounderApprovalChallenge
     ) -> ApprovalConfirmation:
         confirmation = self.__authenticator.authenticate(challenge)
-        self.repository.register_founder_session(
+        self.__repository.register_founder_session(
             challenge_id=challenge.challenge_id,
             confirmation=confirmation,
         )
@@ -296,7 +315,7 @@ class CharterService:
         limits: dict[str, Any],
         expires_at: str | None = None,
     ) -> FounderApprovalChallenge:
-        return self.repository.create_action_approval_challenge(
+        return self.__repository.create_action_approval_challenge(
             action,
             charter_id=charter_id,
             kind=kind,
@@ -312,19 +331,19 @@ class CharterService:
         confirmation: ApprovalConfirmation | None,
         intent: FounderApprovalIntent,
     ) -> tuple[ApprovalRecord, FounderApprovalEvent]:
-        return self.repository.confirm_action_approval(
+        return self.__repository.confirm_action_approval(
             challenge_id=challenge_id,
             confirmation=confirmation,
             explicit_intent=intent,
         )
 
     def activate(self, charter: ProjectCharter) -> ProjectRecord:
-        active, stored_charter, approval = self.repository.activate_charter(
+        active, stored_charter, approval = self.__repository.activate_charter(
             project_id=charter.project_id,
             charter_id=charter.charter_id,
             charter_revision=charter.revision,
         )
-        self.repository.insert_decision(
+        self.__repository.insert_decision(
             DecisionRecord(
                 new_id("decision"),
                 stored_charter.project_id,
@@ -353,7 +372,7 @@ class CharterService:
         reason: str,
         authority_basis: str,
     ) -> ProjectCharter:
-        durable = self.repository.charter(active.charter_id)
+        durable = self.__repository.charter(active.charter_id)
         if (
             durable.status not in {CharterStatus.APPROVED, CharterStatus.ACTIVE}
             or durable.project_id != active.project_id
@@ -366,6 +385,8 @@ class CharterService:
             "founder_approval_identity", "founder_approval_record_id",
             "founder_approval_event_id", "founder_approval_event_digest",
             "founder_authenticated_session_id",
+            "founder_authorization_capability",
+            "founder_authorization_capability_digest",
         }
         if set(changes) & forbidden or not set(changes).issubset(ProjectCharter.FIELDS):
             raise ValueError("charter revision contains forbidden or unknown fields")
@@ -388,15 +409,17 @@ class CharterService:
                 "founder_approval_event_id": None,
                 "founder_approval_event_digest": None,
                 "founder_authenticated_session_id": None,
+                "founder_authorization_capability": None,
+                "founder_authorization_capability_digest": None,
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }
         )
         revised = ProjectCharter.from_dict(data)
-        self.repository.save_charter(revised)
-        project = self.repository.project(active.project_id)
+        self.__repository.save_charter(revised)
+        project = self.__repository.project(active.project_id)
         paused = replace(project, state=ExecutiveState.PAUSED.value, pause_reason="Charter revision awaiting approval", updated_at=utc_now())
-        self.repository.save_project(paused, expected=project)
+        self.__repository.save_project(paused, expected=project)
         return revised
 
 

@@ -25,7 +25,7 @@ from keeper.executive.models import (
 from keeper.executive.planning import WorkflowPlanner
 from keeper.executive.runtime import ExecutiveRuntime
 from keeper.executive.state import transition_project
-from keeper.executive.repository import ExecutiveRepository, charter_approval_digest
+from keeper.executive.repository import TestExecutiveRepository, charter_approval_digest
 from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
     semantic_gateway,
@@ -47,7 +47,7 @@ def _proposed(
     store.migrate()
     authenticator = TestFounderAuthenticator()
     service = CharterService.for_test(
-        ExecutiveRepository(store, founder_authenticator=authenticator),
+        TestExecutiveRepository(store, authenticator),
         authenticator,
     )
     replacements: dict[str, object] = {
@@ -108,6 +108,8 @@ def test_direct_or_caller_constructed_approved_charter_is_rejected(
         status="APPROVED",
         founder_approval_identity="specialist-impersonating-Founder",
         founder_approval_record_id="nonexistent-approval",
+        founder_authorization_capability={"forged": True},
+        founder_authorization_capability_digest="0" * 64,
     )
     with pytest.raises(PermissionError, match="transition"):
         service.repository.save_charter(forged, expected=proposed)
@@ -519,7 +521,9 @@ def test_one_time_approval_is_consumed_atomically_once(tmp_path: Path) -> None:
     )
 
     def consume() -> str:
-        repository = ExecutiveRepository(KeeperStore(tmp_path / "keeper.db"))
+        repository = TestExecutiveRepository(
+            KeeperStore(tmp_path / "keeper.db"), TestFounderAuthenticator()
+        )
         try:
             repository.reserve_action_authority(
                 action,

@@ -25,23 +25,22 @@ from keeper.executive.models import (
 
 NON_DELEGABLE = frozenset(
     {
-        ActionCategory.DELETE_PROTECTED,
-        ActionCategory.REWRITE_HISTORY,
-        ActionCategory.ACCESS_CREDENTIAL,
-        ActionCategory.CHANGE_SECURITY_BOUNDARY,
-        ActionCategory.ENABLE_LIVE_TRADING,
-        ActionCategory.CHANGE_FINANCIAL_AUTHORITY,
+        ActionCategory.IRREVERSIBLE_DELETE,
+        ActionCategory.HISTORY_REWRITE,
+        ActionCategory.CREDENTIAL_ACCESS,
+        ActionCategory.SECURITY_BOUNDARY_CHANGE,
+        ActionCategory.LIVE_TRADING,
+        ActionCategory.FINANCIAL_AUTHORITY_CHANGE,
         ActionCategory.CHANGE_GOVERNANCE,
-        ActionCategory.IRREVERSIBLE_DESTRUCTIVE,
     }
 )
 SEPARATELY_APPROVABLE = frozenset(
     {
         ActionCategory.PUSH,
         ActionCategory.DEPLOY_PRODUCTION,
-        ActionCategory.PUBLISH_EXTERNAL,
+        ActionCategory.PUBLISH_PUBLIC,
         ActionCategory.PURCHASE,
-        ActionCategory.SPEND,
+        ActionCategory.SPENDING,
         ActionCategory.COMMIT,
     }
 )
@@ -87,7 +86,11 @@ class AuthorityEvaluator:
             return self._decision(AuthorityOutcome.EXPIRED, "envelope-expiration", "authority_envelope.expires_at", "charter authority has expired", "obtain a charter revision")
         if category in NON_DELEGABLE:
             return self._decision(AuthorityOutcome.DENIED, "non-delegable-action", "authority_envelope.denied_actions", "this action class cannot be delegated", "Founder must perform the action outside Keeper")
-        if action.category in charter.authority_envelope.denied_actions:
+        denied_actions = {
+            ActionCategory(item).value
+            for item in charter.authority_envelope.denied_actions
+        }
+        if category.value in denied_actions:
             return self._decision(AuthorityOutcome.DENIED, "charter-denial", "authority_envelope.denied_actions", "the active charter explicitly denies this action", "revise the charter")
         if any(_action_matches_non_goal(action, item) for item in charter.non_goals):
             return self._decision(
@@ -125,7 +128,11 @@ class AuthorityEvaluator:
             return self._decision(AuthorityOutcome.REQUIRES_FOUNDER_APPROVAL, "advisory-mode", "delegation_mode", "Advisory mode cannot execute material actions", "request one-time or charter approval")
         if category in SEPARATELY_APPROVABLE or action.external_side_effect:
             return self._decision(AuthorityOutcome.REQUIRES_FOUNDER_APPROVAL, "separate-approval", "authority_envelope.separately_approvable_actions", "the action requires separate Founder approval", "request a bound approval")
-        if action.category not in charter.authority_envelope.allowed_actions:
+        allowed_actions = {
+            ActionCategory(item).value
+            for item in charter.authority_envelope.allowed_actions
+        }
+        if category.value not in allowed_actions:
             return self._decision(AuthorityOutcome.REQUIRES_FOUNDER_APPROVAL if mode is DelegationMode.DELEGATED else AuthorityOutcome.DENIED, "allowed-action-list", "authority_envelope.allowed_actions", "the action is not in the approved authority envelope", "request approval or revise the charter")
         return AuthorityDecision(
             AuthorityOutcome.ALLOWED_WITHIN_LIMIT.value if action.cost or action.workspace else AuthorityOutcome.ALLOWED.value,
@@ -202,15 +209,15 @@ class AuthorityEvaluator:
         effects = {ActionEffect(item) for item in action.effect_classes}
         required_by_effect = {
             ActionEffect.DEPLOY_PRODUCTION: ActionCategory.DEPLOY_PRODUCTION,
-            ActionEffect.PUBLISH_PUBLIC: ActionCategory.PUBLISH_EXTERNAL,
+            ActionEffect.PUBLISH_PUBLIC: ActionCategory.PUBLISH_PUBLIC,
             ActionEffect.PURCHASE: ActionCategory.PURCHASE,
-            ActionEffect.PAID_PROVIDER_USE: ActionCategory.SPEND,
-            ActionEffect.HISTORY_REWRITE: ActionCategory.REWRITE_HISTORY,
-            ActionEffect.SECURITY_BOUNDARY_CHANGE: ActionCategory.CHANGE_SECURITY_BOUNDARY,
-            ActionEffect.CREDENTIAL_ACCESS: ActionCategory.ACCESS_CREDENTIAL,
-            ActionEffect.LIVE_TRADING: ActionCategory.ENABLE_LIVE_TRADING,
-            ActionEffect.FINANCIAL_AUTHORITY_CHANGE: ActionCategory.CHANGE_FINANCIAL_AUTHORITY,
-            ActionEffect.IRREVERSIBLE_DELETE: ActionCategory.IRREVERSIBLE_DESTRUCTIVE,
+            ActionEffect.PAID_PROVIDER_USE: ActionCategory.SPENDING,
+            ActionEffect.HISTORY_REWRITE: ActionCategory.HISTORY_REWRITE,
+            ActionEffect.SECURITY_BOUNDARY_CHANGE: ActionCategory.SECURITY_BOUNDARY_CHANGE,
+            ActionEffect.CREDENTIAL_ACCESS: ActionCategory.CREDENTIAL_ACCESS,
+            ActionEffect.LIVE_TRADING: ActionCategory.LIVE_TRADING,
+            ActionEffect.FINANCIAL_AUTHORITY_CHANGE: ActionCategory.FINANCIAL_AUTHORITY_CHANGE,
+            ActionEffect.IRREVERSIBLE_DELETE: ActionCategory.IRREVERSIBLE_DELETE,
         }
         for effect, required_category in required_by_effect.items():
             if effect in effects and category is not required_category:
@@ -254,6 +261,7 @@ class AuthorityEvaluator:
     ) -> ApprovalRecord | str | None:
         expired = False
         revoked = False
+        category = ActionCategory(action.category)
         for approval in approvals:
             if approval.kind == ApprovalKind.CHARTER_DURATION:
                 continue
@@ -261,7 +269,10 @@ class AuthorityEvaluator:
                 approval.project_id != charter.project_id
                 or approval.charter_id != charter.charter_id
                 or approval.charter_revision != charter.revision
-                or approval.action_category not in {None, action.category}
+                or (
+                    approval.action_category is not None
+                    and ActionCategory(approval.action_category) is not category
+                )
                 or not set(action.scope).issubset(set(approval.scope))
             ):
                 continue
@@ -345,7 +356,7 @@ class TrustedActionClassifier:
             project_id=task.project_id,
             charter_revision=task.charter_revision,
             category=(
-                ActionCategory.SPEND.value
+                ActionCategory.SPENDING.value
                 if quoted_cost > 0
                 else task.authority_category
             ),
@@ -400,15 +411,15 @@ def validate_durable_task_effects(task: ExecutiveTask) -> None:
         raise PermissionError("ambiguous external-effect task fails closed")
     protected_categories = {
         ActionEffect.DEPLOY_PRODUCTION: ActionCategory.DEPLOY_PRODUCTION,
-        ActionEffect.PUBLISH_PUBLIC: ActionCategory.PUBLISH_EXTERNAL,
+        ActionEffect.PUBLISH_PUBLIC: ActionCategory.PUBLISH_PUBLIC,
         ActionEffect.PURCHASE: ActionCategory.PURCHASE,
-        ActionEffect.PAID_PROVIDER_USE: ActionCategory.SPEND,
-        ActionEffect.HISTORY_REWRITE: ActionCategory.REWRITE_HISTORY,
-        ActionEffect.SECURITY_BOUNDARY_CHANGE: ActionCategory.CHANGE_SECURITY_BOUNDARY,
-        ActionEffect.CREDENTIAL_ACCESS: ActionCategory.ACCESS_CREDENTIAL,
-        ActionEffect.LIVE_TRADING: ActionCategory.ENABLE_LIVE_TRADING,
-        ActionEffect.FINANCIAL_AUTHORITY_CHANGE: ActionCategory.CHANGE_FINANCIAL_AUTHORITY,
-        ActionEffect.IRREVERSIBLE_DELETE: ActionCategory.IRREVERSIBLE_DESTRUCTIVE,
+        ActionEffect.PAID_PROVIDER_USE: ActionCategory.SPENDING,
+        ActionEffect.HISTORY_REWRITE: ActionCategory.HISTORY_REWRITE,
+        ActionEffect.SECURITY_BOUNDARY_CHANGE: ActionCategory.SECURITY_BOUNDARY_CHANGE,
+        ActionEffect.CREDENTIAL_ACCESS: ActionCategory.CREDENTIAL_ACCESS,
+        ActionEffect.LIVE_TRADING: ActionCategory.LIVE_TRADING,
+        ActionEffect.FINANCIAL_AUTHORITY_CHANGE: ActionCategory.FINANCIAL_AUTHORITY_CHANGE,
+        ActionEffect.IRREVERSIBLE_DELETE: ActionCategory.IRREVERSIBLE_DELETE,
     }
     category = ActionCategory(task.authority_category)
     for effect, expected_category in protected_categories.items():

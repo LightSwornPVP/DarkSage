@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from keeper.executive.enums import TaskStatus
+from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.models import utc_now
 from keeper.executive.runtime import ExecutiveRuntime
 from keeper.executive.surfaces import StatusSurface
@@ -154,7 +155,8 @@ def test_concurrent_authenticated_completion_import_is_idempotent(
         repository = type(service.repository)(
             type(service.repository.store)(
                 service.repository.store.path
-            )
+            ),
+            TestFounderAuthenticator(),
         )
         return repository.accept_author_completion(
             pending.task_id,

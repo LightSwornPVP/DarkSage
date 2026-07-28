@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 ENTITY_TABLES = (
     "projects",
     "worktrees",
@@ -44,6 +44,7 @@ ENTITY_TABLES = (
     "executive_founder_approval_challenges",
     "executive_founder_approval_events",
     "executive_founder_authenticated_sessions",
+    "executive_founder_authorization_capabilities",
 )
 EXECUTIVE_LIFECYCLE_TABLES = frozenset(
     {
@@ -55,6 +56,7 @@ EXECUTIVE_LIFECYCLE_TABLES = frozenset(
         "executive_founder_approval_challenges",
         "executive_founder_approval_events",
         "executive_founder_authenticated_sessions",
+        "executive_founder_authorization_capabilities",
     }
 )
 
@@ -191,6 +193,31 @@ class KeeperStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (5, _now()),
                 )
+                current = 5
+            if current < 6:
+                for table in ENTITY_TABLES:
+                    connection.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{table}" ('
+                        "id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                        "payload TEXT NOT NULL, payload_hash TEXT NOT NULL)"
+                    )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS executive_repository_mode ("
+                    "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                    "mode TEXT NOT NULL CHECK(mode IN ('PRODUCTION','TEST')), "
+                    "bound_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (6, _now()),
+                )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS executive_repository_mode ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                "mode TEXT NOT NULL CHECK(mode IN ('PRODUCTION','TEST')), "
+                "bound_at TEXT NOT NULL)"
+            )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reroute_reservations ("
                 "authorization_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, "
@@ -200,6 +227,42 @@ class KeeperStore:
                 "consumer_id TEXT NOT NULL, state TEXT NOT NULL, reserved_at TEXT NOT NULL, "
                 "UNIQUE(run_id, destination_attempt))"
             )
+
+    def bind_executive_repository_mode(self, mode: str) -> None:
+        if mode not in {"PRODUCTION", "TEST"}:
+            raise ValueError("Executive repository mode is invalid")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT mode FROM executive_repository_mode WHERE singleton=1"
+            ).fetchone()
+            if row is None:
+                populated = any(
+                    connection.execute(
+                        f'SELECT 1 FROM "{table}" LIMIT 1'
+                    ).fetchone()
+                    is not None
+                    for table in EXECUTIVE_LIFECYCLE_TABLES
+                )
+                if populated:
+                    raise PermissionError(
+                        "populated Executive database has no trusted repository mode"
+                    )
+                connection.execute(
+                    "INSERT INTO executive_repository_mode VALUES(1,?,?)",
+                    (mode, _now()),
+                )
+            elif row["mode"] != mode:
+                raise PermissionError(
+                    "Executive database is bound to a different repository mode"
+                )
+
+    def executive_repository_mode(self) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT mode FROM executive_repository_mode WHERE singleton=1"
+            ).fetchone()
+        return None if row is None else str(row["mode"])
 
     def consume_reroute_authorization(
         self,

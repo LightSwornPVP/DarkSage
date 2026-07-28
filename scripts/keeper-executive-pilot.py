@@ -21,7 +21,7 @@ from keeper.app.storage import KeeperStore
 from keeper.executive.charters import CharterService
 from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.intake import ConversationIntake
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import TestExecutiveRepository
 from keeper.executive.runtime import ExecutiveRuntime
 
 
@@ -329,9 +329,7 @@ def main() -> int:
         store = KeeperStore(root / "keeper.db")
         store.migrate()
         authenticator = TestFounderAuthenticator()
-        repository = ExecutiveRepository(
-            store, founder_authenticator=authenticator
-        )
+        repository = TestExecutiveRepository(store, authenticator)
         charters = CharterService.for_test(repository, authenticator)
         intake = ConversationIntake.revise(
             ConversationIntake().extract(

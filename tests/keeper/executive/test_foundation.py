@@ -16,8 +16,9 @@ from keeper.executive.models import (
     ProposedAction,
     utc_now,
 )
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import TestExecutiveRepository
 from keeper.executive.state import transition_project
+from keeper.executive.founder_auth import TestFounderAuthenticator
 
 
 def project() -> ProjectRecord:
@@ -47,6 +48,7 @@ def charter(workspace: Path) -> ProjectCharter:
         "FULL_DELEGATION", envelope, ("pause on ambiguity",), ("independent review",),
         ("test results",), ("all tasks complete",), 1, "ACTIVE", None, None, (),
         "Founder", "approval-1", now, now,
+        "event-1", "e" * 64, "session-1", {"test": True}, "c" * 64,
     )
 
 
@@ -74,7 +76,7 @@ def test_charter_unknown_fields_fail_closed(tmp_path: Path) -> None:
 def test_approved_charter_is_immutable(tmp_path: Path) -> None:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
-    repository = ExecutiveRepository(store)
+    repository = TestExecutiveRepository(store, TestFounderAuthenticator())
     repository.save_project(
         replace(
             project(),
@@ -90,7 +92,7 @@ def test_approved_charter_is_immutable(tmp_path: Path) -> None:
 def test_repository_rejects_new_terminal_project(tmp_path: Path) -> None:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
-    repository = ExecutiveRepository(store)
+    repository = TestExecutiveRepository(store, TestFounderAuthenticator())
     with pytest.raises(PermissionError, match="begin"):
         repository.save_project(
             replace(project(), state=ExecutiveState.COMPLETED.value)

@@ -9,6 +9,11 @@ from typing import Any
 
 from keeper.authority_service.client import TestAuthorityServiceClient
 from keeper.authority_service.protocol import Operation, Request
+from keeper.executive.founder_capability import (
+    TestFounderCapabilityVerifier,
+    capability_digest,
+    capability_signature_digest,
+)
 from keeper.executive.authority_gateway import (
     AuthorityBackedSpecialistGateway,
     AuthorityProviderBinding,
@@ -158,23 +163,37 @@ class SemanticAuthorityTransport:
                     and record.get("_signature") == "authority-test-signature"
                 }
             if operation is Operation.AUTHORIZE_PROJECT_LAUNCH:
+                if set(payload) != {"founder_capability"}:
+                    raise PermissionError("signed Founder capability is required")
+                value = payload["founder_capability"]
+                if not isinstance(value, dict):
+                    raise PermissionError("Founder capability is malformed")
+                capability = TestFounderCapabilityVerifier().verify(value)
                 identifier = (
-                    f"launch-authorization:{payload['project_id']}:"
-                    f"generation:{payload['authorization_generation']}"
+                    f"launch-authorization:{capability.project_id}:"
+                    f"generation:{capability.authorization_generation}"
                 )
                 existing = self.launch_authorizations.get(identifier)
-                if existing is not None and (
-                    existing["service_state"] != "ACTIVE"
-                    or existing["authorization_generation"]
-                    != payload["authorization_generation"]
-                ):
+                digest = capability_digest(capability)
+                if existing is not None:
+                    if (
+                        existing["service_state"] == "ACTIVE"
+                        and existing.get("founder_capability_digest") == digest
+                    ):
+                        return {
+                            "authorization": {
+                                key: value
+                                for key, value in existing.items()
+                                if key != "service_state"
+                            }
+                        }
                     raise PermissionError("launch generation is revoked")
                 prior = [
                     item
                     for item in self.launch_authorizations.values()
-                    if item.get("project_id") == payload["project_id"]
+                    if item.get("project_id") == capability.project_id
                 ]
-                if existing is None and prior:
+                if prior:
                     latest = max(
                         prior,
                         key=lambda item: int(
@@ -183,29 +202,84 @@ class SemanticAuthorityTransport:
                     )
                     if (
                         latest["service_state"] != "REVOKED"
-                        or payload["authorization_generation"]
+                        or capability.authorization_generation
                         != latest["authorization_generation"] + 1
-                        or payload["founder_approval_event_id"]
-                        == latest["founder_approval_event_id"]
-                        or payload["founder_approval_event_digest"]
-                        == latest["founder_approval_event_digest"]
-                        or payload["delegation_id"] == latest["delegation_id"]
+                        or capability.revocation_epoch
+                        != latest["authorization_generation"]
                     ):
                         raise PermissionError(
                             "higher generation requires new Founder approval"
+                        )
+                    unique_fields = (
+                        "founder_capability_id", "delegation_id",
+                        "founder_approval_event_id",
+                        "founder_authenticated_session_id",
+                        "founder_challenge_id", "founder_approval_digest",
+                        "founder_challenge_proof_digest",
+                        "founder_capability_digest",
+                    )
+                    candidate = {
+                        "founder_capability_id": capability.capability_id,
+                        "delegation_id": capability.approval_record_id,
+                        "founder_approval_event_id": capability.approval_event_id,
+                        "founder_authenticated_session_id": (
+                            capability.founder_authenticated_session_id
+                        ),
+                        "founder_challenge_id": capability.challenge_id,
+                        "founder_approval_digest": capability.approval_digest,
+                        "founder_challenge_proof_digest": (
+                            capability.challenge_proof_digest
+                        ),
+                        "founder_capability_digest": digest,
+                    }
+                    if any(
+                        candidate[field] == item.get(field)
+                        for item in prior
+                        for field in unique_fields
+                    ):
+                        raise PermissionError(
+                            "Founder approval identity was already used"
                         )
                 authorization = self._sign(
                     "project-launch-authorization",
                     {
                         "id": identifier,
                         "kind": "project_launch_authorization",
-                        "schema_version": 1,
-                        **payload,
-                        "revocation_epoch": (
-                            int(payload["authorization_generation"]) - 1
+                        "schema_version": 2,
+                        "project_id": capability.project_id,
+                        "charter_id": capability.charter_id,
+                        "charter_revision": capability.charter_revision,
+                        "delegation_id": capability.approval_record_id,
+                        "founder_approval_event_id": capability.approval_event_id,
+                        "founder_approval_event_digest": (
+                            capability.approval_event_digest
                         ),
+                        "founder_approval_digest": capability.approval_digest,
+                        "founder_authenticated_session_id": (
+                            capability.founder_authenticated_session_id
+                        ),
+                        "founder_principal_sid": capability.founder_principal_sid,
+                        "founder_challenge_id": capability.challenge_id,
+                        "founder_challenge_proof_digest": (
+                            capability.challenge_proof_digest
+                        ),
+                        "founder_action_digest": capability.action_digest,
+                        "founder_capability_id": capability.capability_id,
+                        "founder_capability_digest": digest,
+                        "founder_capability_signature_digest": (
+                            capability_signature_digest(capability)
+                        ),
+                        "founder_capability_issuer_id": capability.issuer_id,
+                        "founder_capability_issuer_key_id": (
+                            capability.issuer_key_id
+                        ),
+                        "authorization_generation": (
+                            capability.authorization_generation
+                        ),
+                        "revocation_epoch": capability.revocation_epoch,
                         "authorized_client_sid": "semantic-test-client",
-                        "authorized_at": datetime.now(UTC).isoformat(),
+                        "expires_at": capability.expires_at,
+                        "authorized_at": capability.issued_at,
                     },
                 )
                 self.launch_authorizations[identifier] = {

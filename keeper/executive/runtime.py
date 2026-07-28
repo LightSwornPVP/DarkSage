@@ -932,7 +932,7 @@ class ExecutiveRuntime:
             "memory:authority-completion:"
             f"{task.authority_attempt_id or task.task_id}"
         )
-        if self.repository.store.get("project_memories", memory_id) is not None:
+        if self.repository.memory(memory_id) is not None:
             return
         record = MemoryRecord(
                 memory_id,
@@ -957,7 +957,7 @@ class ExecutiveRuntime:
             self.repository.insert_memory(record)
         except PermissionError:
             if (
-                self.repository.store.get("project_memories", memory_id)
+                self.repository.memory(memory_id)
                 is None
             ):
                 raise

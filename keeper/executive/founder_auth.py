@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
-import hmac
-import json
 import os
 import secrets
 import sys
@@ -11,7 +9,16 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final, Mapping, TypedDict
+from typing import Final, Mapping, Protocol, TypedDict
+
+from keeper.executive.founder_capability import (
+    FounderAuthorizationCapability,
+    FounderCapabilityClaims,
+    ProductionFounderCapabilityIssuer,
+    ProductionFounderCapabilityVerifier,
+    TestFounderCapabilityIssuer,
+    TestFounderCapabilityVerifier,
+)
 
 from keeper.executive.models import (
     FounderApprovalChallenge,
@@ -20,7 +27,7 @@ from keeper.executive.models import (
 
 
 APPLICATION_IDENTITY: Final = "KEEPER_EXECUTIVE"
-PROOF_VERSION: Final = 1
+PROOF_VERSION: Final = 2
 CONFIRMATION_LIFETIME: Final = timedelta(minutes=2)
 
 
@@ -99,13 +106,12 @@ class ProductionFounderAuthenticator:
     """OS-backed local confirmation. No identity is accepted from the caller."""
 
     __slots__ = (
-        "__key", "__machine_identity", "__founder_sid", "__key_path",
+        "__machine_identity", "__founder_sid", "__capability_issuer",
         "__sealed",
     )
-    __key: bytes
     __machine_identity: str
     __founder_sid: str
-    __key_path: Path
+    __capability_issuer: ProductionFounderCapabilityIssuer
     __sealed: bool
 
     def __init__(self, key_path: Path) -> None:
@@ -114,10 +120,9 @@ class ProductionFounderAuthenticator:
                 "production Founder authentication requires local Windows APIs"
             )
         object.__setattr__(self, "_ProductionFounderAuthenticator__sealed", False)
-        path = key_path.resolve()
-        key = _load_or_create_dpapi_key(path)
-        object.__setattr__(self, "_ProductionFounderAuthenticator__key_path", path)
-        object.__setattr__(self, "_ProductionFounderAuthenticator__key", key)
+        # Constructor compatibility only. Production proof and capability
+        # signing no longer use an exportable current-user DPAPI key.
+        key_path.resolve()
         object.__setattr__(
             self,
             "_ProductionFounderAuthenticator__machine_identity",
@@ -127,6 +132,11 @@ class ProductionFounderAuthenticator:
             self,
             "_ProductionFounderAuthenticator__founder_sid",
             _current_process_sid(),
+        )
+        object.__setattr__(
+            self,
+            "_ProductionFounderAuthenticator__capability_issuer",
+            ProductionFounderCapabilityIssuer(self.__founder_sid),
         )
         object.__setattr__(self, "_ProductionFounderAuthenticator__sealed", True)
 
@@ -175,7 +185,8 @@ class ProductionFounderAuthenticator:
             "proof_version": PROOF_VERSION,
         }
         return ProductionApprovalConfirmation(
-            **unsigned, proof=_sign(self.__key, unsigned)
+            **unsigned,
+            proof=self.__capability_issuer.sign_confirmation(unsigned),
         )
 
     def verify(
@@ -188,7 +199,7 @@ class ProductionFounderAuthenticator:
                 "production authentication rejects non-production confirmation"
             )
         return _verify_confirmation(
-            self.__key,
+            self.__capability_issuer,
             self.__machine_identity,
             challenge,
             confirmation,
@@ -196,18 +207,39 @@ class ProductionFounderAuthenticator:
             expected_principal_sid=self.__founder_sid,
         )
 
+    def issue_authorization_capability(
+        self,
+        claims: FounderCapabilityClaims,
+        confirmation: ApprovalConfirmation,
+    ) -> FounderAuthorizationCapability:
+        if type(confirmation) is not ProductionApprovalConfirmation:
+            raise PermissionError(
+                "production capability rejects non-production confirmation"
+            )
+        return self.__capability_issuer.issue(claims, asdict(confirmation))
+
+    def capability_verifier_configuration(self) -> dict[str, object]:
+        return self.__capability_issuer.verifier_configuration()
+
+    def verify_authorization_capability(
+        self, value: Mapping[str, object]
+    ) -> FounderAuthorizationCapability:
+        return ProductionFounderCapabilityVerifier(
+            self.capability_verifier_configuration()
+        ).verify(value)
+
 
 class TestFounderAuthenticator:
     """Deterministic test-only trust boundary; never accepted by production."""
 
     __slots__ = (
-        "__key", "__principal_sid", "__account_name", "__machine_identity",
-        "__sealed",
+        "__principal_sid", "__account_name", "__machine_identity",
+        "__capability_issuer", "__sealed",
     )
-    __key: bytes
     __principal_sid: str
     __account_name: str
     __machine_identity: str
+    __capability_issuer: TestFounderCapabilityIssuer
     __sealed: bool
     __test__ = False
 
@@ -221,10 +253,14 @@ class TestFounderAuthenticator:
         if not principal_sid.startswith("S-1-"):
             raise ValueError("test principal must use a canonical SID")
         object.__setattr__(self, "_TestFounderAuthenticator__sealed", False)
-        object.__setattr__(self, "_TestFounderAuthenticator__key", secrets.token_bytes(32))
         object.__setattr__(self, "_TestFounderAuthenticator__principal_sid", principal_sid)
         object.__setattr__(self, "_TestFounderAuthenticator__account_name", account_name)
         object.__setattr__(self, "_TestFounderAuthenticator__machine_identity", machine_identity)
+        object.__setattr__(
+            self,
+            "_TestFounderAuthenticator__capability_issuer",
+            TestFounderCapabilityIssuer(),
+        )
         object.__setattr__(self, "_TestFounderAuthenticator__sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -260,7 +296,8 @@ class TestFounderAuthenticator:
             "proof_version": PROOF_VERSION,
         }
         return TestApprovalConfirmation(
-            **unsigned, proof=_sign(self.__key, unsigned)
+            **unsigned,
+            proof=self.__capability_issuer.sign_confirmation(unsigned),
         )
 
     def verify(
@@ -273,7 +310,7 @@ class TestFounderAuthenticator:
                 "test authentication rejects production confirmation"
             )
         return _verify_confirmation(
-            self.__key,
+            self.__capability_issuer,
             self.__machine_identity,
             challenge,
             confirmation,
@@ -281,8 +318,30 @@ class TestFounderAuthenticator:
             expected_principal_sid=self.__principal_sid,
         )
 
+    def issue_authorization_capability(
+        self,
+        claims: FounderCapabilityClaims,
+        confirmation: ApprovalConfirmation,
+    ) -> FounderAuthorizationCapability:
+        if type(confirmation) is not TestApprovalConfirmation:
+            raise PermissionError(
+                "test capability rejects production confirmation"
+            )
+        return self.__capability_issuer.issue(claims, asdict(confirmation))
+
+    def verify_authorization_capability(
+        self, value: Mapping[str, object]
+    ) -> FounderAuthorizationCapability:
+        return TestFounderCapabilityVerifier().verify(value)
+
 
 FounderAuthenticator = ProductionFounderAuthenticator | TestFounderAuthenticator
+
+
+class _ConfirmationVerifier(Protocol):
+    def verify_confirmation(
+        self, unsigned: Mapping[str, object], signature: str
+    ) -> bool: ...
 
 
 def confirmation_response_digest(confirmation: ApprovalConfirmation) -> str:
@@ -290,7 +349,7 @@ def confirmation_response_digest(confirmation: ApprovalConfirmation) -> str:
 
 
 def _verify_confirmation(
-    key: bytes,
+    verifier: _ConfirmationVerifier,
     machine_identity: str,
     challenge: FounderApprovalChallenge,
     confirmation: ApprovalConfirmation,
@@ -300,11 +359,10 @@ def _verify_confirmation(
 ) -> FounderAuthenticatedSession:
     unsigned = asdict(confirmation)
     proof = str(unsigned.pop("proof"))
-    expected = _sign(key, unsigned)
     now = datetime.now(UTC)
     expires = datetime.fromisoformat(confirmation.expires_at)
     authenticated = datetime.fromisoformat(confirmation.authenticated_at)
-    if not hmac.compare_digest(proof, expected):
+    if not verifier.verify_confirmation(unsigned, proof):
         raise PermissionError("Founder challenge response proof is invalid")
     if (
         confirmation.authentication_method != expected_method
@@ -351,13 +409,6 @@ def _verify_confirmation(
         None,
         None,
     )
-
-
-def _sign(key: bytes, value: Mapping[str, object]) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hmac.new(key, encoded, hashlib.sha256).hexdigest()
 
 
 class _DataBlob(ctypes.Structure):
@@ -487,12 +538,6 @@ def _credential_ui_logon() -> tuple[str, str, str]:
     output = ctypes.c_void_p()
     output_size = wintypes.ULONG()
     save = wintypes.BOOL(False)
-    result = credui.CredUIPromptForWindowsCredentialsW(
-        None, 0, ctypes.byref(package), None, 0, ctypes.byref(output),
-        ctypes.byref(output_size), ctypes.byref(save), 0x1,
-    )
-    if result != 0:
-        raise PermissionError("Windows Founder authentication was canceled or failed")
     username = ctypes.create_unicode_buffer(512)
     domain = ctypes.create_unicode_buffer(512)
     password = ctypes.create_unicode_buffer(512)
@@ -501,6 +546,14 @@ def _credential_ui_logon() -> tuple[str, str, str]:
     password_size = wintypes.DWORD(len(password))
     token = wintypes.HANDLE()
     try:
+        result = credui.CredUIPromptForWindowsCredentialsW(
+            None, 0, ctypes.byref(package), None, 0, ctypes.byref(output),
+            ctypes.byref(output_size), ctypes.byref(save), 0x1,
+        )
+        if result != 0:
+            raise PermissionError(
+                "Windows Founder authentication was canceled or failed"
+            )
         if not credui.CredUnPackAuthenticationBufferW(
             0, output, output_size, username, ctypes.byref(username_size),
             domain, ctypes.byref(domain_size), password,
@@ -520,10 +573,31 @@ def _credential_ui_logon() -> tuple[str, str, str]:
         )
         return sid, account, logon_session
     finally:
-        ctypes.memset(ctypes.addressof(password), 0, ctypes.sizeof(password))
+        _secure_zero(ctypes.addressof(username), ctypes.sizeof(username))
+        _secure_zero(ctypes.addressof(domain), ctypes.sizeof(domain))
+        _secure_zero(ctypes.addressof(password), ctypes.sizeof(password))
         if token:
             kernel.CloseHandle(token)
-        ctypes.windll.ole32.CoTaskMemFree(output)
+        _zero_and_free_authentication_buffer(output, output_size.value)
+
+
+def _secure_zero(address: int, length: int) -> None:
+    if address and length > 0:
+        ctypes.memset(address, 0, length)
+
+
+def _zero_and_free_authentication_buffer(
+    buffer: ctypes.c_void_p, length: int
+) -> None:
+    if not buffer:
+        return
+    free = ctypes.windll.ole32.CoTaskMemFree
+    free.argtypes = [ctypes.c_void_p]
+    free.restype = None
+    try:
+        _secure_zero(int(buffer.value or 0), length)
+    finally:
+        free(buffer)
 
 
 def _token_identity(token: object) -> tuple[str, str]:

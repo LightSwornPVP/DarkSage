@@ -17,7 +17,11 @@ from keeper.executive.specialists import (
     SpecialistOrchestrator,
     SpecialistResult,
 )
-from tests.keeper.executive.test_intake_charters import approved_project, explicitly_approve
+from tests.keeper.executive.test_intake_charters import (
+    approved_project,
+    explicitly_approve,
+    service as test_charter_service,
+)
 from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
     semantic_gateway,
@@ -26,40 +30,11 @@ from tests.keeper.executive.test_specialists import FakeGateway, profile, result
 
 
 def test_injected_non_production_authoritative_scenario_a_software_full_delegation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        "keeper.executive.founder_auth._credential_ui_logon",
-        lambda: (
-            "S-1-5-21-1000-1000-1000-1001",
-            "KEEPER-TEST\\Founder",
-            "test-logon-session",
-        ),
-    )
-    monkeypatch.setattr(
-        "keeper.executive.founder_auth._current_process_sid",
-        lambda: "S-1-5-21-1000-1000-1000-1001",
-    )
-    executive = KeeperExecutive(tmp_path / "keeper.db")
-    project, intake = executive.begin(
-        f"I want a small application called Pocket List in {tmp_path}. "
-        "Use full delegation, no spending, and do not push."
-    )
-    draft = executive.draft(
-        project.project_id,
-        intake,
-        founder_revisions={
-            "success_criteria": ("all acceptance checks pass",),
-            "target_audience": "personal users",
-            "approved_providers": ("codex", "reviewer-provider"),
-            "approved_tools": ("filesystem",),
-        },
-    )
-    service = executive.charters
-    approved, _ = explicitly_approve(service, service.propose(draft))
-    active = service.activate(approved)
+    service, active, _charter = approved_project(tmp_path)
     gateway, authority = semantic_gateway(tmp_path)
-    runtime = ExecutiveRuntime(executive.repository, gateway)
+    runtime = ExecutiveRuntime(service.repository, gateway)
     for _ in range(20):
         active = runtime.progress(active.project_id)
         if active.state == "COMPLETED":
@@ -67,34 +42,22 @@ def test_injected_non_production_authoritative_scenario_a_software_full_delegati
     assert active.state == "COMPLETED"
     assert all(
         task.authority_attempt_id
-        for task in executive.repository.tasks(active.project_id)
+        for task in service.repository.tasks(active.project_id)
     )
     assert authority.execution_calls
-    assert executive.repository.decisions(active.project_id)
-    assert executive.repository.memories(active.project_id)
+    assert service.repository.decisions(active.project_id)
+    assert service.repository.memories(active.project_id)
 
 
 def test_injected_non_production_authoritative_scenario_b_non_software(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        "keeper.executive.founder_auth._credential_ui_logon",
-        lambda: (
-            "S-1-5-21-1000-1000-1000-1001",
-            "KEEPER-TEST\\Founder",
-            "test-logon-session",
+    service = test_charter_service(tmp_path)
+    intake = ConversationIntake.revise(
+        ConversationIntake().extract(
+            "Research urban gardens and create a sourced final report."
         ),
-    )
-    monkeypatch.setattr(
-        "keeper.executive.founder_auth._current_process_sid",
-        lambda: "S-1-5-21-1000-1000-1000-1001",
-    )
-    executive = KeeperExecutive(tmp_path / "keeper.db")
-    project, intake = executive.begin("Research urban gardens and create a sourced final report.")
-    draft = executive.draft(
-        project.project_id,
-        intake,
-        founder_revisions={
+        replacements={
             "success_criteria": ("all material claims are sourced",),
             "target_audience": "city planners",
             "approved_providers": ("codex", "reviewer-provider"),
@@ -103,11 +66,12 @@ def test_injected_non_production_authoritative_scenario_b_non_software(
             "delegation_mode": "FULL_DELEGATION",
         },
     )
+    project = service.create_project(intake)
     approved, _ = explicitly_approve(
-        executive.charters, executive.charters.propose(draft)
+        service, service.propose(service.draft(project, intake))
     )
-    active = executive.charters.activate(approved)
-    workflow, _ = WorkflowPlanner(executive.repository).generate(active, approved)
+    active = service.activate(approved)
+    workflow, _ = WorkflowPlanner(service.repository).generate(active, approved)
     titles = {stage.title for stage in workflow.stages}
     assert "Source quality review" in titles
     assert "Implementation" not in titles
@@ -180,15 +144,21 @@ def test_scenario_g_restart_does_not_duplicate_completed_work(tmp_path: Path) ->
         task.task_id for task in service.repository.tasks(project.project_id)
         if task.status == "COMPLETED"
     }
-    reopened = KeeperExecutive(service.repository.store.path)
+    from keeper.executive.founder_auth import TestFounderAuthenticator
+    from keeper.executive.repository import TestExecutiveRepository
+    from keeper.app.storage import KeeperStore
+
+    reopened_store = KeeperStore(service.repository.store.path)
+    reopened_store.migrate()
+    reopened = TestExecutiveRepository(
+        reopened_store, TestFounderAuthenticator()
+    )
     reopened_gateway, _ = semantic_gateway(
         tmp_path, transport=authority
     )
-    ExecutiveRuntime(
-        reopened.repository, reopened_gateway
-    ).progress(project.project_id)
+    ExecutiveRuntime(reopened, reopened_gateway).progress(project.project_id)
     completed_after = [
-        task.task_id for task in reopened.repository.tasks(project.project_id)
+        task.task_id for task in reopened.tasks(project.project_id)
         if task.status == "COMPLETED"
     ]
     assert completed_before.issubset(completed_after)
