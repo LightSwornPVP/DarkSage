@@ -318,11 +318,21 @@ class ExecutiveRuntime:
                 ExecutiveState.BLOCKED,
                 "Provider execution is uncertain and is not retry-safe.",
             )
-        imported = self.repository.accept_author_completion(
-            running.task_id,
-            expected_revision=running.revision,
-            result=asdict(result),
-        )
+        try:
+            imported = self.repository.accept_author_completion(
+                running.task_id,
+                expected_revision=running.revision,
+                result=asdict(result),
+            )
+        except PermissionError:
+            current = self.repository.task(running.task_id)
+            if (
+                current.authority_attempt_id
+                == running.authority_attempt_id
+                and current.revision != running.revision
+            ):
+                return self.repository.project(project_id)
+            raise
         self._record_author_evidence(imported, result.evidence_digest)
         if imported.status != TaskStatus.REVIEW_REQUIRED:
             return self._pause(
@@ -438,9 +448,12 @@ class ExecutiveRuntime:
             for item in task.review_requirements
         )
         if not requires_independent:
-            self.repository.complete_automated_review(
-                task.task_id, expected_revision=task.revision
-            )
+            try:
+                self.repository.complete_automated_review(
+                    task.task_id, expected_revision=task.revision
+                )
+            except PermissionError:
+                return self.repository.project(project.project_id)
             return project
         profiles = self.gateway.specialists(charter)
         reviewer = self.selector.select(
@@ -488,11 +501,14 @@ class ExecutiveRuntime:
                 "Do not approve your own session or attempt.",
             ),
         )
-        claimed = self.repository.claim_review(
-            task.task_id,
-            expected_revision=task.revision,
-            plan=asdict(plan),
-        )
+        try:
+            claimed = self.repository.claim_review(
+                task.task_id,
+                expected_revision=task.revision,
+                plan=asdict(plan),
+            )
+        except PermissionError:
+            return self.repository.project(project.project_id)
         try:
             self.gateway.reserve(plan)
             self.repository.transition_review(
@@ -665,11 +681,20 @@ class ExecutiveRuntime:
                     ExecutiveState.BLOCKED,
                     "Claimed execution awaits Authority reconciliation; no retry was created.",
                 )
-        imported = self.repository.accept_author_completion(
-            task.task_id,
-            expected_revision=task.revision,
-            result=asdict(completion),
-        )
+        try:
+            imported = self.repository.accept_author_completion(
+                task.task_id,
+                expected_revision=task.revision,
+                result=asdict(completion),
+            )
+        except PermissionError:
+            current = self.repository.task(task.task_id)
+            if (
+                current.authority_attempt_id == task.authority_attempt_id
+                and current.revision != task.revision
+            ):
+                return self.repository.project(project.project_id)
+            raise
         if imported.status == TaskStatus.CANCELED:
             self._record_author_evidence(
                 imported, completion.evidence_digest

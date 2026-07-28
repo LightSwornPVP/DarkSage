@@ -15,6 +15,7 @@ from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
     semantic_gateway,
 )
+from tests.keeper.executive.fixture_store import replace_executive_fixture
 from tests.keeper.executive.test_intake_charters import approved_project
 
 
@@ -100,6 +101,79 @@ def test_restart_reconciles_reserved_review_without_duplicate_attempt(
     assert completed.review_attempt_id == review_attempt_id
     reviews = service.repository.reviews(project.project_id)
     assert len(reviews) == 1
+
+
+def test_concurrent_authenticated_completion_import_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    gateway, _ = semantic_gateway(tmp_path)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
+    imported = service.repository.tasks(project.project_id)[0]
+    assert imported.authority_attempt_id is not None
+    attempt = service.repository.execution_attempt(
+        imported.authority_attempt_id
+    )
+    completion = {
+        "authority_attempt_id": imported.authority_attempt_id,
+        "task_id": imported.task_id,
+        "authenticated": True,
+        "terminal_disposition": "SUCCEEDED",
+        "completion_digest": attempt["completion_digest"],
+        "artifact_digest": attempt["artifact_digest"],
+        "artifact_identity": attempt["artifact_identity"],
+        "artifact_files": attempt["artifact_files"],
+        "evidence_digest": attempt["evidence_digest"],
+    }
+    pending = replace(
+        imported,
+        status=TaskStatus.RUNNING.value,
+        artifact_digest=None,
+        review_attempt_id=None,
+        result_disposition=None,
+        attempt_history=(),
+        revision=imported.revision + 1,
+        updated_at=utc_now(),
+    )
+    replace_executive_fixture(
+        service.repository.store,
+        "executive_tasks",
+        pending.task_id,
+        pending.to_dict(),
+    )
+    replace_executive_fixture(
+        service.repository.store,
+        "executive_execution_attempts",
+        imported.authority_attempt_id,
+        {**attempt, "state": "EXECUTION_STARTED"},
+    )
+
+    def import_completion() -> str:
+        repository = type(service.repository)(
+            type(service.repository.store)(
+                service.repository.store.path
+            )
+        )
+        return repository.accept_author_completion(
+            pending.task_id,
+            expected_revision=pending.revision,
+            result=dict(completion),
+        ).status
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(lambda _: import_completion(), range(2)))
+    final = service.repository.task(pending.task_id)
+    assert outcomes == ("REVIEW_REQUIRED", "REVIEW_REQUIRED")
+    assert final.status == "REVIEW_REQUIRED"
+    assert final.review_attempt_id is None
+    assert len(final.attempt_history) == 1
+    assert (
+        final.attempt_history[0]["completion_digest"]
+        == completion["completion_digest"]
+    )
+
 
 def test_two_runtime_instances_create_one_claim_and_one_launch(
     tmp_path: Path,
