@@ -314,4 +314,3 @@ def test_authentication_buffer_is_zeroed_before_single_free(
         ctypes.c_void_p(0x1234), 73
     )
     assert order == [("zero", 73), ("free", 0x1234)]
-

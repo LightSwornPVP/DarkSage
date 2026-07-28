@@ -20,6 +20,11 @@ from keeper.executive.enums import FounderApprovalIntent
 from keeper.app.storage import KeeperStore
 from keeper.executive.charters import CharterService
 from keeper.executive.founder_auth import TestFounderAuthenticator
+from keeper.executive.founder_capability import (
+    TestFounderCapabilityVerifier,
+    capability_digest,
+    capability_signature_digest,
+)
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.repository import TestExecutiveRepository
 from keeper.executive.runtime import ExecutiveRuntime
@@ -111,17 +116,65 @@ class PilotAuthorityTransport:
         }
 
     def authorize_project_launch(self, **identity: Any) -> dict[str, Any]:
+        if set(identity) != {"founder_capability"}:
+            raise PermissionError("signed Founder capability is required")
+        value = identity["founder_capability"]
+        if not isinstance(value, dict):
+            raise PermissionError("Founder capability is malformed")
+        capability = TestFounderCapabilityVerifier().verify(value)
         identifier = (
-            f"launch-authorization:{identity['project_id']}:"
-            f"generation:{identity['authorization_generation']}"
+            f"launch-authorization:{capability.project_id}:"
+            f"generation:{capability.authorization_generation}"
         )
+        digest = capability_digest(capability)
+        existing = self.launch_authorizations.get(identifier)
+        if existing is not None:
+            if (
+                existing.get("service_state") == "ACTIVE"
+                and existing.get("founder_capability_digest") == digest
+            ):
+                return {
+                    "authorization": {
+                        key: item
+                        for key, item in existing.items()
+                        if key != "service_state"
+                    }
+                }
+            raise PermissionError("pilot launch generation is revoked or stale")
         authorization = self._sign(
             "project-launch-authorization",
             {
                 "id": identifier,
-                "schema_version": 1,
-                **identity,
-                "revocation_epoch": identity["authorization_generation"] - 1,
+                "kind": "project_launch_authorization",
+                "schema_version": 2,
+                "project_id": capability.project_id,
+                "charter_id": capability.charter_id,
+                "charter_revision": capability.charter_revision,
+                "delegation_id": capability.approval_record_id,
+                "founder_approval_event_id": capability.approval_event_id,
+                "founder_approval_event_digest": capability.approval_event_digest,
+                "founder_approval_digest": capability.approval_digest,
+                "founder_authenticated_session_id": (
+                    capability.founder_authenticated_session_id
+                ),
+                "founder_principal_sid": capability.founder_principal_sid,
+                "founder_challenge_id": capability.challenge_id,
+                "founder_challenge_proof_digest": (
+                    capability.challenge_proof_digest
+                ),
+                "founder_action_digest": capability.action_digest,
+                "founder_capability_id": capability.capability_id,
+                "founder_capability_digest": digest,
+                "founder_capability_signature_digest": (
+                    capability_signature_digest(capability)
+                ),
+                "founder_capability_issuer_id": capability.issuer_id,
+                "founder_capability_issuer_key_id": capability.issuer_key_id,
+                "authorization_generation": capability.authorization_generation,
+                "revocation_epoch": capability.revocation_epoch,
+                "authorized_client_sid": "pilot-injected-client",
+                "expires_at": capability.expires_at,
+                "authorized_at": capability.issued_at,
             },
         )
         self.launch_authorizations[identifier] = {
