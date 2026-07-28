@@ -49,7 +49,13 @@ PROJECT_TRANSITIONS: dict[ExecutiveState, frozenset[ExecutiveState]] = {
         {ExecutiveState.PLANNING, ExecutiveState.EXECUTING, ExecutiveState.PAUSED, ExecutiveState.CANCELED}
     ),
     ExecutiveState.PAUSED: frozenset(
-        {ExecutiveState.ACTIVE, ExecutiveState.PLANNING, ExecutiveState.EXECUTING, ExecutiveState.CANCELED}
+        {
+            ExecutiveState.ACTIVE,
+            ExecutiveState.AWAITING_CHARTER_APPROVAL,
+            ExecutiveState.PLANNING,
+            ExecutiveState.EXECUTING,
+            ExecutiveState.CANCELED,
+        }
     ),
     ExecutiveState.WAITING_FOR_PROVIDER: frozenset(
         {ExecutiveState.EXECUTING, ExecutiveState.PAUSED, ExecutiveState.CANCELED}

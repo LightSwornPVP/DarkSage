@@ -12,6 +12,7 @@ from keeper.executive.enums import (
     CharterStatus,
     DelegationMode,
     ExecutiveState,
+    FounderApprovalIntent,
     MemoryKind,
     ReviewPolicy,
     TaskStatus,
@@ -188,6 +189,9 @@ class ProjectCharter(StrictRecord):
     founder_approval_record_id: str | None
     created_at: str
     updated_at: str
+    founder_approval_event_id: str | None = None
+    founder_approval_event_digest: str | None = None
+    founder_authenticated_session_id: str | None = None
 
     FIELDS = frozenset(
         {
@@ -202,6 +206,8 @@ class ProjectCharter(StrictRecord):
             "revision", "status", "supersedes_charter_id", "change_reason",
             "differences", "founder_approval_identity", "founder_approval_record_id",
             "created_at", "updated_at",
+            "founder_approval_event_id", "founder_approval_event_digest",
+            "founder_authenticated_session_id",
         }
     )
     TUPLE_FIELDS = (
@@ -226,7 +232,11 @@ class ProjectCharter(StrictRecord):
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ProjectCharter:
-        data = cls._validated_data(value)
+        normalized = dict(value)
+        normalized.setdefault("founder_approval_event_id", None)
+        normalized.setdefault("founder_approval_event_digest", None)
+        normalized.setdefault("founder_authenticated_session_id", None)
+        data = cls._validated_data(normalized)
         for key in cls.TUPLE_FIELDS:
             data[key] = tuple(data[key])
         envelope = data["authority_envelope"]
@@ -292,6 +302,7 @@ class FounderApprovalChallenge(StrictRecord):
     charter_revision: int
     charter_digest: str
     approval_action: str
+    approval_binding: dict[str, Any] | None
     nonce: str
     requested_at: str
     expires_at: str
@@ -307,6 +318,7 @@ class FounderApprovalChallenge(StrictRecord):
             "charter_revision",
             "charter_digest",
             "approval_action",
+            "approval_binding",
             "nonce",
             "requested_at",
             "expires_at",
@@ -316,8 +328,14 @@ class FounderApprovalChallenge(StrictRecord):
     )
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or self.state not in {"PENDING", "CONSUMED"}:
+        if self.schema_version != 2 or self.state not in {"PENDING", "CONSUMED"}:
             raise ValueError("Founder approval challenge is invalid")
+        FounderApprovalIntent(self.approval_action)
+        if self.approval_action == FounderApprovalIntent.APPROVE_ACTION:
+            if not isinstance(self.approval_binding, dict):
+                raise ValueError("action approval challenge requires an exact binding")
+        elif self.approval_binding is not None:
+            raise ValueError("charter approval challenge cannot contain an action binding")
         validate_timestamp(self.requested_at, "requested_at")
         validate_timestamp(self.expires_at, "expires_at")
 
@@ -334,6 +352,10 @@ class FounderApprovalEvent(StrictRecord):
     schema_version: int
     authenticated_identity: str
     authentication_method: str
+    authenticated_account: str
+    authenticated_session_id: str
+    machine_identity: str
+    application_identity: str
     project_id: str
     charter_id: str
     charter_revision: int
@@ -341,7 +363,9 @@ class FounderApprovalEvent(StrictRecord):
     approval_action: str
     explicit_intent: str
     challenge_id: str
-    challenge_nonce: str
+    challenge_response_digest: str
+    proof_version: int
+    source_user_interaction_id: str
     confirmed_at: str
     expires_at: str | None
 
@@ -351,6 +375,10 @@ class FounderApprovalEvent(StrictRecord):
             "schema_version",
             "authenticated_identity",
             "authentication_method",
+            "authenticated_account",
+            "authenticated_session_id",
+            "machine_identity",
+            "application_identity",
             "project_id",
             "charter_id",
             "charter_revision",
@@ -358,7 +386,9 @@ class FounderApprovalEvent(StrictRecord):
             "approval_action",
             "explicit_intent",
             "challenge_id",
-            "challenge_nonce",
+            "challenge_response_digest",
+            "proof_version",
+            "source_user_interaction_id",
             "confirmed_at",
             "expires_at",
         }
@@ -366,17 +396,84 @@ class FounderApprovalEvent(StrictRecord):
 
     def __post_init__(self) -> None:
         if (
-            self.schema_version != 1
-            or self.authenticated_identity != "LOCAL_FOUNDER"
-            or self.authentication_method != "LOCAL_FOUNDER_EXPLICIT_CONFIRMATION"
+            self.schema_version != 2
+            or not self.authenticated_identity.startswith("S-1-")
+            or self.authentication_method
+            not in {"WINDOWS_CREDENTIAL_LOGON", "TEST_CHALLENGE_HMAC"}
+            or not self.authenticated_account
+            or not self.authenticated_session_id
+            or not self.machine_identity
+            or self.application_identity != "KEEPER_EXECUTIVE"
+            or self.proof_version != 1
+            or not self.source_user_interaction_id
         ):
             raise ValueError("Founder approval event is invalid")
+        FounderApprovalIntent(self.approval_action)
         validate_timestamp(self.confirmed_at, "confirmed_at")
         if self.expires_at is not None:
             validate_timestamp(self.expires_at, "expires_at")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> FounderApprovalEvent:
+        return cls(**cls._validated_data(value))
+
+
+@dataclass(frozen=True, slots=True)
+class FounderAuthenticatedSession(StrictRecord):
+    session_id: str
+    schema_version: int
+    principal_sid: str
+    account_name: str
+    authentication_method: str
+    authenticated_at: str
+    expires_at: str
+    machine_identity: str
+    application_identity: str
+    process_identity: str
+    challenge_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    approval_action: str
+    bound_digest: str
+    proof_digest: str
+    state: str
+    revoked_at: str | None
+    consumed_at: str | None
+
+    FIELDS = frozenset(
+        {
+            "session_id", "schema_version", "principal_sid", "account_name",
+            "authentication_method", "authenticated_at", "expires_at",
+            "machine_identity", "application_identity", "process_identity",
+            "challenge_id", "project_id", "charter_id", "charter_revision",
+            "approval_action", "bound_digest", "proof_digest", "state",
+            "revoked_at", "consumed_at",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 2
+            or not self.principal_sid.startswith("S-1-")
+            or self.authentication_method
+            not in {"WINDOWS_CREDENTIAL_LOGON", "TEST_CHALLENGE_HMAC"}
+            or self.application_identity != "KEEPER_EXECUTIVE"
+            or self.state not in {"ACTIVE", "CONSUMED", "REVOKED"}
+        ):
+            raise ValueError("authenticated Founder session is invalid")
+        FounderApprovalIntent(self.approval_action)
+        validate_timestamp(self.authenticated_at, "authenticated_at")
+        validate_timestamp(self.expires_at, "expires_at")
+        if self.revoked_at is not None:
+            validate_timestamp(self.revoked_at, "revoked_at")
+        if self.consumed_at is not None:
+            validate_timestamp(self.consumed_at, "consumed_at")
+
+    @classmethod
+    def from_dict(
+        cls, value: dict[str, Any]
+    ) -> FounderAuthenticatedSession:
         return cls(**cls._validated_data(value))
 
 
@@ -464,6 +561,8 @@ class ProposedAction(StrictRecord):
     security_boundary_impact: bool = False
     trusted_source: str = "CALLER"
     effect_classes: tuple[str, ...] = ()
+    repository: str | None = None
+    branch: str | None = None
 
     FIELDS = frozenset(
         {
@@ -473,6 +572,7 @@ class ProposedAction(StrictRecord):
             "objective", "currency", "publication", "deployment", "spending",
             "git_mutation", "security_boundary_impact", "trusted_source",
             "effect_classes",
+            "repository", "branch",
         }
     )
 
@@ -500,6 +600,8 @@ class ProposedAction(StrictRecord):
             "security_boundary_impact": False,
             "trusted_source": "CALLER",
             "effect_classes": (),
+            "repository": None,
+            "branch": None,
         }.items():
             normalized.setdefault(key, default)
         data = cls._validated_data(normalized)

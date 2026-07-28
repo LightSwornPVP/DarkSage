@@ -7,6 +7,7 @@ import pytest
 from keeper.app.storage import KeeperStore
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import FounderApprovalIntent
+from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import ProjectCharter, ProjectRecord
 from keeper.executive.models import utc_now
@@ -17,7 +18,11 @@ from keeper.executive.surfaces import StatusSurface
 def service(tmp_path: Path) -> CharterService:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
-    return CharterService(ExecutiveRepository(store))
+    authenticator = TestFounderAuthenticator()
+    repository = ExecutiveRepository(
+        store, founder_authenticator=authenticator
+    )
+    return CharterService.for_test(repository, authenticator)
 
 
 def explicitly_approve(
@@ -25,9 +30,11 @@ def explicitly_approve(
     proposed: ProjectCharter,
 ) -> tuple[ProjectCharter, object]:
     challenge = charter_service.request_approval(proposed)
+    confirmation = charter_service.authenticate(challenge)
     approved, approval, _ = charter_service.confirm_approval(
         challenge.challenge_id,
         intent=FounderApprovalIntent.APPROVE_CHARTER,
+        confirmation=confirmation,
     )
     return approved, approval
 

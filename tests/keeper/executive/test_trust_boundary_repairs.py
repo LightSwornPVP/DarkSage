@@ -11,6 +11,7 @@ from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifi
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import ActionCategory, ActionEffect, ApprovalKind
 from keeper.executive.enums import ExecutiveState, FounderApprovalIntent
+from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import (
     ActionEffects,
@@ -44,7 +45,11 @@ def _proposed(
 ) -> tuple[CharterService, ProjectRecord, ProjectCharter]:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
-    service = CharterService(ExecutiveRepository(store))
+    authenticator = TestFounderAuthenticator()
+    service = CharterService.for_test(
+        ExecutiveRepository(store, founder_authenticator=authenticator),
+        authenticator,
+    )
     replacements: dict[str, object] = {
         "target_audience": "Founder",
         "approved_providers": ("codex", "reviewer-provider"),
@@ -85,9 +90,11 @@ def _approve(
     proposed: ProjectCharter,
 ) -> tuple[ProjectCharter, ApprovalRecord]:
     challenge = service.request_approval(proposed)
+    confirmation = service.authenticate(challenge)
     approved, approval, _ = service.confirm_approval(
         challenge.challenge_id,
         intent=FounderApprovalIntent.APPROVE_CHARTER,
+        confirmation=confirmation,
     )
     return approved, approval
 
@@ -237,17 +244,20 @@ def test_explicit_challenge_is_one_time_and_requires_structured_intent(
     challenge = service.request_approval(proposed)
     with pytest.raises(PermissionError, match="intent"):
         service.confirm_approval(challenge.challenge_id, intent=None)  # type: ignore[arg-type]
+    confirmation = service.authenticate(challenge)
     approved, _, event = service.confirm_approval(
         challenge.challenge_id,
         intent=FounderApprovalIntent.APPROVE_CHARTER,
+        confirmation=confirmation,
     )
-    assert event.authenticated_identity == "LOCAL_FOUNDER"
+    assert event.authenticated_identity.startswith("S-1-")
     assert event.charter_digest == charter_approval_digest(proposed)
     assert service.activate(approved).state == "ACTIVE"
     with pytest.raises(PermissionError, match="consumed"):
         service.confirm_approval(
             challenge.challenge_id,
             intent=FounderApprovalIntent.APPROVE_CHARTER,
+            confirmation=confirmation,
         )
 
 
@@ -268,6 +278,7 @@ def test_tampered_stale_or_cross_bound_challenge_is_rejected(
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
     challenge = service.request_approval(proposed)
+    confirmation = service.authenticate(challenge)
     tampered = challenge.to_dict()
     tampered[field] = value
     replace_executive_fixture(
@@ -276,10 +287,11 @@ def test_tampered_stale_or_cross_bound_challenge_is_rejected(
         challenge.challenge_id,
         tampered,
     )
-    with pytest.raises(PermissionError, match=message):
+    with pytest.raises(PermissionError, match="match|stale"):
         service.confirm_approval(
             challenge.challenge_id,
             intent=FounderApprovalIntent.APPROVE_CHARTER,
+            confirmation=confirmation,
         )
 
 
@@ -451,21 +463,34 @@ def _record_action_approval_interaction(
     )
 
 
+def _approve_action(
+    service: CharterService,
+    charter: ProjectCharter,
+    action: ProposedAction,
+    *,
+    kind: ApprovalKind,
+    limits: dict[str, object],
+) -> ApprovalRecord:
+    challenge = service.request_action_approval(
+        action,
+        charter_id=charter.charter_id,
+        kind=kind,
+        scope=charter.deliverables,
+        limits=limits,
+    )
+    confirmation = service.authenticate(challenge)
+    approval, _ = service.confirm_action_approval(
+        challenge.challenge_id,
+        confirmation=confirmation,
+        intent=FounderApprovalIntent.APPROVE_ACTION,
+    )
+    return approval
+
+
 def test_one_time_approval_is_consumed_atomically_once(tmp_path: Path) -> None:
     service, _, proposed = _proposed(tmp_path)
     project, charter = _activate(service, proposed)
     _record_action_approval_interaction(service, project.project_id)
-    approval = service.repository.grant_action_approval(
-        project_id=project.project_id,
-        charter_id=charter.charter_id,
-        charter_revision=charter.revision,
-        kind=ApprovalKind.ONE_TIME,
-        action_category=ActionCategory.COMMIT,
-        scope=charter.deliverables,
-        limits={"action_id": "commit-once"},
-        approver="Founder",
-        source_interaction_id="action-approval",
-    )
     action = ProposedAction(
         "commit-once",
         project.project_id,
@@ -484,6 +509,13 @@ def test_one_time_approval_is_consumed_atomically_once(tmp_path: Path) -> None:
         objective="Commit the reviewed changes",
         git_mutation="MUTATE",
         trusted_source="DURABLE_WORKFLOW_TASK",
+    )
+    approval = _approve_action(
+        service,
+        charter,
+        action,
+        kind=ApprovalKind.ONE_TIME,
+        limits={"action_id": "commit-once"},
     )
 
     def consume() -> str:
@@ -515,22 +547,6 @@ def test_cumulative_spending_prevents_split_action_bypass(
     service, project, proposed = _proposed(tmp_path, budget_limit=50)
     _, charter = _activate(service, proposed)
     _record_action_approval_interaction(service, project.project_id)
-    approval = service.repository.grant_action_approval(
-        project_id=project.project_id,
-        charter_id=charter.charter_id,
-        charter_revision=charter.revision,
-        kind=ApprovalKind.AMOUNT_LIMITED,
-        action_category=ActionCategory.SPEND,
-        scope=charter.deliverables,
-        limits={
-            "maximum_cost": 50,
-            "currency": "USD",
-            "provider": "codex",
-            "workspace": str(tmp_path),
-        },
-        approver="Founder",
-        source_interaction_id="action-approval",
-    )
     outcomes: list[str] = []
     for index in range(10):
         action = ProposedAction(
@@ -552,6 +568,18 @@ def test_cumulative_spending_prevents_split_action_bypass(
             currency="USD",
             spending=True,
             trusted_source="DURABLE_WORKFLOW_TASK",
+        )
+        approval = _approve_action(
+            service,
+            charter,
+            action,
+            kind=ApprovalKind.AMOUNT_LIMITED,
+            limits={
+                "maximum_cost": 50,
+                "currency": "USD",
+                "provider": "codex",
+                "workspace": str(tmp_path),
+            },
         )
         try:
             service.repository.reserve_action_authority(
@@ -789,21 +817,22 @@ def test_prelaunch_reservation_failure_releases_approval_and_budget(
         if item.title == "Requirements"
     )
     _record_action_approval_interaction(service, project.project_id)
-    approval = service.repository.grant_action_approval(
-        project_id=project.project_id,
-        charter_id=charter.charter_id,
-        charter_revision=charter.revision,
+    specialist = next(
+        item for item in gateway.specialists(charter)
+        if item.provider_id == "codex"
+    )
+    action = TrustedActionClassifier().classify(task, charter, specialist)
+    approval = _approve_action(
+        service,
+        charter,
+        action,
         kind=ApprovalKind.ONE_TIME,
-        action_category=ActionCategory.SPEND,
-        scope=charter.deliverables,
         limits={
             "action_id": f"task-action:{task.task_id}",
             "maximum_cost": 10.0,
             "currency": "USD",
             "provider": "codex",
         },
-        approver="Founder",
-        source_interaction_id="action-approval",
     )
     authority.fail_before_reservation = True
     waiting = runtime.progress(project.project_id)

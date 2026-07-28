@@ -5,6 +5,7 @@ from typing import Any
 
 from keeper.executive.enums import (
     ActionCategory,
+    ApprovalKind,
     CharterStatus,
     ExecutiveState,
     FounderApprovalIntent,
@@ -19,7 +20,13 @@ from keeper.executive.models import (
     FounderApprovalEvent,
     ProjectCharter,
     ProjectRecord,
+    ProposedAction,
     utc_now,
+)
+from keeper.executive.founder_auth import (
+    ApprovalConfirmation,
+    ProductionFounderAuthenticator,
+    TestFounderAuthenticator,
 )
 from keeper.executive.repository import (
     ExecutiveRepository,
@@ -29,8 +36,55 @@ from keeper.executive.state import transition_project
 
 
 class CharterService:
-    def __init__(self, repository: ExecutiveRepository) -> None:
-        self.repository = repository
+    __slots__ = ("repository", "__authenticator", "__production", "__sealed")
+    repository: ExecutiveRepository
+    __authenticator: ProductionFounderAuthenticator | TestFounderAuthenticator
+    __production: bool
+    __sealed: bool
+
+    def __init__(
+        self,
+        repository: ExecutiveRepository,
+        authenticator: ProductionFounderAuthenticator
+        | TestFounderAuthenticator,
+        *,
+        production: bool,
+    ) -> None:
+        expected = (
+            ProductionFounderAuthenticator
+            if production
+            else TestFounderAuthenticator
+        )
+        if type(authenticator) is not expected:
+            raise TypeError(
+                "Founder authenticator does not match the composition mode"
+            )
+        object.__setattr__(self, "_CharterService__sealed", False)
+        object.__setattr__(self, "repository", repository)
+        object.__setattr__(self, "_CharterService__authenticator", authenticator)
+        object.__setattr__(self, "_CharterService__production", production)
+        object.__setattr__(self, "_CharterService__sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_CharterService__sealed", False):
+            raise AttributeError("CharterService authentication composition is immutable")
+        object.__setattr__(self, name, value)
+
+    @classmethod
+    def production(
+        cls,
+        repository: ExecutiveRepository,
+        authenticator: ProductionFounderAuthenticator,
+    ) -> CharterService:
+        return cls(repository, authenticator, production=True)
+
+    @classmethod
+    def for_test(
+        cls,
+        repository: ExecutiveRepository,
+        authenticator: TestFounderAuthenticator,
+    ) -> CharterService:
+        return cls(repository, authenticator, production=False)
 
     def create_project(self, intake: IntakeResult) -> ProjectRecord:
         now = utc_now()
@@ -78,7 +132,16 @@ class CharterService:
         )
         envelope = AuthorityEnvelope(
             allowed_actions,
-            tuple(item.value for item in (ActionCategory.COMMIT, ActionCategory.PUSH, ActionCategory.DEPLOY_PRODUCTION, ActionCategory.PUBLISH_EXTERNAL, ActionCategory.PURCHASE, ActionCategory.SPEND)),
+            tuple(item.value for item in (
+                ActionCategory.COMMIT, ActionCategory.PUSH,
+                ActionCategory.DEPLOY_STAGING,
+                ActionCategory.DEPLOY_PRODUCTION,
+                ActionCategory.PUBLISH_PRIVATE,
+                ActionCategory.PUBLISH_PUBLIC,
+                ActionCategory.PUBLISH_EXTERNAL,
+                ActionCategory.PURCHASE, ActionCategory.SPENDING,
+                ActionCategory.SPEND, ActionCategory.PAID_PROVIDER_USE,
+            )),
             tuple(item.value for item in (ActionCategory.DELETE_PROTECTED, ActionCategory.REWRITE_HISTORY, ActionCategory.ACCESS_CREDENTIAL, ActionCategory.CHANGE_SECURITY_BOUNDARY, ActionCategory.ENABLE_LIVE_TRADING, ActionCategory.CHANGE_FINANCIAL_AUTHORITY, ActionCategory.CHANGE_GOVERNANCE, ActionCategory.EXPAND_SCOPE, ActionCategory.IRREVERSIBLE_DESTRUCTIVE)),
             workspace_values,
             tool_values,
@@ -205,9 +268,53 @@ class CharterService:
         challenge_id: str,
         *,
         intent: FounderApprovalIntent,
+        confirmation: ApprovalConfirmation | None = None,
     ) -> tuple[ProjectCharter, ApprovalRecord, FounderApprovalEvent]:
         return self.repository.confirm_charter_approval(
             challenge_id=challenge_id,
+            confirmation=confirmation,
+            explicit_intent=intent,
+        )
+
+    def authenticate(
+        self, challenge: FounderApprovalChallenge
+    ) -> ApprovalConfirmation:
+        confirmation = self.__authenticator.authenticate(challenge)
+        self.repository.register_founder_session(
+            challenge_id=challenge.challenge_id,
+            confirmation=confirmation,
+        )
+        return confirmation
+
+    def request_action_approval(
+        self,
+        action: ProposedAction,
+        *,
+        charter_id: str,
+        kind: ApprovalKind,
+        scope: tuple[str, ...],
+        limits: dict[str, Any],
+        expires_at: str | None = None,
+    ) -> FounderApprovalChallenge:
+        return self.repository.create_action_approval_challenge(
+            action,
+            charter_id=charter_id,
+            kind=kind,
+            scope=scope,
+            limits=limits,
+            expires_at=expires_at,
+        )
+
+    def confirm_action_approval(
+        self,
+        challenge_id: str,
+        *,
+        confirmation: ApprovalConfirmation | None,
+        intent: FounderApprovalIntent,
+    ) -> tuple[ApprovalRecord, FounderApprovalEvent]:
+        return self.repository.confirm_action_approval(
+            challenge_id=challenge_id,
+            confirmation=confirmation,
             explicit_intent=intent,
         )
 
@@ -226,7 +333,8 @@ class CharterService:
                 ("keep draft", "activate approved charter"),
                 "activate approved charter",
                 "Explicit local Founder approval authorizes project execution within the charter.",
-                "LOCAL_FOUNDER",
+                stored_charter.founder_approval_identity
+                or "AUTHENTICATED_FOUNDER",
                 approval.approval_id,
                 (approval.approval_id,),
                 ("Keeper may plan and act only within the active authority envelope.",),
@@ -256,6 +364,8 @@ class CharterService:
         forbidden = {
             "charter_id", "project_id", "revision", "status", "created_at",
             "founder_approval_identity", "founder_approval_record_id",
+            "founder_approval_event_id", "founder_approval_event_digest",
+            "founder_authenticated_session_id",
         }
         if set(changes) & forbidden or not set(changes).issubset(ProjectCharter.FIELDS):
             raise ValueError("charter revision contains forbidden or unknown fields")
@@ -275,6 +385,9 @@ class CharterService:
                 "differences": differences + [f"authority_basis: {authority_basis}"],
                 "founder_approval_identity": None,
                 "founder_approval_record_id": None,
+                "founder_approval_event_id": None,
+                "founder_approval_event_digest": None,
+                "founder_authenticated_session_id": None,
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ENTITY_TABLES = (
     "projects",
     "worktrees",
@@ -43,6 +43,7 @@ ENTITY_TABLES = (
     "executive_late_results",
     "executive_founder_approval_challenges",
     "executive_founder_approval_events",
+    "executive_founder_authenticated_sessions",
 )
 EXECUTIVE_LIFECYCLE_TABLES = frozenset(
     {
@@ -53,6 +54,7 @@ EXECUTIVE_LIFECYCLE_TABLES = frozenset(
         "executive_reviews", "executive_late_results",
         "executive_founder_approval_challenges",
         "executive_founder_approval_events",
+        "executive_founder_authenticated_sessions",
     }
 )
 
@@ -175,6 +177,19 @@ class KeeperStore:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (4, _now()),
+                )
+                current = 4
+            if current < 5:
+                for table in ENTITY_TABLES:
+                    connection.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{table}" ('
+                        "id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                        "payload TEXT NOT NULL, payload_hash TEXT NOT NULL)"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (5, _now()),
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reroute_reservations ("
@@ -325,6 +340,10 @@ class KeeperStore:
         self, table: str, identifier: str, payload: dict[str, Any]
     ) -> None:
         _require_table(table)
+        if table in EXECUTIVE_LIFECYCLE_TABLES:
+            raise PermissionError(
+                "Executive lifecycle tables require specialized repository operations"
+            )
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         digest = _sha256(serialized.encode("utf-8"))
         timestamp = _now()

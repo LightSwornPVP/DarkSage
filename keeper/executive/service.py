@@ -10,6 +10,7 @@ from keeper.executive.authority_gateway import (
     ProductionAuthorityBackedSpecialistGateway,
 )
 from keeper.executive.charters import CharterService
+from keeper.executive.founder_auth import ProductionFounderAuthenticator
 from keeper.executive.intake import ConversationIntake, IntakeResult
 from keeper.executive.models import MemoryRecord, ProjectCharter, ProjectRecord, utc_now
 from keeper.executive.repository import ExecutiveRepository, new_id
@@ -23,8 +24,15 @@ class KeeperExecutive:
     def __init__(self, database: Path) -> None:
         store = KeeperStore(database)
         store.migrate()
-        self.repository = ExecutiveRepository(store)
-        self.charters = CharterService(self.repository)
+        authenticator = ProductionFounderAuthenticator(
+            database.parent / "founder-auth" / "proof-key.dpapi"
+        )
+        self.repository = ExecutiveRepository(
+            store, founder_authenticator=authenticator
+        )
+        self.charters = CharterService.production(
+            self.repository, authenticator
+        )
         self.intake = ConversationIntake()
 
     def begin(self, message: str) -> tuple[ProjectRecord, IntakeResult]:

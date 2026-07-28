@@ -25,7 +25,21 @@ from tests.keeper.executive.authority_semantics import (
 from tests.keeper.executive.test_specialists import FakeGateway, profile, result_for
 
 
-def test_scenario_a_software_full_delegation_repair_and_completion(tmp_path: Path) -> None:
+def test_injected_non_production_authoritative_scenario_a_software_full_delegation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "keeper.executive.founder_auth._credential_ui_logon",
+        lambda: (
+            "S-1-5-21-1000-1000-1000-1001",
+            "KEEPER-TEST\\Founder",
+            "test-logon-session",
+        ),
+    )
+    monkeypatch.setattr(
+        "keeper.executive.founder_auth._current_process_sid",
+        lambda: "S-1-5-21-1000-1000-1000-1001",
+    )
     executive = KeeperExecutive(tmp_path / "keeper.db")
     project, intake = executive.begin(
         f"I want a small application called Pocket List in {tmp_path}. "
@@ -60,7 +74,21 @@ def test_scenario_a_software_full_delegation_repair_and_completion(tmp_path: Pat
     assert executive.repository.memories(active.project_id)
 
 
-def test_scenario_b_non_software_workflow(tmp_path: Path) -> None:
+def test_injected_non_production_authoritative_scenario_b_non_software(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "keeper.executive.founder_auth._credential_ui_logon",
+        lambda: (
+            "S-1-5-21-1000-1000-1000-1001",
+            "KEEPER-TEST\\Founder",
+            "test-logon-session",
+        ),
+    )
+    monkeypatch.setattr(
+        "keeper.executive.founder_auth._current_process_sid",
+        lambda: "S-1-5-21-1000-1000-1000-1001",
+    )
     executive = KeeperExecutive(tmp_path / "keeper.db")
     project, intake = executive.begin("Research urban gardens and create a sourced final report.")
     draft = executive.draft(

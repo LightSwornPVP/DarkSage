@@ -38,7 +38,16 @@ def test_research_workflow_is_not_software_pipeline(tmp_path: Path) -> None:
     from keeper.executive.charters import CharterService
     from keeper.executive.intake import ConversationIntake
 
-    service = CharterService(charter_service_repository(tmp_path))
+    from keeper.executive.founder_auth import TestFounderAuthenticator
+    from keeper.app.storage import KeeperStore
+
+    store = KeeperStore(tmp_path / "keeper.db")
+    store.migrate()
+    authenticator = TestFounderAuthenticator()
+    service = CharterService.for_test(
+        ExecutiveRepository(store, founder_authenticator=authenticator),
+        authenticator,
+    )
     intake = ConversationIntake.revise(
         ConversationIntake().extract("Research urban gardens and create a final report."),
         replacements={
