@@ -8,6 +8,7 @@ from keeper.app.storage import KeeperStore
 from keeper.executive.charters import CharterService
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import ProjectCharter, ProjectRecord
+from keeper.executive.models import utc_now
 from keeper.executive.repository import ExecutiveRepository
 
 
@@ -35,13 +36,27 @@ def approved_project(
         },
     )
     project = charter_service.create_project(intake)
+    charter_service.repository.save_conversation(
+        "message-1",
+        {
+            "interaction_id": "message-1",
+            "project_id": project.project_id,
+            "speaker": "Founder",
+            "message": "Approve the exact proposed Pocket List charter.",
+            "created_at": utc_now(),
+        },
+    )
     draft = charter_service.draft(project, intake)
     proposed = charter_service.propose(draft)
     approved, _ = charter_service.approve(
-        proposed, approver="founder", source_interaction_id="message-1"
+        proposed, approver="Founder", source_interaction_id="message-1"
     )
     active = charter_service.activate(approved)
-    return charter_service, active, approved
+    return (
+        charter_service,
+        active,
+        charter_service.repository.charter(approved.charter_id),
+    )
 
 
 def test_natural_language_intake_tracks_provenance_and_assumptions(tmp_path: Path) -> None:
@@ -73,7 +88,7 @@ def test_charter_approval_and_activation_are_bound(tmp_path: Path) -> None:
     assert project.active_charter_id == charter.charter_id
     assert charter.founder_approval_record_id
     stored = charter_service.repository.charter(charter.charter_id)
-    assert stored.status == "APPROVED"
+    assert stored.status == "ACTIVE"
 
 
 def test_non_founder_or_blank_identity_cannot_approve(tmp_path: Path) -> None:

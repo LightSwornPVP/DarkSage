@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
-from keeper.app.storage import KeeperStore
+from keeper.app.storage import SCHEMA_VERSION, KeeperStore
+from keeper.executive.enums import CharterStatus, ExecutiveState
 from keeper.executive.models import (
     ApprovalRecord,
     AssumptionRecord,
@@ -16,8 +19,8 @@ from keeper.executive.models import (
     ProjectCharter,
     ProjectRecord,
     WorkflowRecord,
+    utc_now,
 )
-from keeper.executive.enums import ExecutiveState
 from keeper.executive.state import PROJECT_TRANSITIONS
 
 
@@ -47,20 +50,237 @@ class ExecutiveRepository:
     def project(self, project_id: str) -> ProjectRecord:
         return ProjectRecord.from_dict(self._required("executive_projects", project_id))
 
-    def save_charter(self, charter: ProjectCharter) -> None:
+    def save_charter(
+        self,
+        charter: ProjectCharter,
+        *,
+        expected: ProjectCharter | None = None,
+    ) -> None:
         existing = self.store.get("project_charters", charter.charter_id)
-        if existing is not None:
-            prior = ProjectCharter.from_dict(existing)
-            if prior.status in {"APPROVED", "ACTIVE", "SUPERSEDED", "COMPLETED", "CANCELED"}:
-                raise PermissionError("approved charter history is immutable")
-        self.store.upsert("project_charters", charter.charter_id, charter.to_dict())
-        self._relate(charter.project_id, "project", charter.project_id, "charter", charter.charter_id)
+        if existing is None:
+            if charter.status != CharterStatus.DRAFT:
+                raise PermissionError("new charters must begin as drafts")
+            if self.store.get("executive_projects", charter.project_id) is None:
+                raise PermissionError("charter project does not exist")
+            self.store.insert_immutable(
+                "project_charters", charter.charter_id, charter.to_dict()
+            )
+            self._relate(
+                charter.project_id,
+                "project",
+                charter.project_id,
+                "charter",
+                charter.charter_id,
+            )
+            return
+        prior = ProjectCharter.from_dict(existing)
+        if expected is None or prior != expected:
+            raise PermissionError("charter write is stale or lacks an exact CAS record")
+        if (
+            prior.project_id != charter.project_id
+            or prior.charter_id != charter.charter_id
+            or prior.revision != charter.revision
+            or charter_approval_digest(prior) != charter_approval_digest(charter)
+        ):
+            raise PermissionError("charter identity and approved content are immutable")
+        if (
+            prior.status != CharterStatus.DRAFT
+            or charter.status != CharterStatus.PROPOSED
+        ):
+            raise PermissionError(
+                f"repository rejected charter transition: "
+                f"{prior.status} -> {charter.status}"
+            )
+        self._cas_entity(
+            "project_charters",
+            charter.charter_id,
+            expected.to_dict(),
+            charter.to_dict(),
+        )
 
     def insert_approved_charter(self, charter: ProjectCharter) -> None:
-        if charter.status not in {"APPROVED", "ACTIVE"}:
-            raise ValueError("immutable insertion requires an approved charter")
-        self.store.insert_immutable("project_charters", charter.charter_id, charter.to_dict())
-        self._relate(charter.project_id, "project", charter.project_id, "charter", charter.charter_id)
+        del charter
+        raise PermissionError(
+            "approved charters may only be created by the trusted approval transaction"
+        )
+
+    def approve_charter(
+        self,
+        *,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+        approver: str,
+        source_interaction_id: str,
+    ) -> tuple[ProjectCharter, ApprovalRecord]:
+        """Authenticate and approve the exact durable proposed charter atomically."""
+        if approver != "Founder":
+            raise PermissionError("the authenticated Founder identity is required")
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            charter_payload, charter_hash = self._entity_in_transaction(
+                connection, "project_charters", charter_id
+            )
+            charter = ProjectCharter.from_dict(charter_payload)
+            if (
+                charter.project_id != project_id
+                or charter.revision != charter_revision
+                or charter.status != CharterStatus.PROPOSED
+            ):
+                raise PermissionError(
+                    "approval does not identify the current proposed charter"
+                )
+            self._require_no_newer_charter(
+                connection, project_id, charter_revision
+            )
+            interaction_payload, _ = self._entity_in_transaction(
+                connection, "project_conversations", source_interaction_id
+            )
+            if (
+                interaction_payload.get("project_id") != project_id
+                or interaction_payload.get("speaker") != "Founder"
+            ):
+                raise PermissionError(
+                    "approval source is not an authenticated Founder interaction"
+                )
+            approval_id = new_id("approval")
+            charter_digest = charter_approval_digest(charter)
+            interaction_digest = canonical_digest(interaction_payload)
+            approval = ApprovalRecord(
+                approval_id,
+                project_id,
+                charter_id,
+                charter_revision,
+                "CHARTER_DURATION",
+                None,
+                approver,
+                charter.deliverables,
+                {
+                    "authentication_method": "trusted-founder-interaction",
+                    "source_interaction_digest": interaction_digest,
+                    "delegation_mode": charter.delegation_mode,
+                    "maximum_cost": charter.budget_limit,
+                },
+                timestamp,
+                charter.authority_envelope.expires_at,
+                None,
+                None,
+                charter_digest,
+                source_interaction_id,
+            )
+            approved = replace(
+                charter,
+                status=CharterStatus.APPROVED.value,
+                founder_approval_identity=approver,
+                founder_approval_record_id=approval_id,
+                updated_at=timestamp,
+            )
+            self._insert_entity(
+                connection,
+                "executive_approvals",
+                approval_id,
+                approval.to_dict(),
+            )
+            self._insert_relation(
+                connection,
+                project_id,
+                "charter",
+                charter_id,
+                "approval",
+                approval_id,
+            )
+            self._update_entity_cas(
+                connection,
+                "project_charters",
+                charter_id,
+                charter_hash,
+                approved.to_dict(),
+            )
+        return approved, approval
+
+    def activate_charter(
+        self,
+        *,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+    ) -> tuple[ProjectRecord, ProjectCharter, ApprovalRecord]:
+        """Reload and activate one exactly approved durable charter revision."""
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            project_payload, project_hash = self._entity_in_transaction(
+                connection, "executive_projects", project_id
+            )
+            project = ProjectRecord.from_dict(project_payload)
+            charter_payload, charter_hash = self._entity_in_transaction(
+                connection, "project_charters", charter_id
+            )
+            charter = ProjectCharter.from_dict(charter_payload)
+            if (
+                charter.project_id != project_id
+                or charter.revision != charter_revision
+                or charter.status != CharterStatus.APPROVED
+            ):
+                raise PermissionError(
+                    "activation does not identify the durable approved charter"
+                )
+            if charter.unresolved_questions:
+                raise PermissionError(
+                    "material unresolved questions block charter activation"
+                )
+            self._require_no_newer_charter(
+                connection, project_id, charter_revision
+            )
+            approval_id = charter.founder_approval_record_id
+            if approval_id is None:
+                raise PermissionError("charter approval record is missing")
+            approval_payload, _ = self._entity_in_transaction(
+                connection, "executive_approvals", approval_id
+            )
+            approval = ApprovalRecord.from_dict(approval_payload)
+            interaction_payload, _ = self._entity_in_transaction(
+                connection,
+                "project_conversations",
+                approval.source_interaction_id,
+            )
+            self._validate_charter_approval(
+                charter, approval, interaction_payload, timestamp
+            )
+            current_state = ExecutiveState(project.state)
+            if ExecutiveState.ACTIVE not in PROJECT_TRANSITIONS[current_state]:
+                raise PermissionError(
+                    f"project state {current_state} cannot activate a charter"
+                )
+            active_charter = replace(
+                charter,
+                status=CharterStatus.ACTIVE.value,
+                updated_at=timestamp,
+            )
+            active_project = replace(
+                project,
+                state=ExecutiveState.ACTIVE.value,
+                active_charter_id=charter_id,
+                active_charter_revision=charter_revision,
+                pause_reason=None,
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "project_charters",
+                charter_id,
+                charter_hash,
+                active_charter.to_dict(),
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_projects",
+                project_id,
+                project_hash,
+                active_project.to_dict(),
+            )
+        return active_project, active_charter, approval
 
     def charter(self, charter_id: str) -> ProjectCharter:
         return ProjectCharter.from_dict(self._required("project_charters", charter_id))
@@ -196,21 +416,189 @@ class ExecutiveRepository:
         child_kind: str,
         child_id: str,
     ) -> None:
-        material = f"{parent_kind}:{parent_id}:{child_kind}:{child_id}"
-        relationship_id = hashlib.sha256(material.encode("utf-8")).hexdigest()
         with self.store.connect() as connection:
+            self._insert_relation(
+                connection,
+                project_id,
+                parent_kind,
+                parent_id,
+                child_kind,
+                child_id,
+            )
+
+    def _cas_entity(
+        self,
+        table: str,
+        identifier: str,
+        expected: dict[str, Any],
+        updated: dict[str, Any],
+    ) -> None:
+        expected_serialized = _serialize(expected)
+        expected_hash = _digest_serialized(expected_serialized)
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._update_entity_cas(
+                connection, table, identifier, expected_hash, updated
+            )
+
+    @staticmethod
+    def _entity_in_transaction(
+        connection: sqlite3.Connection,
+        table: str,
+        identifier: str,
+    ) -> tuple[dict[str, Any], str]:
+        row = connection.execute(
+            f'SELECT payload, payload_hash FROM "{table}" WHERE id=?',
+            (identifier,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"{table} record not found: {identifier}")
+        serialized = str(row["payload"])
+        digest = _digest_serialized(serialized)
+        if digest != row["payload_hash"]:
+            raise RuntimeError(
+                f"stored {table} record failed integrity validation"
+            )
+        payload = json.loads(serialized)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"stored {table} record is not an object")
+        return payload, str(row["payload_hash"])
+
+    @staticmethod
+    def _insert_entity(
+        connection: sqlite3.Connection,
+        table: str,
+        identifier: str,
+        payload: dict[str, Any],
+    ) -> None:
+        serialized = _serialize(payload)
+        timestamp = utc_now()
+        try:
             connection.execute(
-                "INSERT OR IGNORE INTO executive_relationships VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f'INSERT INTO "{table}" '
+                "(id, schema_version, created_at, updated_at, payload, payload_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    relationship_id,
-                    project_id,
-                    parent_kind,
-                    parent_id,
-                    child_kind,
-                    child_id,
-                    _now(),
+                    identifier,
+                    SCHEMA_VERSION,
+                    timestamp,
+                    timestamp,
+                    serialized,
+                    _digest_serialized(serialized),
                 ),
             )
+        except sqlite3.IntegrityError as error:
+            raise PermissionError(
+                f"immutable {table} record already exists: {identifier}"
+            ) from error
+
+    @staticmethod
+    def _update_entity_cas(
+        connection: sqlite3.Connection,
+        table: str,
+        identifier: str,
+        expected_hash: str,
+        payload: dict[str, Any],
+    ) -> None:
+        serialized = _serialize(payload)
+        cursor = connection.execute(
+            f'UPDATE "{table}" SET updated_at=?, payload=?, payload_hash=? '
+            "WHERE id=? AND payload_hash=?",
+            (
+                utc_now(),
+                serialized,
+                _digest_serialized(serialized),
+                identifier,
+                expected_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionError(f"stale {table} write was rejected")
+
+    @staticmethod
+    def _insert_relation(
+        connection: sqlite3.Connection,
+        project_id: str,
+        parent_kind: str,
+        parent_id: str,
+        child_kind: str,
+        child_id: str,
+    ) -> None:
+        material = f"{parent_kind}:{parent_id}:{child_kind}:{child_id}"
+        relationship_id = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        connection.execute(
+            "INSERT OR IGNORE INTO executive_relationships VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                relationship_id,
+                project_id,
+                parent_kind,
+                parent_id,
+                child_kind,
+                child_id,
+                _now(),
+            ),
+        )
+
+    @staticmethod
+    def _require_no_newer_charter(
+        connection: sqlite3.Connection,
+        project_id: str,
+        revision: int,
+    ) -> None:
+        rows = connection.execute(
+            'SELECT payload, payload_hash FROM "project_charters"'
+        ).fetchall()
+        for row in rows:
+            serialized = str(row["payload"])
+            if _digest_serialized(serialized) != row["payload_hash"]:
+                raise RuntimeError(
+                    "stored project_charters record failed integrity validation"
+                )
+            payload = json.loads(serialized)
+            if (
+                isinstance(payload, dict)
+                and payload.get("project_id") == project_id
+                and int(payload.get("revision", 0)) > revision
+            ):
+                raise PermissionError(
+                    "a newer charter revision supersedes this approval"
+                )
+
+    @staticmethod
+    def _validate_charter_approval(
+        charter: ProjectCharter,
+        approval: ApprovalRecord,
+        interaction: dict[str, Any],
+        now: str,
+    ) -> None:
+        if (
+            approval.approval_id != charter.founder_approval_record_id
+            or approval.project_id != charter.project_id
+            or approval.charter_id != charter.charter_id
+            or approval.charter_revision != charter.revision
+            or approval.approver != "Founder"
+            or charter.founder_approval_identity != "Founder"
+            or approval.evidence_digest != charter_approval_digest(charter)
+            or approval.revoked_at is not None
+            or approval.consumed_at is not None
+            or interaction.get("interaction_id")
+            != approval.source_interaction_id
+            or interaction.get("project_id") != charter.project_id
+            or interaction.get("speaker") != "Founder"
+            or approval.limits.get("authentication_method")
+            != "trusted-founder-interaction"
+            or approval.limits.get("source_interaction_digest")
+            != canonical_digest(interaction)
+        ):
+            raise PermissionError(
+                "charter approval authentication or binding is invalid"
+            )
+        if (
+            approval.expires_at is not None
+            and datetime.fromisoformat(approval.expires_at)
+            <= datetime.fromisoformat(now).astimezone(UTC)
+        ):
+            raise PermissionError("charter approval is expired")
 
 
 def canonical_digest(value: dict[str, Any]) -> str:
@@ -219,11 +607,30 @@ def canonical_digest(value: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def charter_approval_digest(charter: ProjectCharter) -> str:
+    """Digest immutable identity and content, excluding lifecycle metadata."""
+    payload = charter.to_dict()
+    for field_name in (
+        "status",
+        "founder_approval_identity",
+        "founder_approval_record_id",
+        "updated_at",
+    ):
+        payload.pop(field_name)
+    return canonical_digest(payload)
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex}"
 
 
 def _now() -> str:
-    from keeper.executive.models import utc_now
-
     return utc_now()
+
+
+def _serialize(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _digest_serialized(serialized: str) -> str:
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

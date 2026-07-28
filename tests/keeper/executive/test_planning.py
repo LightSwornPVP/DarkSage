@@ -6,6 +6,7 @@ from pathlib import Path
 from keeper.executive.authority import AuthorityEvaluator
 from keeper.executive.enums import TaskStatus
 from keeper.executive.models import SpecialistProfile
+from keeper.executive.models import utc_now
 from keeper.executive.repository import ExecutiveRepository
 from keeper.executive.planning import TaskReadiness, WorkflowPlanner
 from tests.keeper.executive.test_intake_charters import approved_project
@@ -46,8 +47,23 @@ def test_research_workflow_is_not_software_pipeline(tmp_path: Path) -> None:
             "delegation_mode": "FULL_DELEGATION",
         },
     )
-    draft = service.draft(service.create_project(intake), intake)
-    approved, _ = service.approve(service.propose(draft), approver="founder", source_interaction_id="m")
+    created = service.create_project(intake)
+    service.repository.save_conversation(
+        "m",
+        {
+            "interaction_id": "m",
+            "project_id": created.project_id,
+            "speaker": "Founder",
+            "message": "Approve the proposed research charter.",
+            "created_at": utc_now(),
+        },
+    )
+    draft = service.draft(created, intake)
+    approved, _ = service.approve(
+        service.propose(draft),
+        approver="Founder",
+        source_interaction_id="m",
+    )
     project = service.activate(approved)
     workflow, _ = WorkflowPlanner(service.repository).generate(project, approved)
     titles = [stage.title for stage in workflow.stages]

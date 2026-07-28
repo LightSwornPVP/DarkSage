@@ -241,7 +241,7 @@ class ExecutiveRuntime:
             raise PermissionError("project has no active charter")
         charter = self.repository.charter(project.active_charter_id)
         if (
-            charter.status != "APPROVED"
+            charter.status != "ACTIVE"
             or charter.revision != project.active_charter_revision
         ):
             raise PermissionError("active charter binding is invalid")

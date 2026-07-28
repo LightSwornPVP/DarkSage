@@ -5,7 +5,6 @@ from typing import Any
 
 from keeper.executive.enums import (
     ActionCategory,
-    ApprovalKind,
     CharterStatus,
     ExecutiveState,
 )
@@ -21,7 +20,6 @@ from keeper.executive.models import (
 )
 from keeper.executive.repository import (
     ExecutiveRepository,
-    canonical_digest,
     new_id,
 )
 from keeper.executive.state import transition_project
@@ -147,7 +145,7 @@ class CharterService:
         if charter.status != CharterStatus.DRAFT:
             raise PermissionError("only draft charters may be proposed")
         proposed = replace(charter, status=CharterStatus.PROPOSED.value, updated_at=utc_now())
-        self.repository.save_charter(proposed)
+        self.repository.save_charter(proposed, expected=charter)
         project = self.repository.project(charter.project_id)
         self.repository.save_project(transition_project(project, ExecutiveState.AWAITING_CHARTER_APPROVAL))
         return proposed
@@ -159,60 +157,32 @@ class CharterService:
         approver: str,
         source_interaction_id: str,
     ) -> tuple[ProjectCharter, ApprovalRecord]:
-        if charter.status != CharterStatus.PROPOSED or not approver.strip():
-            raise PermissionError("Founder identity must approve a proposed charter")
-        now = utc_now()
-        approval = ApprovalRecord(
-            new_id("approval"),
-            charter.project_id,
-            charter.charter_id,
-            charter.revision,
-            ApprovalKind.CHARTER_DURATION.value,
-            None,
-            approver,
-            charter.deliverables,
-            {"delegation_mode": charter.delegation_mode, "maximum_cost": charter.budget_limit},
-            now,
-            charter.authority_envelope.expires_at,
-            None,
-            None,
-            canonical_digest(charter.to_dict()),
-            source_interaction_id,
+        return self.repository.approve_charter(
+            project_id=charter.project_id,
+            charter_id=charter.charter_id,
+            charter_revision=charter.revision,
+            approver=approver,
+            source_interaction_id=source_interaction_id,
         )
-        self.repository.insert_approval(approval)
-        approved = replace(
-            charter,
-            status=CharterStatus.APPROVED.value,
-            founder_approval_identity=approver,
-            founder_approval_record_id=approval.approval_id,
-            updated_at=now,
-        )
-        self.repository.save_charter(approved)
-        return approved, approval
 
     def activate(self, charter: ProjectCharter) -> ProjectRecord:
-        if charter.status != CharterStatus.APPROVED:
-            raise PermissionError("only approved charters may be activated")
-        project = self.repository.project(charter.project_id)
-        active = transition_project(project, ExecutiveState.ACTIVE)
-        active = replace(
-            active,
-            active_charter_id=charter.charter_id,
-            active_charter_revision=charter.revision,
+        active, stored_charter, approval = self.repository.activate_charter(
+            project_id=charter.project_id,
+            charter_id=charter.charter_id,
+            charter_revision=charter.revision,
         )
-        self.repository.save_project(active)
         self.repository.insert_decision(
             DecisionRecord(
                 new_id("decision"),
-                charter.project_id,
-                charter.revision,
+                stored_charter.project_id,
+                stored_charter.revision,
                 "Activate Project Charter",
                 ("keep draft", "activate approved charter"),
                 "activate approved charter",
                 "Founder approval authorizes project execution within the charter.",
-                charter.founder_approval_identity or "Founder",
-                charter.founder_approval_record_id or "",
-                (charter.founder_approval_record_id or "",),
+                approval.approver,
+                approval.approval_id,
+                (approval.approval_id,),
                 ("Keeper may plan and act only within the active authority envelope.",),
                 True,
                 utc_now(),
@@ -229,15 +199,21 @@ class CharterService:
         reason: str,
         authority_basis: str,
     ) -> ProjectCharter:
-        if active.status != CharterStatus.APPROVED or not reason.strip():
-            raise PermissionError("only an approved charter may be amended")
+        durable = self.repository.charter(active.charter_id)
+        if (
+            durable.status not in {CharterStatus.APPROVED, CharterStatus.ACTIVE}
+            or durable.project_id != active.project_id
+            or durable.revision != active.revision
+            or not reason.strip()
+        ):
+            raise PermissionError("only the current approved charter may be amended")
         forbidden = {
             "charter_id", "project_id", "revision", "status", "created_at",
             "founder_approval_identity", "founder_approval_record_id",
         }
         if set(changes) & forbidden or not set(changes).issubset(ProjectCharter.FIELDS):
             raise ValueError("charter revision contains forbidden or unknown fields")
-        data = active.to_dict()
+        data = durable.to_dict()
         differences: list[str] = []
         for key, value in changes.items():
             if data[key] != value:

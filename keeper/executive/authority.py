@@ -77,7 +77,7 @@ class AuthorityEvaluator:
             return self._decision(AuthorityOutcome.DENIED, "non-executable-project-state", "state", "the project is paused or waiting", "resolve the pause before launching work")
         if project.active_charter_revision != action.charter_revision or charter.revision != action.charter_revision:
             return self._decision(AuthorityOutcome.CHARTER_REVISION_REQUIRED, "active-revision", "revision", "action is bound to a stale charter revision", "bind the action to the active charter")
-        if charter.status != "APPROVED" or project.active_charter_id != charter.charter_id:
+        if charter.status != "ACTIVE" or project.active_charter_id != charter.charter_id:
             return self._decision(AuthorityOutcome.DENIED, "active-charter", "status", "charter is not the active approved revision", "activate an approved charter")
         if charter.authority_envelope.expires_at is not None and datetime.fromisoformat(charter.authority_envelope.expires_at) <= current_time:
             return self._decision(AuthorityOutcome.EXPIRED, "envelope-expiration", "authority_envelope.expires_at", "charter authority has expired", "obtain a charter revision")

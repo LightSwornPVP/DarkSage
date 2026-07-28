@@ -83,7 +83,8 @@ class WorkflowPlanner:
     def generate(
         self, project: ProjectRecord, charter: ProjectCharter
     ) -> tuple[WorkflowRecord, tuple[ExecutiveTask, ...]]:
-        if project.active_charter_id != charter.charter_id or charter.status != "APPROVED":
+        charter = self.repository.charter(charter.charter_id)
+        if project.active_charter_id != charter.charter_id or charter.status != "ACTIVE":
             raise PermissionError("planning requires the active approved charter")
         templates = WORKLOAD_STRATEGIES.get(
             charter.project_type,

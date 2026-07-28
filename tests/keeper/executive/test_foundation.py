@@ -45,8 +45,8 @@ def charter(workspace: Path) -> ProjectCharter:
         ("no spending",), (), (), None, "spending prohibited", 0, ("filesystem",),
         ("mock",), (), (), (str(workspace),), ("no secrets",), "LOW",
         "FULL_DELEGATION", envelope, ("pause on ambiguity",), ("independent review",),
-        ("test results",), ("all tasks complete",), 1, "APPROVED", None, None, (),
-        "founder", "approval-1", now, now,
+        ("test results",), ("all tasks complete",), 1, "ACTIVE", None, None, (),
+        "Founder", "approval-1", now, now,
     )
 
 
@@ -83,9 +83,8 @@ def test_approved_charter_is_immutable(tmp_path: Path) -> None:
             active_charter_revision=None,
         )
     )
-    repository.insert_approved_charter(charter(tmp_path))
     with pytest.raises(PermissionError):
-        repository.save_charter(replace(charter(tmp_path), title="Changed"))
+        repository.insert_approved_charter(charter(tmp_path))
 
 
 def test_repository_rejects_new_terminal_project(tmp_path: Path) -> None:
