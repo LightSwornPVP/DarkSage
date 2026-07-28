@@ -137,7 +137,7 @@ class AuthorityStore:
                     );
                     INSERT INTO attempts SELECT * FROM attempts_v1;
                     DROP TABLE attempts_v1;
-                    CREATE TABLE launch_authorizations(
+                    CREATE TABLE IF NOT EXISTS launch_authorizations(
                         id TEXT PRIMARY KEY,
                         state TEXT NOT NULL,
                         generation INTEGER NOT NULL,
@@ -153,7 +153,7 @@ class AuthorityStore:
             elif int(row["value"]) == 2:
                 connection.executescript(
                     """
-                    CREATE TABLE launch_authorizations(
+                    CREATE TABLE IF NOT EXISTS launch_authorizations(
                         id TEXT PRIMARY KEY,
                         state TEXT NOT NULL,
                         generation INTEGER NOT NULL,

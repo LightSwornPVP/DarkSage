@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -24,6 +25,48 @@ from keeper.authority_service.protocol import (
     encode_frame,
     parse_request,
 )
+from keeper.authority_service.store import AuthorityStore
+
+
+def test_schema_two_partial_launch_migration_is_restart_safe(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE service_meta(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO service_meta(key,value)
+                VALUES('schema_version','2');
+            CREATE TABLE launch_authorizations(
+                id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                client_sid TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+    store = AuthorityStore(database)
+    store.migrate()
+    store.migrate()
+    with store.connect() as connection:
+        schema_version = connection.execute(
+            "SELECT value FROM service_meta WHERE key='schema_version'"
+        ).fetchone()
+        launch_table = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='launch_authorizations'"
+        ).fetchone()
+    assert schema_version is not None
+    assert schema_version["value"] == "3"
+    assert launch_table is not None
 
 
 class _Observer:
