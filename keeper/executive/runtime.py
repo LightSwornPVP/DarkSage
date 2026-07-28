@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import NoReturn, SupportsIndex
+from typing import Callable, NoReturn, SupportsIndex
+from weakref import WeakKeyDictionary
 
 from keeper.executive.authority import (
     AuthorityEvaluator,
@@ -46,73 +47,103 @@ IN_FLIGHT = frozenset(
     }
 )
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeComposition:
+    production: bool
+    repository: ExecutiveRepository
+    gateway: AuthorityBackedSpecialistGateway
+    repository_identity: object | None
+    gateway_identity: object | None
+
+
+def _composition_registry() -> tuple[
+    Callable[[ExecutiveRuntime, _RuntimeComposition], None],
+    Callable[[ExecutiveRuntime], _RuntimeComposition | None],
+]:
+    registry: WeakKeyDictionary[ExecutiveRuntime, _RuntimeComposition] = (
+        WeakKeyDictionary()
+    )
+
+    def register(
+        runtime: ExecutiveRuntime,
+        composition: _RuntimeComposition,
+    ) -> None:
+        if runtime in registry:
+            raise AttributeError("Executive runtime is already initialized")
+        registry[runtime] = composition
+
+    def registered(runtime: ExecutiveRuntime) -> _RuntimeComposition | None:
+        return registry.get(runtime)
+
+    return register, registered
+
+
+_register_composition, _registered_composition = _composition_registry()
+del _composition_registry
+
+_IMMUTABLE_RUNTIME_NAMES = frozenset(
+    {
+        "repository", "gateway", "_repository", "_gateway",
+        "sealed", "_sealed", "__sealed",
+        "_ExecutiveRuntime__repository", "_ExecutiveRuntime__gateway",
+        "_ExecutiveRuntime__sealed", "_ExecutiveRuntime__repository_id",
+        "_ExecutiveRuntime__gateway_id",
+        "_ExecutiveRuntime__repository_identity",
+        "_ExecutiveRuntime__gateway_identity",
+        "_ExecutiveRuntime__production_composition",
+        "__dict__", "__weakref__",
+    }
+)
 
 class ExecutiveRuntime:
     """Production runtime: every provider boundary is KeeperAuthority-owned."""
 
     __repository: ExecutiveRepository
     __gateway: AuthorityBackedSpecialistGateway
-    __production_composition: bool
-    __repository_id: int
-    __gateway_id: int
-    __repository_identity: object | None
-    __gateway_identity: object | None
-    __sealed: bool
-
     __slots__ = (
         "__repository",
         "__gateway",
         "evaluator",
         "selector",
-        "__production_composition",
-        "__repository_id",
-        "__gateway_id",
-        "__repository_identity",
-        "__gateway_identity",
-        "__sealed",
+        "__weakref__",
     )
-
     def __init__(
         self,
         repository: ExecutiveRepository,
         gateway: SemanticAuthorityTestGateway,
     ) -> None:
-        if getattr(self, "_ExecutiveRuntime__sealed", False):
+        if _registered_composition(self) is not None:
             raise AttributeError("Executive runtime is already initialized")
+        if type(self) is not ExecutiveRuntime:
+            raise TypeError("Executive runtime subclasses are not supported")
         if type(repository) is not TestExecutiveRepository:
-            raise RuntimeError(
-                "test runtime requires the exact test repository"
-            )
+            raise RuntimeError("test runtime requires the exact test repository")
         if type(gateway) is not SemanticAuthorityTestGateway:
             raise RuntimeError(
                 "test runtime requires the explicit semantic Authority test gateway"
             )
-        object.__setattr__(self, "_ExecutiveRuntime__sealed", False)
         object.__setattr__(self, "_ExecutiveRuntime__repository", repository)
         object.__setattr__(self, "_ExecutiveRuntime__gateway", gateway)
         self.evaluator = AuthorityEvaluator()
         self.selector = SpecialistSelector()
-        object.__setattr__(
-            self, "_ExecutiveRuntime__production_composition", False
+        _register_composition(
+            self,
+            _RuntimeComposition(
+                production=False,
+                repository=repository,
+                gateway=gateway,
+                repository_identity=None,
+                gateway_identity=None,
+            ),
         )
-        object.__setattr__(
-            self, "_ExecutiveRuntime__repository_id", id(repository)
-        )
-        object.__setattr__(self, "_ExecutiveRuntime__gateway_id", id(gateway))
-        object.__setattr__(
-            self, "_ExecutiveRuntime__repository_identity", None
-        )
-        object.__setattr__(
-            self, "_ExecutiveRuntime__gateway_identity", None
-        )
-        object.__setattr__(self, "_ExecutiveRuntime__sealed", True)
-
     @classmethod
     def production(
         cls,
         repository: ProductionExecutiveRepository,
         gateway: ProductionAuthorityBackedSpecialistGateway,
     ) -> ExecutiveRuntime:
+        if cls is not ExecutiveRuntime:
+            raise TypeError("Executive runtime subclasses are not supported")
         if type(repository) is not ProductionExecutiveRepository:
             raise RuntimeError(
                 "production runtime requires the exact production repository"
@@ -124,56 +155,30 @@ class ExecutiveRuntime:
         repository_identity = repository._production_runtime_identity()
         gateway_identity = gateway._production_runtime_identity()
         runtime = object.__new__(cls)
-        object.__setattr__(runtime, "_ExecutiveRuntime__sealed", False)
-        object.__setattr__(
-            runtime, "_ExecutiveRuntime__repository", repository
-        )
+        object.__setattr__(runtime, "_ExecutiveRuntime__repository", repository)
         object.__setattr__(runtime, "_ExecutiveRuntime__gateway", gateway)
         runtime.evaluator = AuthorityEvaluator()
         runtime.selector = SpecialistSelector()
-        object.__setattr__(
-            runtime, "_ExecutiveRuntime__production_composition", True
-        )
-        object.__setattr__(
-            runtime, "_ExecutiveRuntime__repository_id", id(repository)
-        )
-        object.__setattr__(
-            runtime, "_ExecutiveRuntime__gateway_id", id(gateway)
-        )
-        object.__setattr__(
+        _register_composition(
             runtime,
-            "_ExecutiveRuntime__repository_identity",
-            repository_identity,
+            _RuntimeComposition(
+                production=True,
+                repository=repository,
+                gateway=gateway,
+                repository_identity=repository_identity,
+                gateway_identity=gateway_identity,
+            ),
         )
-        object.__setattr__(
-            runtime, "_ExecutiveRuntime__gateway_identity", gateway_identity
-        )
-        object.__setattr__(runtime, "_ExecutiveRuntime__sealed", True)
         return runtime
-
     def __setattr__(self, name: str, value: object) -> None:
-        if (
-            getattr(self, "_ExecutiveRuntime__sealed", False)
-            and name
-            in {
-                "repository",
-                "gateway",
-                "_repository",
-                "_gateway",
-                "_ExecutiveRuntime__repository",
-                "_ExecutiveRuntime__gateway",
-                "_ExecutiveRuntime__repository_id",
-                "_ExecutiveRuntime__gateway_id",
-                "_ExecutiveRuntime__repository_identity",
-                "_ExecutiveRuntime__gateway_identity",
-                "_ExecutiveRuntime__production_composition",
-            }
-        ):
-            raise AttributeError(
-                "Executive runtime composition is immutable"
-            )
+        if name in _IMMUTABLE_RUNTIME_NAMES:
+            raise AttributeError("Executive runtime composition is immutable")
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        if name in _IMMUTABLE_RUNTIME_NAMES:
+            raise AttributeError("Executive runtime composition is immutable")
+        object.__delattr__(self, name)
     def __copy__(self) -> NoReturn:
         raise TypeError("Executive runtime cannot be copied")
 
@@ -446,24 +451,27 @@ class ExecutiveRuntime:
 
     def _validate_composition(self) -> None:
         try:
+            composition = _registered_composition(self)
+            if composition is None:
+                raise PermissionError("Executive runtime has no trusted composition")
             repository = self.__repository
             gateway = self.__gateway
             if (
-                id(repository) != self.__repository_id
-                or id(gateway) != self.__gateway_id
+                repository is not composition.repository
+                or gateway is not composition.gateway
             ):
                 raise PermissionError(
                     "Executive runtime dependency identity changed"
                 )
-            if self.__production_composition:
+            if composition.production:
                 if (
                     type(repository) is not ProductionExecutiveRepository
                     or type(gateway)
                     is not ProductionAuthorityBackedSpecialistGateway
                     or repository._production_runtime_identity()
-                    != self.__repository_identity
+                    != composition.repository_identity
                     or gateway._production_runtime_identity()
-                    != self.__gateway_identity
+                    != composition.gateway_identity
                 ):
                     raise PermissionError(
                         "production Executive composition is invalid"
