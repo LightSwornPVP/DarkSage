@@ -10,6 +10,9 @@ from typing import Any, Sequence
 
 from keeper.authority_service.client import DEFAULT_PIPE_NAME
 from keeper.authority_service.core import AuthorityServiceCore
+from keeper.executive.founder_capability import (
+    ProductionFounderCapabilityVerifier,
+)
 from keeper.authority_service.ipc_server import NamedPipeAuthorityServer
 from keeper.authority_service.observer import ServiceProviderObserver
 from keeper.authority_service.provenance import AuthorityProvenanceReporter
@@ -148,6 +151,12 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
         str(config["provider_account_name"]),
         Path(config["provider_credential_path"]),
     )
+    verifier_config = config.get("founder_capability_verifier")
+    verifier = (
+        ProductionFounderCapabilityVerifier(verifier_config)
+        if isinstance(verifier_config, dict)
+        else None
+    )
     core = AuthorityServiceCore(
         Path(config["service_root"]),
         observer=observer,
@@ -155,6 +164,7 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
             config_path.parent.parent,
             config_path,
         ),
+        founder_capability_verifier=verifier,
     )
     return NamedPipeAuthorityServer(
         core,
@@ -168,7 +178,7 @@ def _load_config(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise PermissionError("Authority Service configuration is unavailable") from error
-    required = {
+    common = {
         "schema_version",
         "service_name",
         "service_root",
@@ -179,14 +189,22 @@ def _load_config(path: Path) -> dict[str, Any]:
         "provider_credential_path",
         "pipe_name",
     }
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    expected = common | (
+        {"founder_capability_verifier"} if schema_version == 3 else set()
+    )
     if (
         not isinstance(value, dict)
-        or set(value) != required
-        or value.get("schema_version") != 2
+        or schema_version not in {2, 3}
+        or set(value) != expected
         or value.get("service_name") != SERVICE_NAME
         or any(
             not isinstance(value.get(key), str) or not value[key]
-            for key in required - {"schema_version"}
+            for key in common - {"schema_version"}
+        )
+        or (
+            schema_version == 3
+            and not isinstance(value.get("founder_capability_verifier"), dict)
         )
     ):
         raise PermissionError("Authority Service configuration is invalid")

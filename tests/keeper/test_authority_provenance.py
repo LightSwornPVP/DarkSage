@@ -87,7 +87,7 @@ def _installation(
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "service_name": "KeeperAuthority",
                 "service_root": str(service_root / "data"),
                 "provider_root": str(exchange_root / "provider-work"),
@@ -96,6 +96,15 @@ def _installation(
                 "provider_account_name": _PROVIDER_ACCOUNT,
                 "provider_credential_path": str(credential),
                 "pipe_name": r"\\.\pipe\KeeperAuthority-test",
+                "founder_capability_verifier": {
+                    "schema_version": 1,
+                    "issuer_id": "keeper-founder:S-1-5-21-1000",
+                    "principal_sid": "S-1-5-21-1000",
+                    "key_id": "keeper-founder-rsa:test",
+                    "algorithm": "RS256-CNG-HIGH-PROTECTION",
+                    "modulus": "g" + "A" * 341,
+                    "exponent": "AQAB",
+                },
             },
             sort_keys=True,
         ),

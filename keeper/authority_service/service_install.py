@@ -30,6 +30,10 @@ from keeper.authority_service.provider_identity import (
 )
 from keeper.authority_service.service_main import SERVICE_NAME
 from keeper.authority_service.windows_identity import current_process_sid
+from keeper.executive.founder_capability import (
+    ProductionFounderCapabilityIssuer,
+    ProductionFounderCapabilityVerifier,
+)
 from keeper.authority_service.windows_security import (
     apply_path_security,
     enforce_authority_security,
@@ -165,7 +169,7 @@ class AuthorityServiceInstaller:
             atomic_write_json(
                 config,
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "service_name": SERVICE_NAME,
                     "service_root": str(SERVICE_ROOT / "data"),
                     "provider_root": str(exchange_root / "provider-work"),
@@ -174,6 +178,9 @@ class AuthorityServiceInstaller:
                     "provider_account_name": PROVIDER_ACCOUNT_NAME,
                     "provider_credential_path": str(PROVIDER_CREDENTIAL_PATH),
                     "pipe_name": r"\\.\pipe\KeeperAuthority-v1",
+                    "founder_capability_verifier": (
+                        _founder_verifier_configuration()
+                    ),
                 },
             )
             _record_file(manifest, config)
@@ -405,12 +412,75 @@ def upgrade_package(source_root: Path) -> dict[str, Any]:
     )
     manifest["source_commit"] = source_commit
     _persist_manifest(manifest)
+    # The new package deliberately accepts schema 2 in fail-closed mode, so
+    # a configuration-migration failure cannot make the stopped service
+    # unstartable. Launch authorization remains disabled until schema 3 lands.
+    founder_verifier = _migrate_founder_capability_configuration(manifest)
     return {
         "package": str(package),
         "package_sha256": new_digest,
         "backup": str(backup_path),
         "source_commit": source_commit,
+        "founder_issuer_key_id": founder_verifier["key_id"],
     }
+
+
+def _founder_verifier_configuration() -> dict[str, object]:
+    return ProductionFounderCapabilityIssuer(
+        current_process_sid()
+    ).verifier_configuration()
+
+
+def _migrate_founder_capability_configuration(
+    manifest: dict[str, Any],
+) -> dict[str, object]:
+    config = SERVICE_ROOT / "config" / "service.json"
+    if not config.is_file() or not _recorded_file_matches(manifest, config):
+        raise PermissionError(
+            "Authority Service configuration does not match its manifest"
+        )
+    try:
+        value = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError(
+            "Authority Service configuration is invalid"
+        ) from error
+    if not isinstance(value, dict) or value.get("schema_version") not in {2, 3}:
+        raise PermissionError(
+            "Authority Founder verifier configuration cannot be safely migrated"
+        )
+    if value["schema_version"] == 3:
+        verifier = value.get("founder_capability_verifier")
+        if not isinstance(verifier, dict):
+            raise PermissionError("Authority Founder verifier is missing")
+        ProductionFounderCapabilityVerifier(verifier)
+        return verifier
+    old_digest = hashlib.sha256(config.read_bytes()).hexdigest()
+    backup_path = SERVICE_ROOT / "backups" / f"service-{old_digest}.json"
+    if backup_path.exists():
+        if not _recorded_file_matches(manifest, backup_path):
+            raise PermissionError(
+                "Authority Service configuration backup is untrusted"
+            )
+    else:
+        shutil.copy2(config, backup_path)
+        _record_file(manifest, backup_path)
+    verifier = _founder_verifier_configuration()
+    value["schema_version"] = 3
+    value["founder_capability_verifier"] = verifier
+    atomic_write_json(config, value)
+    _record_file(manifest, config)
+    manifest.setdefault("configuration_migrations", []).append(
+        {
+            "migrated_at": _now(),
+            "from_schema": 2,
+            "to_schema": 3,
+            "backup_path": str(backup_path),
+            "founder_issuer_key_id": verifier["key_id"],
+        }
+    )
+    _persist_manifest(manifest)
+    return verifier
 
 
 def provision_provider_identity() -> dict[str, Any]:
@@ -447,11 +517,15 @@ def provision_provider_identity() -> dict[str, Any]:
         "provider_account_name",
         "provider_credential_path",
     }
+    expected_v3 = expected_v2 | {"founder_capability_verifier"}
     if (
         not isinstance(value, dict)
         or frozenset(value)
-        not in {frozenset(expected_v1), frozenset(expected_v2)}
-        or value.get("schema_version") not in {1, 2}
+        not in {
+            frozenset(expected_v1), frozenset(expected_v2),
+            frozenset(expected_v3),
+        }
+        or value.get("schema_version") not in {1, 2, 3}
         or value.get("service_name") != SERVICE_NAME
     ):
         raise PermissionError(
@@ -488,7 +562,7 @@ def provision_provider_identity() -> dict[str, Any]:
             }
         )
         _persist_manifest(manifest)
-    elif (
+    elif value["schema_version"] in {2, 3} and (
         value.get("provider_account_name") != PROVIDER_ACCOUNT_NAME
         or value.get("provider_credential_path")
         != str(PROVIDER_CREDENTIAL_PATH)
@@ -496,13 +570,15 @@ def provision_provider_identity() -> dict[str, Any]:
         raise PermissionError(
             "Authority Service provider identity configuration differs"
         )
+    founder_verifier = _migrate_founder_capability_configuration(manifest)
     result = repair_permissions()
     return {
         "provider_account_name": PROVIDER_ACCOUNT_NAME,
         "provider_account_sid": provider_sid,
         "provider_account_rights": list(PROVIDER_ACCOUNT_RIGHTS),
         "provider_credential_path": str(PROVIDER_CREDENTIAL_PATH),
-        "configuration_schema": 2,
+        "configuration_schema": 3,
+        "founder_issuer_key_id": founder_verifier["key_id"],
         "service_process_rights": list(service_rights),
         "permissions": result,
     }

@@ -219,7 +219,7 @@ class AuthorityProvenanceReporter:
         config_schema = (
             config.get("schema_version") if isinstance(config, dict) else None
         )
-        if config_schema != 2 and config_identity["result"] == "PASS":
+        if config_schema != 3 and config_identity["result"] == "PASS":
             config_identity["result"] = "FAIL"
             config_identity["reason"] = "configuration schema is incompatible"
         record(
