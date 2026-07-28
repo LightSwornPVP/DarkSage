@@ -47,6 +47,16 @@ criteria, constraints, assumptions, questions, timeline, budget, tools,
 providers, workspaces, privacy, risk, delegation, authority, escalation, review,
 evidence, completion, version, and Founder approval fields.
 
+Charter and protected-action approval are not derived from conversation text.
+Production confirmation uses the Windows credential UI and `LogonUser` to
+authenticate the provisioned desktop principal SID. A DPAPI-protected,
+current-user proof key binds the resulting one-use session to the machine,
+process, project, exact revision or action digest, explicit intent, challenge,
+nonce, and expiration. The repository registers that signed session separately,
+then atomically consumes the session and challenge when it creates the approval
+event. Test authenticators and confirmations are distinct types rejected by the
+production composition.
+
 ## Delegation and deterministic authority
 
 Advisory mode permits analysis, planning, drafting, and reading. Delegated mode
@@ -68,6 +78,12 @@ in the execution claim transaction with one concurrent winner. Spending is
 reserved atomically in canonical minor units against the cumulative
 charter/approval limit, preventing split-action bypass; unknown cost, absent
 budget, and implicit currency conversion are denied.
+
+Authority launch authorizations are stored by project and generation. Revoking
+a generation leaves its record permanently revoked and cancels its unlaunched
+attempts. A consecutive higher generation is accepted only after a different
+authenticated Founder approval record, event, and digest; it never changes the
+old generation or revives its attempts.
 
 ## Dynamic workflow and specialists
 

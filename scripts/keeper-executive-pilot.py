@@ -17,8 +17,12 @@ from keeper.executive.authority_gateway import (
     SemanticAuthorityTestGateway,
 )
 from keeper.executive.enums import FounderApprovalIntent
+from keeper.app.storage import KeeperStore
+from keeper.executive.charters import CharterService
+from keeper.executive.founder_auth import TestFounderAuthenticator
+from keeper.executive.intake import ConversationIntake
+from keeper.executive.repository import ExecutiveRepository
 from keeper.executive.runtime import ExecutiveRuntime
-from keeper.executive.service import KeeperExecutive
 
 
 CAPABILITIES = (
@@ -107,7 +111,10 @@ class PilotAuthorityTransport:
         }
 
     def authorize_project_launch(self, **identity: Any) -> dict[str, Any]:
-        identifier = f"launch-authorization:{identity['project_id']}"
+        identifier = (
+            f"launch-authorization:{identity['project_id']}:"
+            f"generation:{identity['authorization_generation']}"
+        )
         authorization = self._sign(
             "project-launch-authorization",
             {
@@ -126,7 +133,10 @@ class PilotAuthorityTransport:
     def revoke_project_launch(
         self, project_id: str, authorization_generation: int
     ) -> dict[str, Any]:
-        identifier = f"launch-authorization:{project_id}"
+        identifier = (
+            f"launch-authorization:{project_id}:"
+            f"generation:{authorization_generation}"
+        )
         self.launch_authorizations[identifier]["service_state"] = "REVOKED"
         canceled = []
         for attempt_id, attempt in self.attempts.items():
@@ -316,28 +326,35 @@ def main() -> int:
         prefix="keeper-executive-pilot-"
     ) as directory:
         root = Path(directory)
-        executive = KeeperExecutive(root / "keeper.db")
-        project, intake = executive.begin(
-            f"I want a small application called Pilot List in {root}. "
-            "Use full delegation and no spending."
+        store = KeeperStore(root / "keeper.db")
+        store.migrate()
+        authenticator = TestFounderAuthenticator()
+        repository = ExecutiveRepository(
+            store, founder_authenticator=authenticator
         )
-        draft = executive.draft(
-            project.project_id,
-            intake,
-            founder_revisions={
+        charters = CharterService.for_test(repository, authenticator)
+        intake = ConversationIntake.revise(
+            ConversationIntake().extract(
+                f"I want a small application called Pilot List in {root}. "
+                "Use full delegation and no spending."
+            ),
+            replacements={
                 "success_criteria": ("all pilot checks pass",),
                 "target_audience": "pilot user",
                 "approved_providers": ("codex", "reviewer-provider"),
                 "approved_tools": ("filesystem",),
             },
         )
-        proposed = executive.charters.propose(draft)
-        challenge = executive.charters.request_approval(proposed)
-        approved, _, _ = executive.charters.confirm_approval(
+        project = charters.create_project(intake)
+        proposed = charters.propose(charters.draft(project, intake))
+        challenge = charters.request_approval(proposed)
+        confirmation = charters.authenticate(challenge)
+        approved, _, _ = charters.confirm_approval(
             challenge.challenge_id,
+            confirmation=confirmation,
             intent=FounderApprovalIntent.APPROVE_CHARTER,
         )
-        active = executive.charters.activate(approved)
+        active = charters.activate(approved)
         authority = PilotAuthorityTransport()
         bindings = tuple(
             AuthorityProviderBinding(
@@ -347,7 +364,7 @@ def main() -> int:
             for provider_id in ("codex", "reviewer-provider")
         )
         runtime = ExecutiveRuntime(
-            executive.repository,
+            repository,
             SemanticAuthorityTestGateway(
                 authority,
                 bindings,
@@ -364,10 +381,10 @@ def main() -> int:
                     "project_id": active.project_id,
                     "status": active.state,
                     "tasks": len(
-                        executive.repository.tasks(active.project_id)
+                        repository.tasks(active.project_id)
                     ),
                     "evidence": len(
-                        executive.repository.memories(active.project_id)
+                        repository.memories(active.project_id)
                     ),
                     "authority_attempts_executed": authority.execution_count,
                     "execution_mode": "authority-semantic-injected-transport",

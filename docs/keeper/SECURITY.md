@@ -25,6 +25,24 @@ The environment-name filter is defense in depth, not a secret manager. Operators
 must use the repository's approved credential storage and inspect custom provider
 configuration before execution.
 
+## Local Founder confirmation
+
+Production Founder approval uses the Windows credential UI and validates the
+credential with `LogonUser`. The resulting token SID must equal the Windows SID
+provisioned from the Keeper desktop process; a caller-supplied account, SID,
+conversation speaker, or `LOCAL_FOUNDER` string has no authority. The
+confirmation proof key is generated cryptographically, protected at rest with
+current-user DPAPI, and never accepted from configuration or environment
+variables.
+
+Every confirmation is signed over the exact challenge nonce, operation, project,
+charter revision or protected action, canonical digest, authenticated SID,
+machine and process identities, short expiration, and a fresh session ID. The
+session is registered by a specialized repository transaction and can be
+revoked before confirmation. Successful confirmation atomically consumes both
+session and challenge. Production composition rejects test confirmation types
+and does not expose a generic authentication fallback.
+
 ## Authenticated lifecycle authority
 
 Keeper creates a 256-bit installation authority key with the operating system
