@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from keeper.authority_service.key_ring import ServiceKeyRing
-from keeper.authority_service.protocol import Operation, Request
+from keeper.authority_service.protocol import (
+    PROTOCOL_VERSION,
+    Operation,
+    Request,
+)
 from keeper.authority_service.provenance import AUDIT_REPORT_PURPOSE
 from keeper.authority_service.store import AuthorityStore
 from keeper.providers.adapters import (
@@ -22,7 +26,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.0.0"
+SERVICE_VERSION = "1.1.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,7 +238,7 @@ class AuthorityServiceCore:
         )
         return {
             "service_version": SERVICE_VERSION,
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "service_root": str(self.root),
             "service_key_id": self.keys.current_key_id,
             "service_key_version": self.keys.current_version,

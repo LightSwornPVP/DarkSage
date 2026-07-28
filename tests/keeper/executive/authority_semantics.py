@@ -405,13 +405,21 @@ class SemanticAuthorityTransport:
                         review.pop("review_disposition")
                     stdout.write_text(json.dumps(review), encoding="utf-8")
                     if self.mutate_artifact_during_review:
-                        artifacts = sorted(
-                            Path(str(attempt["workspace"]))
-                            .joinpath(".keeper-artifacts")
-                            .glob("*.json")
+                        author_attempt_id = str(
+                            prompt["author_attempt_id"]
                         )
-                        if artifacts:
-                            artifacts[-1].write_text(
+                        artifact = (
+                            Path(str(attempt["workspace"]))
+                            / ".keeper-artifacts"
+                            / (
+                                hashlib.sha256(
+                                    author_attempt_id.encode()
+                                ).hexdigest()
+                                + ".json"
+                            )
+                        )
+                        if artifact.is_file():
+                            artifact.write_text(
                                 "mutated during review", encoding="utf-8"
                             )
                 else:

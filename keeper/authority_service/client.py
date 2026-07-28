@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from keeper.authority_service.protocol import (
+    PROTOCOL_VERSION,
     Operation,
     Request,
     decode_frame,
@@ -167,7 +168,7 @@ class ProductionAuthorityServiceClient(AuthorityServiceClient):
     def require_live_identity(self) -> dict[str, Any]:
         diagnostics = self.diagnostics()
         if (
-            diagnostics.get("protocol_version") != 1
+            diagnostics.get("protocol_version") != PROTOCOL_VERSION
             or diagnostics.get("observer_available") is not True
             or not isinstance(diagnostics.get("service_root"), str)
             or not isinstance(diagnostics.get("service_key_id"), str)

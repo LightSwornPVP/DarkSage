@@ -13,7 +13,12 @@ from keeper.app.git_safety import GitSafetyService
 from keeper.app.lifecycle import RunLifecycle, RunStage
 from keeper.app.reporting import finalize_evidence, verify_evidence
 from keeper.app.service import KeeperApplication
-from keeper.app.storage import ENTITY_TABLES, SCHEMA_VERSION, KeeperStore
+from keeper.app.storage import (
+    ENTITY_TABLES,
+    EXECUTIVE_LIFECYCLE_TABLES,
+    SCHEMA_VERSION,
+    KeeperStore,
+)
 from keeper.app.verification_policy import VerificationSpec, validate_semantic_bindings
 from keeper.providers.adapters import (
     ProviderCapabilities,
@@ -21,6 +26,7 @@ from keeper.providers.adapters import (
     RoutingRequest,
     route_provider,
 )
+from tests.keeper.executive.fixture_store import insert_executive_fixture
 
 
 def _git(root: Path, *args: str) -> str:
@@ -45,7 +51,11 @@ def test_store_migrates_all_entities_and_detects_tampering(tmp_path: Path) -> No
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
     for table in ENTITY_TABLES:
-        store.upsert(table, "one", {"id": "one", "table": table})
+        payload = {"id": "one", "table": table}
+        if table in EXECUTIVE_LIFECYCLE_TABLES:
+            insert_executive_fixture(store, table, "one", payload)
+        else:
+            store.upsert(table, "one", payload)
         assert store.get(table, "one") == {"id": "one", "table": table}
     with store.connect() as connection:
         connection.execute("UPDATE tasks SET payload='{}' WHERE id='one'")
