@@ -9,12 +9,14 @@ specialists, validates authority deterministically, reviews evidence, requests
 repair, and resumes from durable state.
 
 The executive never signs provider records, qualifies providers, fabricates
-completion, reads protected keys, or broadens Authority IPC. Production runtime
-construction accepts only the concrete Authority-backed gateway. That gateway
-uses the existing qualification, reservation, service-owned launch, authenticated
-completion, cancellation, query, and verification operations. Test and pilot
-transports exercise the same lifecycle semantics but are explicitly
-non-production-authoritative.
+completion, reads Authority protected keys, or broadens Authority IPC. Production
+composition uses an exact `ProductionExecutiveRepository` with an exact Windows
+Founder authenticator; test composition uses structurally separate concrete
+types. `KeeperExecutive` is a narrow immutable facade and does not expose either
+trusted object. Databases are permanently mode-bound and populated unbound
+fixture state cannot be adopted by production. Production runtime construction
+accepts only the concrete Authority-backed gateway. Test and pilot transports
+exercise the same lifecycle semantics but are explicitly non-production-authoritative.
 
 ## State machines
 
@@ -49,12 +51,14 @@ evidence, completion, version, and Founder approval fields.
 
 Charter and protected-action approval are not derived from conversation text.
 Production confirmation uses the Windows credential UI and `LogonUser` to
-authenticate the provisioned desktop principal SID. A DPAPI-protected,
-current-user proof key binds the resulting one-use session to the machine,
-process, project, exact revision or action digest, explicit intent, challenge,
-nonce, and expiration. The repository registers that signed session separately,
-then atomically consumes the session and challenge when it creates the approval
-event. Test authenticators and confirmations are distinct types rejected by the
+authenticate the provisioned desktop principal SID. A non-exportable 3072-bit
+Windows CNG RSA key with forced high-protection UI signs the resulting one-use
+confirmation and the strict Founder authorization capability; KeeperAuthority
+receives only its pinned public verifier. The capability issuer requires that
+fresh confirmation and cannot sign arbitrary payload shapes. The repository
+re-reads the durable charter, challenge, consumed session, event, and approval in
+the same transaction before issuance. Test issuers, authenticators, confirmations,
+repositories, algorithms, and database modes are distinct and rejected by the
 production composition.
 
 ## Delegation and deterministic authority
@@ -79,11 +83,20 @@ reserved atomically in canonical minor units against the cumulative
 charter/approval limit, preventing split-action bypass; unknown cost, absent
 budget, and implicit currency conversion are denied.
 
+The Executive sends KeeperAuthority only the signed Founder capability, never
+bare asserted Founder identity fields. KeeperAuthority independently checks the
+pinned issuer/key, signature, strict schema, project, charter, action and approval
+digests, principal/session/event/record/challenge, generation, revocation epoch,
+expiry, and usage before signing launch authority.
+
 Authority launch authorizations are stored by project and generation. Revoking
 a generation leaves its record permanently revoked and cancels its unlaunched
-attempts. A consecutive higher generation is accepted only after a different
-authenticated Founder approval record, event, and digest; it never changes the
-old generation or revives its attempts.
+attempts. Capability ID/digest/signature and every Founder approval, event,
+session, challenge, approval digest, and proof digest are durably unique across
+the entire project history, not only the adjacent generation. Consumption and
+the exact next generation commit in one immediate transaction. Exact retries are
+idempotent; concurrent requests yield one canonical record; revocation, restart,
+or upgrade never makes an old identity reusable.
 
 ## Dynamic workflow and specialists
 
@@ -109,9 +122,11 @@ the task.
 
 ## Persistence, restart, and surfaces
 
-Schema version 3 adds hash-checked execution-attempt, review, and late-result
-records plus relational one-time approval consumption and cumulative budget
-reservations. Project, charter, workflow, task, approval, execution, review, and
+Executive schema version 6 adds the production/test repository-mode marker and
+the signed Founder capability entity; Authority schema version 4 adds the durable
+project-wide capability-consumption ledger. Existing hash-checked execution,
+review, late-result, one-time approval-consumption, and cumulative budget records
+remain intact. Project, charter, workflow, task, approval, execution, review, and
 evidence ownership is checked at persistence boundaries. Project, charter, and
 task updates use exact compare-and-swap state; approved content and authenticated
 identity bindings cannot be rewritten. Migrations remain idempotent and do not

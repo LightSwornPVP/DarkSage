@@ -30,18 +30,44 @@ configuration before execution.
 Production Founder approval uses the Windows credential UI and validates the
 credential with `LogonUser`. The resulting token SID must equal the Windows SID
 provisioned from the Keeper desktop process; a caller-supplied account, SID,
-conversation speaker, or `LOCAL_FOUNDER` string has no authority. The
-confirmation proof key is generated cryptographically, protected at rest with
-current-user DPAPI, and never accepted from configuration or environment
-variables.
+conversation speaker, or `LOCAL_FOUNDER` string has no authority. The packed
+Credential UI buffer is zeroed over its complete returned byte length before
+`CoTaskMemFree`; the unpacked user, domain, and password buffers are zeroed on
+success, rejection, cancellation, and exceptions, and token handles are closed
+exactly once.
 
-Every confirmation is signed over the exact challenge nonce, operation, project,
-charter revision or protected action, canonical digest, authenticated SID,
-machine and process identities, short expiration, and a fresh session ID. The
-session is registered by a specialized repository transaction and can be
-revoked before confirmation. Successful confirmation atomically consumes both
-session and challenge. Production composition rejects test confirmation types
-and does not expose a generic authentication fallback.
+The confirmation and final single-purpose Founder capability are signed with a
+3072-bit RSA key in the Microsoft Software Key Storage Provider. The private key
+is non-exportable and created with forced high-protection UI; KeeperAuthority is
+provisioned only with the public modulus, exponent, issuer identity, and key ID.
+The signer accepts only the strict capability schema and requires the exact fresh
+signed confirmation. It binds project, charter revision, protected delegation,
+action and approval digests, SID, session, event, approval, challenge and proof,
+generation, revocation epoch, lifetime, usage, machine, and application identity.
+
+The repository re-reads the complete challenge/session/event/approval chain in
+the same transaction, consumes the one-use challenge and session, and only then
+requests the capability. A same-user process cannot export the private key or
+silently sign: every CNG use requires the protected Windows interaction, and a
+replayed confirmation cannot be rebound to different claims. As with any
+same-user desktop prompt, malware may attempt to display or invoke Windows UI;
+the design does not claim to make a compromised interactive account trustworthy.
+It does prevent key possession, configuration injection, a cached session, or
+bare caller fields from silently minting Founder authority.
+
+Production and test repositories are distinct exact concrete types. The
+production facade exposes no mutable repository or authenticator, both
+compositions are immutable after construction, populated unbound fixture state
+fails closed, and each database is permanently marked `PRODUCTION` or `TEST` on
+its first empty trusted open.
+
+KeeperAuthority rejects bare Founder identifiers. It verifies the capability
+signature and strict bindings, then atomically consumes it while creating the
+exact next launch generation. Database uniqueness constraints make capability,
+signature, approval record/event, session, challenge, approval digest, and proof
+digest permanently one-use for the project across revocation, restart, and
+package upgrade. Exact retries return the one existing canonical generation;
+failed creation rolls back both generation and consumption.
 
 ## Authenticated lifecycle authority
 
