@@ -52,7 +52,7 @@ from keeper.executive.state import PROJECT_TRANSITIONS, TASK_TRANSITIONS
 @dataclass(frozen=True, slots=True)
 class _ProductionRepositoryRuntimeIdentity:
     repository_token: str
-    database_binding: tuple[str, str, str]
+    database_binding: tuple[str, str, str, str, str, str, str, str]
 
 class ExecutiveRepository:
     __slots__ = (
@@ -67,7 +67,7 @@ class ExecutiveRepository:
     __founder_authenticator: FounderAuthenticator
     __mode: str
     __runtime_token: str
-    __database_binding: tuple[str, str, str]
+    __database_binding: tuple[str, str, str, str, str, str, str, str]
     __sealed: bool
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
