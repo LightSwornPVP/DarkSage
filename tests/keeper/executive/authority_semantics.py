@@ -221,13 +221,13 @@ class SemanticAuthorityTransport:
                 if self.fail_before_reservation:
                     self.fail_before_reservation = False
                     raise RuntimeError("reservation failed before persistence")
-                authorization = self.launch_authorizations.get(
+                reserved_authorization = self.launch_authorizations.get(
                     str(payload["launch_authorization_id"])
                 )
                 if (
-                    authorization is None
-                    or authorization["service_state"] != "ACTIVE"
-                    or authorization["authorization_generation"]
+                    reserved_authorization is None
+                    or reserved_authorization["service_state"] != "ACTIVE"
+                    or reserved_authorization["authorization_generation"]
                     != payload["authorization_generation"]
                 ):
                     raise PermissionError(

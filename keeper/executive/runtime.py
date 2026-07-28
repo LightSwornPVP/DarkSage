@@ -44,6 +44,8 @@ IN_FLIGHT = frozenset(
 class ExecutiveRuntime:
     """Production runtime: every provider boundary is KeeperAuthority-owned."""
 
+    _gateway: AuthorityBackedSpecialistGateway
+
     __slots__ = (
         "_repository", "_gateway", "evaluator", "selector",
         "_production_composition",

@@ -51,7 +51,7 @@ def test_store_migrates_all_entities_and_detects_tampering(tmp_path: Path) -> No
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
     for table in ENTITY_TABLES:
-        payload = {"id": "one", "table": table}
+        payload: dict[str, object] = {"id": "one", "table": table}
         if table in EXECUTIVE_LIFECYCLE_TABLES:
             insert_executive_fixture(store, table, "one", payload)
         else:

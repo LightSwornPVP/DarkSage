@@ -14,6 +14,7 @@ from keeper.executive.enums import ExecutiveState, FounderApprovalIntent
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import (
     ActionEffects,
+    ApprovalRecord,
     ProjectCharter,
     ProjectRecord,
     ProposedAction,
@@ -82,7 +83,7 @@ def _proposed(
 def _approve(
     service: CharterService,
     proposed: ProjectCharter,
-) -> tuple[ProjectCharter, object]:
+) -> tuple[ProjectCharter, ApprovalRecord]:
     challenge = service.request_approval(proposed)
     approved, approval, _ = service.confirm_approval(
         challenge.challenge_id,
@@ -674,6 +675,7 @@ def test_euphemistic_protected_actions_require_exact_structured_effect(
     from keeper.executive.authority import validate_durable_task_effects
 
     validate_durable_task_effects(task)
+    assert task.action_effects is not None
     with pytest.raises(PermissionError, match="inconsistent"):
         validate_durable_task_effects(
             replace(
@@ -690,6 +692,7 @@ def test_ambiguous_external_action_fails_closed(tmp_path: Path) -> None:
     service, _, proposed = _proposed(tmp_path)
     project, charter = _activate(service, proposed)
     _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
+    assert tasks[0].action_effects is not None
     task = replace(
         tasks[0],
         objective="Activate the external environment",

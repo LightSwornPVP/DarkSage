@@ -230,7 +230,9 @@ def test_revoked_launch_generation_invalidates_reserved_attempt(
     assert attempt_id in revoked["canceled_attempt_ids"]
     with pytest.raises(PermissionError, match="not reserved"):
         client.execute_provider(attempt_id)
-    assert core.store.get("attempts", attempt_id)["service_state"] == "CANCELLED"
+    attempt = core.store.get("attempts", attempt_id)
+    assert attempt is not None
+    assert attempt["service_state"] == "CANCELLED"
 
 
 def test_request_replay_and_stale_timestamp_fail_closed(tmp_path: Path) -> None:
