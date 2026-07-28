@@ -47,6 +47,7 @@ IN_FLIGHT = frozenset(
     }
 )
 
+
 @dataclass(frozen=True, slots=True)
 class _RuntimeComposition:
     production: bool
@@ -83,17 +84,26 @@ del _composition_registry
 
 _IMMUTABLE_RUNTIME_NAMES = frozenset(
     {
-        "repository", "gateway", "_repository", "_gateway",
-        "sealed", "_sealed", "__sealed",
-        "_ExecutiveRuntime__repository", "_ExecutiveRuntime__gateway",
-        "_ExecutiveRuntime__sealed", "_ExecutiveRuntime__repository_id",
+        "repository",
+        "gateway",
+        "_repository",
+        "_gateway",
+        "sealed",
+        "_sealed",
+        "__sealed",
+        "_ExecutiveRuntime__repository",
+        "_ExecutiveRuntime__gateway",
+        "_ExecutiveRuntime__sealed",
+        "_ExecutiveRuntime__repository_id",
         "_ExecutiveRuntime__gateway_id",
         "_ExecutiveRuntime__repository_identity",
         "_ExecutiveRuntime__gateway_identity",
         "_ExecutiveRuntime__production_composition",
-        "__dict__", "__weakref__",
+        "__dict__",
+        "__weakref__",
     }
 )
+
 
 class ExecutiveRuntime:
     """Production runtime: every provider boundary is KeeperAuthority-owned."""
@@ -107,6 +117,7 @@ class ExecutiveRuntime:
         "selector",
         "__weakref__",
     )
+
     def __init__(
         self,
         repository: ExecutiveRepository,
@@ -136,6 +147,7 @@ class ExecutiveRuntime:
                 gateway_identity=None,
             ),
         )
+
     @classmethod
     def production(
         cls,
@@ -170,6 +182,7 @@ class ExecutiveRuntime:
             ),
         )
         return runtime
+
     def __setattr__(self, name: str, value: object) -> None:
         if name in _IMMUTABLE_RUNTIME_NAMES:
             raise AttributeError("Executive runtime composition is immutable")
@@ -179,6 +192,7 @@ class ExecutiveRuntime:
         if name in _IMMUTABLE_RUNTIME_NAMES:
             raise AttributeError("Executive runtime composition is immutable")
         object.__delattr__(self, name)
+
     def __copy__(self) -> NoReturn:
         raise TypeError("Executive runtime cannot be copied")
 
@@ -774,12 +788,15 @@ class ExecutiveRuntime:
                         ExecutiveState.BLOCKED,
                         "The claimed Authority provider is no longer qualified.",
                     )
-                self._recheck_launch(
-                    current,
-                    charter,
-                    author,
-                    allow_blocked_reconciliation=True,
-                )
+                try:
+                    self._recheck_launch(
+                        current,
+                        charter,
+                        author,
+                        allow_blocked_reconciliation=True,
+                    )
+                except PermissionError:
+                    return self.__repository.project(project.project_id)
                 try:
                     running = self.__repository.transition_execution(
                         current.task_id,

@@ -14,7 +14,7 @@ from keeper.authority_service.client import (
     AuthorityServiceClient,
     ProductionAuthorityServiceClient,
 )
-from keeper.authority_service.protocol import Operation, Request
+from keeper.authority_service.protocol import PROTOCOL_VERSION, Operation, Request
 from keeper.executive.models import (
     ExecutiveTask,
     ProjectCharter,
@@ -147,12 +147,12 @@ def _capture_production_transport_validator() -> Callable[
         authority_client_module._read,
         authority_client_module._close,
         authority_client_module._kernel32,
-        authority_client_module.encode_frame,
-        authority_client_module.decode_frame,
-        authority_client_module.parse_response,
-        authority_client_module.Request,
-        authority_client_module.Operation,
-        authority_client_module.PROTOCOL_VERSION,
+        vars(authority_client_module)["encode_frame"],
+        vars(authority_client_module)["decode_frame"],
+        vars(authority_client_module)["parse_response"],
+        vars(authority_client_module)["Request"],
+        vars(authority_client_module)["Operation"],
+        vars(authority_client_module)["PROTOCOL_VERSION"],
         Request.__dict__["create"],
         Request.__dict__["to_dict"],
     )
@@ -188,17 +188,17 @@ def _capture_production_transport_validator() -> Callable[
             AuthorityServiceClient.__dict__.get("finalize_completion"),
             AuthorityServiceClient.__dict__.get("cancel_attempt"),
             AuthorityServiceClient.__dict__.get("verify"),
-            getattr(authority_client_module, "_connect", None),
-            getattr(authority_client_module, "_write_all", None),
-            getattr(authority_client_module, "_read", None),
-            getattr(authority_client_module, "_close", None),
-            getattr(authority_client_module, "_kernel32", None),
-            getattr(authority_client_module, "encode_frame", None),
-            getattr(authority_client_module, "decode_frame", None),
-            getattr(authority_client_module, "parse_response", None),
-            getattr(authority_client_module, "Request", None),
-            getattr(authority_client_module, "Operation", None),
-            getattr(authority_client_module, "PROTOCOL_VERSION", None),
+            vars(authority_client_module).get("_connect"),
+            vars(authority_client_module).get("_write_all"),
+            vars(authority_client_module).get("_read"),
+            vars(authority_client_module).get("_close"),
+            vars(authority_client_module).get("_kernel32"),
+            vars(authority_client_module).get("encode_frame"),
+            vars(authority_client_module).get("decode_frame"),
+            vars(authority_client_module).get("parse_response"),
+            vars(authority_client_module).get("Request"),
+            vars(authority_client_module).get("Operation"),
+            vars(authority_client_module).get("PROTOCOL_VERSION"),
             Request.__dict__.get("create"),
             Request.__dict__.get("to_dict"),
         )
@@ -225,7 +225,7 @@ def _capture_production_transport_validator() -> Callable[
             client_identity=id(client),
             pipe_name=client.pipe_name,
             timeout_seconds=float(client.timeout_seconds),
-            protocol_version=authority_client_module.PROTOCOL_VERSION,
+            protocol_version=PROTOCOL_VERSION,
             implementation_identity=tuple(
                 id(item) for item in trusted_implementation
             ),
@@ -239,12 +239,19 @@ del _capture_production_transport_validator
 
 
 class _PinnedProductionAuthorityOperations:
+    __client: ProductionAuthorityServiceClient
+    __identity: _ProductionTransportIdentity
+
     __slots__ = ("__client", "__identity")
 
     def __init__(self, client: ProductionAuthorityServiceClient) -> None:
         identity = _validate_production_transport(client)
-        object.__setattr__(self, "_PinnedProductionAuthorityOperations__client", client)
-        object.__setattr__(self, "_PinnedProductionAuthorityOperations__identity", identity)
+        object.__setattr__(
+            self, "_PinnedProductionAuthorityOperations__client", client
+        )
+        object.__setattr__(
+            self, "_PinnedProductionAuthorityOperations__identity", identity
+        )
 
     def __setattr__(self, name: str, value: object) -> None:
         del name, value
@@ -299,6 +306,14 @@ class _PinnedProductionAuthorityOperations:
 
 class AuthorityBackedSpecialistGateway:
     """Production boundary for all Executive author and reviewer execution."""
+
+    _authority: AuthorityOperations
+    _bindings: tuple[AuthorityProviderBinding, ...]
+    _exchange_root: Path
+    _resolved: dict[
+        tuple[str, str, str],
+        tuple[AuthorityProviderBinding, dict[str, Any]],
+    ]
 
     __slots__ = ("_authority", "_bindings", "_exchange_root", "_resolved")
 

@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterator, cast
 
 SCHEMA_VERSION = 7
 LINEAGE_VERSION = 1
-LINEAGE_ZERO_HASH = '0' * 64
+LINEAGE_ZERO_HASH = "0" * 64
 ENTITY_TABLES = (
     "projects",
     "worktrees",
@@ -170,7 +170,12 @@ class KeeperStore:
                         "production Executive lineage journal is empty"
                     )
                 value = json.loads(lines[-1].decode("utf-8"))
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as error:
             raise PermissionError(
                 "production Executive lineage journal is unavailable"
             ) from error
@@ -318,6 +323,7 @@ class KeeperStore:
             handle.write(serialized + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+
     def migrate(self) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -490,6 +496,7 @@ class KeeperStore:
                 "reserved_at TEXT NOT NULL, "
                 "UNIQUE(run_id, destination_attempt))"
             )
+
     def bind_executive_repository_mode(self, mode: str) -> None:
         if mode not in {"PRODUCTION", "TEST"}:
             raise ValueError("Executive repository mode is invalid")
@@ -533,7 +540,8 @@ class KeeperStore:
             row = connection.execute(
                 "SELECT m.mode, m.bound_at, l.database_id "
                 "FROM executive_repository_mode AS m "
-                "LEFT JOIN executive_repository_lineage AS l ON l.singleton=m.singleton "
+                "LEFT JOIN executive_repository_lineage AS l "
+                "ON l.singleton=m.singleton "
                 "WHERE m.singleton=1"
             ).fetchone()
         if row is None:
@@ -563,6 +571,7 @@ class KeeperStore:
             journal_dev,
             journal_ino,
         )
+
     def consume_reroute_authorization(
         self,
         authorization_id: str,

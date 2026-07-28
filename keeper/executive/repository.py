@@ -54,6 +54,7 @@ class _ProductionRepositoryRuntimeIdentity:
     repository_token: str
     database_binding: tuple[str, str, str, str, str, str, str, str]
 
+
 class ExecutiveRepository:
     __slots__ = (
         "__store",

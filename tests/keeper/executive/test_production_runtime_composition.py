@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import copy
 import pickle
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import keeper.authority_service.client as authority_client_module
 from keeper.app.storage import KeeperStore
 from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.executive.authority_gateway import (
@@ -40,6 +42,10 @@ class _ProductionGatewaySubclass(
 
 class _RepositoryDuck:
     pass
+
+
+class _ExecutiveRuntimeSubclass(ExecutiveRuntime):
+    __slots__ = ()
 
 
 def _production_repository(
@@ -181,9 +187,12 @@ def test_production_gateway_dependencies_are_immutable(tmp_path: Path) -> None:
         ("_authority", object()),
         ("_bindings", ()),
         ("_exchange_root", tmp_path / "other"),
+        ("_ProductionAuthorityBackedSpecialistGateway__sealed", False),
     ):
         with pytest.raises(AttributeError, match="immutable"):
             setattr(gateway, name, value)
+        with pytest.raises(AttributeError, match="immutable"):
+            delattr(gateway, name)
     assert gateway._production_runtime_identity().client_identity == id(client)
 
 
@@ -333,3 +342,136 @@ def test_production_facade_returns_a_validated_sealed_runtime(
     assert not hasattr(runtime, "repository")
     with pytest.raises(AttributeError, match="immutable"):
         runtime.gateway = object()
+
+
+def test_name_mangled_seal_attack_and_reinitialization_fail_closed(
+    tmp_path: Path,
+) -> None:
+    runtime = _production_runtime(tmp_path, "seal-regression")
+    test_service, project, _ = approved_project(tmp_path / "seal-test-state")
+    test_gateway, _ = semantic_gateway(tmp_path)
+    original_state = test_service.repository.project(project.project_id).state
+
+    for name in ("__sealed", "_ExecutiveRuntime__sealed"):
+        with pytest.raises(AttributeError, match="immutable"):
+            setattr(runtime, name, False)
+        with pytest.raises(AttributeError, match="immutable"):
+            delattr(runtime, name)
+        with pytest.raises(AttributeError):
+            object.__setattr__(runtime, name, False)
+
+    with pytest.raises(AttributeError, match="already initialized"):
+        runtime.__init__(  # type: ignore[misc]
+            test_service.repository, test_gateway
+        )
+    with pytest.raises(AttributeError, match="already initialized"):
+        type(runtime).__init__(
+            runtime, test_service.repository, test_gateway
+        )
+
+    runtime._validate_composition()
+    assert test_service.repository.project(project.project_id).state == original_state
+
+
+def test_class_level_production_transport_replacement_fails_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, _ = _production_repository(tmp_path, "class-send")
+    gateway, _ = _production_gateway(tmp_path, "class-send")
+    runtime = ExecutiveRuntime.production(repository, gateway)
+    original_send = ProductionAuthorityServiceClient.__dict__["_send"]
+    replacement_executed = False
+
+    def replacement_send(_self: object, _request: object) -> dict[str, Any]:
+        nonlocal replacement_executed
+        replacement_executed = True
+        return {"impersonated": True}
+
+    monkeypatch.setattr(
+        ProductionAuthorityServiceClient, "_send", replacement_send
+    )
+    with pytest.raises(RuntimeError, match="composition is invalid"):
+        runtime._validate_composition()
+    with pytest.raises(PermissionError, match="transport implementation"):
+        gateway._authority.diagnostics()
+    assert replacement_executed is False
+
+    monkeypatch.setattr(
+        ProductionAuthorityServiceClient, "_send", original_send
+    )
+    runtime._validate_composition()
+
+
+def test_same_path_production_database_rollback_fails_closed(
+    tmp_path: Path,
+) -> None:
+    repository, store = _production_repository(tmp_path, "rollback")
+    gateway, _ = _production_gateway(tmp_path, "rollback")
+    runtime = ExecutiveRuntime.production(repository, gateway)
+    snapshot = tmp_path / "older-production-snapshot.db"
+    store.backup(snapshot)
+
+    store.upsert("settings", "lineage-marker", {"generation": 2})
+    assert store.get("settings", "lineage-marker") == {"generation": 2}
+    runtime._validate_composition()
+
+    shutil.copyfile(snapshot, store.path)
+
+    with pytest.raises(RuntimeError, match="composition is invalid"):
+        runtime._validate_composition()
+    with pytest.raises(PermissionError, match="lineage.*rolled back"):
+        KeeperStore(store.path).migrate()
+
+
+def test_runtime_subclasses_cannot_construct_trusted_composition(
+    tmp_path: Path,
+) -> None:
+    test_repository = _test_repository(tmp_path, "subclass-test")
+    test_gateway, _ = semantic_gateway(tmp_path)
+    with pytest.raises(TypeError, match="subclasses"):
+        _ExecutiveRuntimeSubclass(test_repository, test_gateway)
+
+    repository, _ = _production_repository(tmp_path, "subclass-production")
+    gateway, _ = _production_gateway(tmp_path, "subclass-production")
+    with pytest.raises(TypeError, match="subclasses"):
+        _ExecutiveRuntimeSubclass.production(repository, gateway)
+
+
+def test_module_level_transport_helper_replacement_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, _ = _production_repository(tmp_path, "module-connect")
+    gateway, _ = _production_gateway(tmp_path, "module-connect")
+    runtime = ExecutiveRuntime.production(repository, gateway)
+    original_connect = authority_client_module._connect
+    replacement_executed = False
+
+    def replacement_connect(_pipe: str, _timeout: float) -> int:
+        nonlocal replacement_executed
+        replacement_executed = True
+        return 0
+
+    monkeypatch.setattr(authority_client_module, "_connect", replacement_connect)
+    with pytest.raises(RuntimeError, match="composition is invalid"):
+        runtime._validate_composition()
+    assert replacement_executed is False
+
+    monkeypatch.setattr(authority_client_module, "_connect", original_connect)
+    runtime._validate_composition()
+
+
+def test_copied_production_database_and_lineage_cannot_change_paths(
+    tmp_path: Path,
+) -> None:
+    _, source = _production_repository(tmp_path, "source-copy")
+    copied_path = tmp_path / "copied-production.db"
+    source.backup(copied_path)
+    copied = KeeperStore(copied_path)
+    copied_journal = copied._lineage_journal_path()
+    copied_journal.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source._lineage_journal_path(), copied_journal)
+
+    with pytest.raises(PermissionError, match="lineage record is invalid"):
+        copied.migrate()
