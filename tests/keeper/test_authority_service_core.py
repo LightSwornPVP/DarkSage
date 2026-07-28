@@ -27,6 +27,8 @@ from keeper.authority_service.protocol import (
     parse_request,
 )
 from keeper.authority_service.store import AuthorityStore
+from keeper.executive.founder_capability import TestFounderCapabilityVerifier
+from tests.keeper.authority_testkit import make_test_founder_capability
 
 
 def test_schema_two_partial_launch_migration_is_restart_safe(
@@ -66,7 +68,7 @@ def test_schema_two_partial_launch_migration_is_restart_safe(
             "WHERE type='table' AND name='launch_authorizations'"
         ).fetchone()
     assert schema_version is not None
-    assert schema_version["value"] == "3"
+    assert schema_version["value"] == "4"
     assert launch_table is not None
 
 
@@ -125,6 +127,7 @@ def _service(tmp_path: Path) -> tuple[AuthorityServiceCore, AuthorityServiceClie
     core = AuthorityServiceCore(
         tmp_path / "service",
         observer=cast(TrustedObserver, _Observer(executable)),
+        founder_capability_verifier=TestFounderCapabilityVerifier(),
     )
     client = AuthorityServiceClient(
         test_transport=lambda request: core.dispatch(request, "S-1-5-21-1000")
@@ -136,23 +139,14 @@ def _launch_authority(
     client: AuthorityServiceClient, project_id: str
 ) -> dict[str, object]:
     authorization = client.authorize_project_launch(
-        project_id=project_id,
-        charter_id="charter-1",
-        charter_revision=1,
-        delegation_id="approval-1",
-        founder_approval_event_id=f"event:{project_id}:1",
-        founder_approval_event_digest=hashlib.sha256(
-            f"event:{project_id}:1".encode()
-        ).hexdigest(),
-        founder_authenticated_session_id=f"session:{project_id}:1",
-        founder_principal_sid="S-1-5-21-1000",
-        authorization_generation=1,
-        expires_at="2099-01-01T00:00:00+00:00",
+        founder_capability=make_test_founder_capability(
+            project_id, charter_id="charter-1"
+        )
     )["authorization"]
     return {
         "launch_authorization_id": authorization["id"],
         "authorization_generation": 1,
-        "delegation_id": "approval-1",
+        "delegation_id": authorization["delegation_id"],
         "founder_approval_event_id": authorization[
             "founder_approval_event_id"
         ],
@@ -177,21 +171,12 @@ def _authorize_generation(
     generation: int,
     approval_suffix: str,
 ) -> dict[str, Any]:
-    event_id = f"event:{project_id}:{approval_suffix}"
-    return client.authorize_project_launch(
-        project_id=project_id,
-        charter_id=f"charter-{generation}",
-        charter_revision=generation,
-        delegation_id=f"approval-{approval_suffix}",
-        founder_approval_event_id=event_id,
-        founder_approval_event_digest=hashlib.sha256(
-            event_id.encode()
-        ).hexdigest(),
-        founder_authenticated_session_id=f"session-{approval_suffix}",
-        founder_principal_sid="S-1-5-21-1000",
-        authorization_generation=generation,
-        expires_at="2099-01-01T00:00:00+00:00",
-    )["authorization"]
+    response = client.authorize_project_launch(
+        founder_capability=make_test_founder_capability(
+            project_id, generation, approval_suffix
+        )
+    )
+    return cast(dict[str, Any], response["authorization"])
 
 
 def test_service_constructs_qualification_and_completion_records(
@@ -341,22 +326,10 @@ def test_higher_generation_requires_new_authenticated_approval_and_restarts(
     client.revoke_project_launch("generation-project", 1)
     with pytest.raises(PermissionError, match="revoked|stale"):
         _authorize_generation(client, "generation-project", 1, "one")
-    with pytest.raises(PermissionError, match="new authenticated"):
+    with pytest.raises(PermissionError, match="capability"):
         client.authorize_project_launch(
             project_id="generation-project",
-            charter_id="charter-2",
-            charter_revision=2,
-            delegation_id=first["delegation_id"],
             founder_approval_event_id=first["founder_approval_event_id"],
-            founder_approval_event_digest=first[
-                "founder_approval_event_digest"
-            ],
-            founder_authenticated_session_id=first[
-                "founder_authenticated_session_id"
-            ],
-            founder_principal_sid=first["founder_principal_sid"],
-            authorization_generation=2,
-            expires_at="2099-01-01T00:00:00+00:00",
         )
     second = _authorize_generation(client, "generation-project", 2, "two")
     assert second["revocation_epoch"] == 1
@@ -364,6 +337,7 @@ def test_higher_generation_requires_new_authenticated_approval_and_restarts(
     restarted = AuthorityServiceCore(
         core.root,
         observer=core.observer,
+        founder_capability_verifier=TestFounderCapabilityVerifier(),
     )
     first_after_restart = restarted.store.get(
         "launch_authorizations",
@@ -377,6 +351,175 @@ def test_higher_generation_requires_new_authenticated_approval_and_restarts(
     assert first_after_restart["service_state"] == "REVOKED"
     assert second_after_restart is not None
     assert second_after_restart["service_state"] == "ACTIVE"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("issuer_id", "untrusted-founder-issuer"),
+        ("issuer_key_id", "unknown-founder-key"),
+        ("project_id", "copied-to-another-project"),
+        ("charter_id", "copied-to-another-charter"),
+        ("action_digest", "0" * 64),
+        ("founder_principal_sid", "S-1-5-21-FABRICATED"),
+        ("founder_authenticated_session_id", "fabricated-session"),
+        ("approval_event_id", "fabricated-event"),
+        ("approval_record_id", "fabricated-approval"),
+        ("challenge_id", "fabricated-challenge"),
+        ("signature", "ZmFicmljYXRlZA"),
+    ],
+)
+def test_modified_or_copied_founder_capability_is_rejected(
+    tmp_path: Path, mutation: str, value: object
+) -> None:
+    _core, client = _service(tmp_path)
+    capability = make_test_founder_capability("capability-tamper")
+    capability[mutation] = value
+    with pytest.raises(PermissionError, match="capability"):
+        client.authorize_project_launch(founder_capability=capability)
+
+
+def test_unsigned_malformed_and_expired_capabilities_are_rejected(
+    tmp_path: Path,
+) -> None:
+    _core, client = _service(tmp_path)
+    unsigned = make_test_founder_capability("unsigned-capability")
+    unsigned.pop("signature")
+    with pytest.raises(PermissionError, match="capability"):
+        client.authorize_project_launch(founder_capability=unsigned)
+    with pytest.raises(PermissionError, match="capability"):
+        client.authorize_project_launch(founder_capability={"schema_version": 1})
+
+    expired = make_test_founder_capability(
+        "expired-capability",
+        claim_overrides={
+            "issued_at": "2000-01-01T00:00:00+00:00",
+            "expires_at": "2000-01-01T00:01:00+00:00",
+        },
+    )
+    with pytest.raises(PermissionError, match="stale"):
+        client.authorize_project_launch(founder_capability=expired)
+
+
+def test_valid_capability_is_consumed_once_with_idempotent_retry(
+    tmp_path: Path,
+) -> None:
+    _core, client = _service(tmp_path)
+    capability = make_test_founder_capability("idempotent-capability")
+    first = client.authorize_project_launch(founder_capability=capability)
+    retry = client.authorize_project_launch(founder_capability=capability)
+    assert retry == first
+    client.revoke_project_launch("idempotent-capability", 1)
+    with pytest.raises(PermissionError, match="revoked|stale"):
+        client.authorize_project_launch(founder_capability=capability)
+
+
+@pytest.mark.parametrize(
+    "reused_field",
+    [
+        "capability_id",
+        "approval_record_id",
+        "approval_event_id",
+        "founder_authenticated_session_id",
+        "challenge_id",
+        "approval_digest",
+    ],
+)
+def test_project_wide_founder_identity_replay_is_permanently_rejected(
+    tmp_path: Path, reused_field: str
+) -> None:
+    _core, client = _service(tmp_path)
+    project_id = f"global-replay-{reused_field}"
+    first_capability = make_test_founder_capability(project_id, 1, "one")
+    client.authorize_project_launch(founder_capability=first_capability)
+    client.revoke_project_launch(project_id, 1)
+    client.authorize_project_launch(
+        founder_capability=make_test_founder_capability(project_id, 2, "two")
+    )
+    client.revoke_project_launch(project_id, 2)
+    with pytest.raises(PermissionError, match="already used"):
+        client.authorize_project_launch(
+            founder_capability=make_test_founder_capability(
+                project_id,
+                3,
+                "three",
+                claim_overrides={
+                    reused_field: first_capability[reused_field]
+                },
+            )
+        )
+
+
+def test_confirmation_proof_digest_cannot_be_rebound_by_issuer() -> None:
+    first = make_test_founder_capability("proof-rebinding", 1, "one")
+    with pytest.raises(PermissionError, match="fresh confirmation"):
+        make_test_founder_capability(
+            "proof-rebinding",
+            2,
+            "two",
+            claim_overrides={
+                "challenge_proof_digest": first["challenge_proof_digest"]
+            },
+        )
+
+
+def test_confirmation_proof_digest_is_durably_unique(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    project_id = "durable-proof-uniqueness"
+    first = make_test_founder_capability(project_id, 1, "one")
+    client.authorize_project_launch(founder_capability=first)
+    client.revoke_project_launch(project_id, 1)
+    client.authorize_project_launch(
+        founder_capability=make_test_founder_capability(
+            project_id, 2, "two"
+        )
+    )
+    client.revoke_project_launch(project_id, 2)
+    identifier = f"launch-authorization:{project_id}:generation:3"
+    with pytest.raises(PermissionError, match="already used"):
+        core.store.create_launch_authorization(
+            identifier,
+            3,
+            "S-1-5-21-1000",
+            {"project_id": project_id, "revocation_epoch": 2},
+            {
+                "capability_id": "capability:proof:three",
+                "project_id": project_id,
+                "approval_record_id": "approval:proof:three",
+                "approval_event_id": "event:proof:three",
+                "founder_session_id": "session:proof:three",
+                "challenge_id": "challenge:proof:three",
+                "approval_digest": "approval-digest:proof:three",
+                "challenge_proof_digest": first[
+                    "challenge_proof_digest"
+                ],
+                "capability_digest": "capability-digest:proof:three",
+                "signature_digest": "signature-digest:proof:three",
+                "generation": 3,
+                "authorization_id": identifier,
+            },
+        )
+    assert core.store.get("launch_authorizations", identifier) is None
+
+
+def test_generation_one_capability_cannot_authorize_generation_three(
+    tmp_path: Path,
+) -> None:
+    _core, client = _service(tmp_path)
+    project_id = "generation-one-at-three"
+    approval_a = make_test_founder_capability(project_id, 1, "approval-a")
+    client.authorize_project_launch(founder_capability=approval_a)
+    client.revoke_project_launch(project_id, 1)
+    client.authorize_project_launch(
+        founder_capability=make_test_founder_capability(
+            project_id, 2, "approval-b"
+        )
+    )
+    client.revoke_project_launch(project_id, 2)
+    with pytest.raises(PermissionError, match="revoked|stale"):
+        client.authorize_project_launch(founder_capability=approval_a)
 
 
 def test_concurrent_higher_generation_has_one_canonical_winner(

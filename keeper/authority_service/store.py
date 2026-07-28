@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SERVICE_SCHEMA_VERSION = 3
+SERVICE_SCHEMA_VERSION = 4
 _EXPECTED_TABLES = {
     "attempts",
     "audit_log",
@@ -18,6 +18,7 @@ _EXPECTED_TABLES = {
     "replay_guard",
     "service_meta",
     "launch_authorizations",
+    "founder_capability_consumptions",
 }
 
 
@@ -99,6 +100,27 @@ class AuthorityStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS founder_capability_consumptions(
+                    capability_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    approval_record_id TEXT NOT NULL,
+                    approval_event_id TEXT NOT NULL,
+                    founder_session_id TEXT NOT NULL,
+                    challenge_id TEXT NOT NULL,
+                    approval_digest TEXT NOT NULL,
+                    challenge_proof_digest TEXT NOT NULL,
+                    capability_digest TEXT NOT NULL UNIQUE,
+                    signature_digest TEXT NOT NULL UNIQUE,
+                    generation INTEGER NOT NULL,
+                    authorization_id TEXT NOT NULL UNIQUE,
+                    consumed_at TEXT NOT NULL,
+                    UNIQUE(project_id, approval_record_id),
+                    UNIQUE(project_id, approval_event_id),
+                    UNIQUE(project_id, founder_session_id),
+                    UNIQUE(project_id, challenge_id),
+                    UNIQUE(project_id, approval_digest),
+                    UNIQUE(project_id, challenge_proof_digest)
+                );
                 CREATE TABLE IF NOT EXISTS audit_log(
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id TEXT NOT NULL UNIQUE,
@@ -147,7 +169,7 @@ class AuthorityStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    UPDATE service_meta SET value='3' WHERE key='schema_version';
+                    UPDATE service_meta SET value='4' WHERE key='schema_version';
                     """
                 )
             elif int(row["value"]) == 2:
@@ -163,11 +185,97 @@ class AuthorityStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    UPDATE service_meta SET value='3' WHERE key='schema_version';
+                    UPDATE service_meta SET value='4' WHERE key='schema_version';
                     """
+                )
+            elif int(row["value"]) == 3:
+                connection.execute(
+                    "UPDATE service_meta SET value='4' WHERE key='schema_version'"
                 )
             elif int(row["value"]) != SERVICE_SCHEMA_VERSION:
                 raise RuntimeError("authority service schema is incompatible")
+            self._backfill_founder_capability_consumptions(connection)
+
+    @staticmethod
+    def _backfill_founder_capability_consumptions(
+        connection: sqlite3.Connection,
+    ) -> None:
+        rows = connection.execute(
+            "SELECT id,generation,payload,payload_hash FROM launch_authorizations"
+        ).fetchall()
+        for row in rows:
+            serialized = str(row["payload"])
+            if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != row["payload_hash"]:
+                raise RuntimeError(
+                    "stored launch authorization failed integrity validation"
+                )
+            payload = json.loads(serialized)
+            if not isinstance(payload, dict):
+                raise RuntimeError("stored launch authorization is malformed")
+            authorization_id = str(row["id"])
+            project_id = str(payload["project_id"])
+            legacy = {
+                "capability_id": str(
+                    payload.get("founder_capability_id")
+                    or f"legacy-capability:{authorization_id}"
+                ),
+                "project_id": project_id,
+                "approval_record_id": str(payload["delegation_id"]),
+                "approval_event_id": str(payload["founder_approval_event_id"]),
+                "founder_session_id": str(
+                    payload["founder_authenticated_session_id"]
+                ),
+                "challenge_id": str(
+                    payload.get("founder_challenge_id")
+                    or f"legacy-challenge:{authorization_id}"
+                ),
+                "approval_digest": str(
+                    payload.get("founder_approval_digest")
+                    or payload["founder_approval_event_digest"]
+                ),
+                "challenge_proof_digest": str(
+                    payload.get("founder_challenge_proof_digest")
+                    or f"legacy-proof:{authorization_id}"
+                ),
+                "capability_digest": str(
+                    payload.get("founder_capability_digest")
+                    or hashlib.sha256(
+                        f"legacy-capability:{authorization_id}".encode("utf-8")
+                    ).hexdigest()
+                ),
+                "signature_digest": str(
+                    payload.get("founder_capability_signature_digest")
+                    or hashlib.sha256(
+                        f"legacy-signature:{authorization_id}".encode("utf-8")
+                    ).hexdigest()
+                ),
+                "generation": int(row["generation"]),
+                "authorization_id": authorization_id,
+                "consumed_at": str(
+                    payload.get("authorized_at") or _now()
+                ),
+            }
+            existing = connection.execute(
+                "SELECT authorization_id FROM founder_capability_consumptions "
+                "WHERE authorization_id=?",
+                (authorization_id,),
+            ).fetchone()
+            if existing is not None:
+                continue
+            try:
+                connection.execute(
+                    "INSERT INTO founder_capability_consumptions VALUES("
+                    ":capability_id,:project_id,:approval_record_id,"
+                    ":approval_event_id,:founder_session_id,:challenge_id,"
+                    ":approval_digest,:challenge_proof_digest,"
+                    ":capability_digest,:signature_digest,:generation,"
+                    ":authorization_id,:consumed_at)",
+                    legacy,
+                )
+            except sqlite3.IntegrityError as error:
+                raise RuntimeError(
+                    "legacy Founder approval identities are not project-unique"
+                ) from error
 
     def consume_request(
         self,
@@ -325,69 +433,102 @@ class AuthorityStore:
             if (value := self.get(table, identifier)) is not None
         ]
 
-    def refresh_launch_authorization(
+    def create_launch_authorization(
         self,
         identifier: str,
         generation: int,
         client_sid: str,
         payload: dict[str, Any],
-    ) -> None:
+        consumption: dict[str, Any],
+    ) -> dict[str, Any]:
         serialized, digest = _serialize(payload)
         timestamp = _now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state,generation,client_sid,payload_hash "
+                "SELECT state,generation,client_sid,payload,payload_hash "
                 "FROM launch_authorizations WHERE id=?",
                 (identifier,),
             ).fetchone()
-            if row is None:
-                prior_rows = connection.execute(
-                    "SELECT id,state,generation,client_sid,payload,payload_hash "
-                    "FROM launch_authorizations"
-                ).fetchall()
-                prior: list[tuple[sqlite3.Row, dict[str, Any]]] = []
-                for prior_row in prior_rows:
-                    prior_serialized = str(prior_row["payload"])
-                    if (
-                        hashlib.sha256(prior_serialized.encode("utf-8")).hexdigest()
-                        != prior_row["payload_hash"]
-                    ):
-                        raise RuntimeError(
-                            "stored launch authorization failed integrity validation"
-                        )
-                    prior_payload = json.loads(prior_serialized)
-                    if (
-                        isinstance(prior_payload, dict)
-                        and prior_payload.get("project_id")
-                        == payload.get("project_id")
-                    ):
-                        prior.append((prior_row, prior_payload))
-                if prior:
-                    latest_row, latest_payload = max(
-                        prior, key=lambda item: int(item[0]["generation"])
+            if row is not None:
+                existing_serialized = str(row["payload"])
+                if (
+                    hashlib.sha256(existing_serialized.encode("utf-8")).hexdigest()
+                    != row["payload_hash"]
+                ):
+                    raise RuntimeError(
+                        "stored launch authorization failed integrity validation"
                     )
-                    if (
-                        generation
-                        != int(latest_row["generation"]) + 1
-                        or latest_row["state"] != "REVOKED"
-                        or latest_row["client_sid"] != client_sid
-                        or payload.get("revocation_epoch")
-                        != int(latest_row["generation"])
-                        or payload.get("founder_approval_event_id")
-                        == latest_payload.get("founder_approval_event_id")
-                        or payload.get("founder_approval_event_digest")
-                        == latest_payload.get("founder_approval_event_digest")
-                        or payload.get("delegation_id")
-                        == latest_payload.get("delegation_id")
-                    ):
-                        raise PermissionError(
-                            "higher launch generation requires a new authenticated approval"
-                        )
-                elif generation != 1 or payload.get("revocation_epoch") != 0:
+                existing = json.loads(existing_serialized)
+                if (
+                    row["state"] == "ACTIVE"
+                    and int(row["generation"]) == generation
+                    and row["client_sid"] == client_sid
+                    and existing == payload
+                ):
+                    return payload
+                raise PermissionError(
+                    "launch authorization generation is revoked or stale"
+                )
+            prior_rows = connection.execute(
+                "SELECT state,generation,client_sid,payload,payload_hash "
+                "FROM launch_authorizations"
+            ).fetchall()
+            prior: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+            for prior_row in prior_rows:
+                prior_serialized = str(prior_row["payload"])
+                if (
+                    hashlib.sha256(prior_serialized.encode("utf-8")).hexdigest()
+                    != prior_row["payload_hash"]
+                ):
+                    raise RuntimeError(
+                        "stored launch authorization failed integrity validation"
+                    )
+                prior_payload = json.loads(prior_serialized)
+                if (
+                    isinstance(prior_payload, dict)
+                    and prior_payload.get("project_id") == payload.get("project_id")
+                ):
+                    prior.append((prior_row, prior_payload))
+            if prior:
+                latest_row, _latest_payload = max(
+                    prior, key=lambda item: int(item[0]["generation"])
+                )
+                if (
+                    generation != int(latest_row["generation"]) + 1
+                    or latest_row["state"] != "REVOKED"
+                    or latest_row["client_sid"] != client_sid
+                    or payload.get("revocation_epoch")
+                    != int(latest_row["generation"])
+                ):
                     raise PermissionError(
-                        "initial launch authorization generation must be one"
+                        "higher launch generation requires the exact next revoked epoch"
                     )
+            elif generation != 1 or payload.get("revocation_epoch") != 0:
+                raise PermissionError(
+                    "initial launch authorization generation must be one"
+                )
+            expected_consumption = {
+                "capability_id", "project_id", "approval_record_id",
+                "approval_event_id", "founder_session_id", "challenge_id",
+                "approval_digest", "challenge_proof_digest",
+                "capability_digest", "signature_digest", "generation",
+                "authorization_id",
+            }
+            if set(consumption) != expected_consumption:
+                raise PermissionError(
+                    "Founder capability consumption fields are invalid"
+                )
+            try:
+                connection.execute(
+                    "INSERT INTO founder_capability_consumptions VALUES("
+                    ":capability_id,:project_id,:approval_record_id,"
+                    ":approval_event_id,:founder_session_id,:challenge_id,"
+                    ":approval_digest,:challenge_proof_digest,"
+                    ":capability_digest,:signature_digest,:generation,"
+                    ":authorization_id,:consumed_at)",
+                    {**consumption, "consumed_at": timestamp},
+                )
                 connection.execute(
                     "INSERT INTO launch_authorizations VALUES(?,?,?,?,?,?,?,?)",
                     (
@@ -395,39 +536,11 @@ class AuthorityStore:
                         serialized, digest, timestamp, timestamp,
                     ),
                 )
-                return
-            if (
-                row["state"] != "ACTIVE"
-                or int(row["generation"]) != generation
-                or row["client_sid"] != client_sid
-            ):
+            except sqlite3.IntegrityError as error:
                 raise PermissionError(
-                    "launch authorization generation is revoked or stale"
-                )
-            existing = json.loads(
-                str(
-                    connection.execute(
-                        "SELECT payload FROM launch_authorizations WHERE id=?",
-                        (identifier,),
-                    ).fetchone()["payload"]
-                )
-            )
-            for field in (
-                "project_id", "charter_id", "charter_revision",
-                "delegation_id", "founder_approval_event_id",
-                "founder_approval_event_digest",
-                "founder_authenticated_session_id",
-                "founder_principal_sid", "authorization_generation",
-            ):
-                if existing.get(field) != payload.get(field):
-                    raise PermissionError(
-                        "active launch authorization binding cannot change"
-                    )
-            connection.execute(
-                "UPDATE launch_authorizations SET payload=?,payload_hash=?,"
-                "updated_at=? WHERE id=? AND payload_hash=?",
-                (serialized, digest, timestamp, identifier, row["payload_hash"]),
-            )
+                    "Founder capability or approval identity was already used"
+                ) from error
+        return payload
 
     def revoke_launch_authorization(
         self,

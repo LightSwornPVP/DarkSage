@@ -17,6 +17,12 @@ from keeper.authority_service.protocol import (
 )
 from keeper.authority_service.provenance import AUDIT_REPORT_PURPOSE
 from keeper.authority_service.store import AuthorityStore
+from keeper.executive.founder_capability import (
+    ProductionFounderCapabilityVerifier,
+    TestFounderCapabilityVerifier,
+    capability_digest,
+    capability_signature_digest,
+)
 from keeper.providers.adapters import (
     apply_protected_qualification,
     canonical_provider_registration_digest,
@@ -26,7 +32,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.2.0"
+SERVICE_VERSION = "1.3.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +124,11 @@ class AuthorityServiceCore:
         *,
         observer: TrustedObserver | None = None,
         provenance_reporter: ProvenanceReporter | None = None,
+        founder_capability_verifier: (
+            ProductionFounderCapabilityVerifier
+            | TestFounderCapabilityVerifier
+            | None
+        ) = None,
     ) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -126,6 +137,14 @@ class AuthorityServiceCore:
         self.keys = ServiceKeyRing(self.root / "keys")
         self.observer = observer
         self.provenance_reporter = provenance_reporter
+        if founder_capability_verifier is not None and type(
+            founder_capability_verifier
+        ) not in {
+            ProductionFounderCapabilityVerifier,
+            TestFounderCapabilityVerifier,
+        }:
+            raise TypeError("Founder capability verifier type is not trusted")
+        self.founder_capability_verifier = founder_capability_verifier
 
     def dispatch(self, request: Request, client_sid: str) -> dict[str, Any]:
         if not client_sid:
@@ -262,78 +281,104 @@ class AuthorityServiceCore:
     def _authorize_project_launch(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
-        _exact(
-            payload,
-            {
-                "project_id", "charter_id", "charter_revision",
-                "delegation_id", "authorization_generation", "expires_at",
-                "founder_approval_event_id",
-                "founder_approval_event_digest",
-                "founder_authenticated_session_id",
-                "founder_principal_sid",
-            },
-        )
-        project_id = _text(payload["project_id"], "project ID")
-        generation = _positive_int(
-            payload["authorization_generation"], "authorization generation"
-        )
-        expires_at = datetime.fromisoformat(
-            _text(payload["expires_at"], "authorization expiration")
-        )
-        if expires_at <= datetime.now(UTC):
-            raise PermissionError("launch authorization expiration is stale")
-        event_digest = _text(
-            payload["founder_approval_event_digest"],
-            "Founder approval event digest",
-        )
+        if set(payload) != {"founder_capability"}:
+            raise PermissionError(
+                "cryptographically verified Founder capability is required"
+            )
+        value = payload["founder_capability"]
+        verifier = self.founder_capability_verifier
+        if verifier is None or not isinstance(value, dict):
+            raise PermissionError(
+                "cryptographically verified Founder capability is required"
+            )
+        try:
+            capability = verifier.verify(value)
+        except (KeyError, PermissionError, TypeError, ValueError) as error:
+            raise PermissionError(
+                "Founder authorization capability authentication failed"
+            ) from error
+        now = datetime.now(UTC)
+        expires_at = datetime.fromisoformat(capability.expires_at)
+        issued_at = datetime.fromisoformat(capability.issued_at)
         if (
-            len(event_digest) != 64
-            or any(character not in "0123456789abcdef" for character in event_digest)
+            expires_at <= now
+            or issued_at > now
+            or capability.authorization_kind != "PROJECT_LAUNCH"
+            or capability.protected_action != "DELEGATE_CHARTER"
+            or capability.usage != "ONE_TIME_GENERATION"
+            or capability.authorization_generation != capability.charter_revision
+            or capability.revocation_epoch
+            != capability.authorization_generation - 1
         ):
-            raise PermissionError("Founder approval event digest is not canonical")
-        principal_sid = _text(
-            payload["founder_principal_sid"], "Founder principal SID"
-        )
-        if not principal_sid.startswith("S-1-"):
-            raise PermissionError("Founder principal SID is invalid")
+            raise PermissionError("Founder authorization capability is stale or invalid")
+        generation = capability.authorization_generation
+        project_id = capability.project_id
         identifier = (
             f"launch-authorization:{project_id}:generation:{generation}"
         )
+        capability_value_digest = capability_digest(capability)
+        signature_digest = capability_signature_digest(capability)
         record = self.keys.sign(
             "project-launch-authorization",
             {
                 "id": identifier,
                 "kind": "project_launch_authorization",
-                "schema_version": 1,
+                "schema_version": 2,
                 "project_id": project_id,
-                "charter_id": _text(payload["charter_id"], "charter ID"),
-                "charter_revision": _positive_int(
-                    payload["charter_revision"], "charter revision"
+                "charter_id": capability.charter_id,
+                "charter_revision": capability.charter_revision,
+                "delegation_id": capability.approval_record_id,
+                "founder_approval_event_id": capability.approval_event_id,
+                "founder_approval_event_digest": (
+                    capability.approval_event_digest
                 ),
-                "delegation_id": _text(
-                    payload["delegation_id"], "delegation ID"
+                "founder_approval_digest": capability.approval_digest,
+                "founder_authenticated_session_id": (
+                    capability.founder_authenticated_session_id
                 ),
-                "founder_approval_event_id": _text(
-                    payload["founder_approval_event_id"],
-                    "Founder approval event ID",
+                "founder_principal_sid": capability.founder_principal_sid,
+                "founder_challenge_id": capability.challenge_id,
+                "founder_challenge_proof_digest": (
+                    capability.challenge_proof_digest
                 ),
-                "founder_approval_event_digest": event_digest,
-                "founder_authenticated_session_id": _text(
-                    payload["founder_authenticated_session_id"],
-                    "Founder authenticated session ID",
-                ),
-                "founder_principal_sid": principal_sid,
+                "founder_action_digest": capability.action_digest,
+                "founder_capability_id": capability.capability_id,
+                "founder_capability_digest": capability_value_digest,
+                "founder_capability_signature_digest": signature_digest,
+                "founder_capability_issuer_id": capability.issuer_id,
+                "founder_capability_issuer_key_id": capability.issuer_key_id,
                 "authorization_generation": generation,
-                "revocation_epoch": generation - 1,
+                "revocation_epoch": capability.revocation_epoch,
                 "authorized_client_sid": client_sid,
-                "expires_at": expires_at.isoformat(),
-                "authorized_at": _now(),
+                "expires_at": capability.expires_at,
+                "authorized_at": capability.issued_at,
             },
         )
-        self.store.refresh_launch_authorization(
-            identifier, generation, client_sid, record
+        durable = self.store.create_launch_authorization(
+            identifier,
+            generation,
+            client_sid,
+            record,
+            {
+                "capability_id": capability.capability_id,
+                "project_id": project_id,
+                "approval_record_id": capability.approval_record_id,
+                "approval_event_id": capability.approval_event_id,
+                "founder_session_id": (
+                    capability.founder_authenticated_session_id
+                ),
+                "challenge_id": capability.challenge_id,
+                "approval_digest": capability.approval_digest,
+                "challenge_proof_digest": (
+                    capability.challenge_proof_digest
+                ),
+                "capability_digest": capability_value_digest,
+                "signature_digest": signature_digest,
+                "generation": generation,
+                "authorization_id": identifier,
+            },
         )
-        return {"authorization": record}
+        return {"authorization": durable}
 
     def _revoke_project_launch(
         self, payload: dict[str, Any], client_sid: str
