@@ -36,7 +36,7 @@ def _proposed(
     service = CharterService(ExecutiveRepository(store))
     replacements: dict[str, object] = {
         "target_audience": "Founder",
-        "approved_providers": ("codex", "claude"),
+        "approved_providers": ("codex", "reviewer-provider"),
         "approved_tools": ("filesystem",),
     }
     if budget_limit:

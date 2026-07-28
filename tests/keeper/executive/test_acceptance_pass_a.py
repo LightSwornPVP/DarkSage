@@ -37,7 +37,7 @@ def test_scenario_a_software_full_delegation_repair_and_completion(tmp_path: Pat
         founder_revisions={
             "success_criteria": ("all acceptance checks pass",),
             "target_audience": "personal users",
-            "approved_providers": ("codex", "claude"),
+            "approved_providers": ("codex", "reviewer-provider"),
             "approved_tools": ("filesystem",),
         },
     )
@@ -76,7 +76,7 @@ def test_scenario_b_non_software_workflow(tmp_path: Path) -> None:
         founder_revisions={
             "success_criteria": ("all material claims are sourced",),
             "target_audience": "city planners",
-            "approved_providers": ("codex", "claude"),
+            "approved_providers": ("codex", "reviewer-provider"),
             "approved_tools": ("filesystem",),
             "workspaces": (str(tmp_path),),
             "delegation_mode": "FULL_DELEGATION",

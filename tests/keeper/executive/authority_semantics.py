@@ -53,7 +53,11 @@ class SemanticAuthorityTransport:
         self.release: threading.Event | None = None
         self._lock = threading.RLock()
         self._install_provider("registration-codex", "qualification-codex", "codex")
-        self._install_provider("registration-claude", "qualification-claude", "claude")
+        self._install_provider(
+            "registration-reviewer",
+            "qualification-reviewer",
+            "reviewer-provider",
+        )
 
     def _install_provider(
         self,
@@ -256,11 +260,11 @@ def semantic_gateway(
             "codex-test",
         ),
         AuthorityProviderBinding(
-            "registration-claude",
-            "qualification-claude",
+            "registration-reviewer",
+            "qualification-reviewer",
             ALL_CAPABILITIES,
             ("software", "research", "general"),
-            "claude-test",
+            "reviewer-provider-test",
         ),
     )
     return (

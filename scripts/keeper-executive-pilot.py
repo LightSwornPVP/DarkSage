@@ -38,7 +38,7 @@ class PilotAuthorityTransport:
         self.qualifications: dict[str, dict[str, Any]] = {}
         self.attempts: dict[str, dict[str, Any]] = {}
         self.execution_count = 0
-        for provider_id in ("codex", "claude"):
+        for provider_id in ("codex", "reviewer-provider"):
             registration_id = f"pilot-registration-{provider_id}"
             qualification_id = f"pilot-qualification-{provider_id}"
             executable = f"C:/Pilot/{provider_id}.exe"
@@ -188,7 +188,7 @@ def main() -> int:
             founder_revisions={
                 "success_criteria": ("all pilot checks pass",),
                 "target_audience": "pilot user",
-                "approved_providers": ("codex", "claude"),
+                "approved_providers": ("codex", "reviewer-provider"),
                 "approved_tools": ("filesystem",),
             },
         )
@@ -212,7 +212,7 @@ def main() -> int:
                 ("software",),
                 f"pilot-{provider_id}",
             )
-            for provider_id in ("codex", "claude")
+            for provider_id in ("codex", "reviewer-provider")
         )
         runtime = ExecutiveRuntime(
             executive.repository,
