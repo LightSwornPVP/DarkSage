@@ -50,7 +50,10 @@ class CharterService:
         revision = max((item.revision for item in prior), default=0) + 1
         now = utc_now()
         workspace_values = tuple(str(item) for item in intake.explicit("workspaces", ()))
-        provider_values = tuple(str(item) for item in intake.explicit("approved_providers", ("mock",)))
+        provider_values = tuple(
+            str(item)
+            for item in intake.explicit("approved_providers", ())
+        )
         tool_values = tuple(str(item) for item in intake.explicit("approved_tools", ("filesystem",)))
         deliverables = tuple(str(item) for item in intake.explicit("deliverables", ("project deliverable",)))
         mode = str(intake.explicit("delegation_mode", "ADVISORY"))
@@ -140,11 +143,19 @@ class CharterService:
                     now,
                 )
             )
+        drafted_project = transition_project(
+            project
+            if project.state
+            in {
+                ExecutiveState.INTAKE,
+                ExecutiveState.CLARIFICATION_REQUIRED,
+            }
+            else replace(project, state=ExecutiveState.INTAKE.value),
+            ExecutiveState.CHARTER_DRAFT,
+        )
         self.repository.save_project(
-            transition_project(
-                project if project.state in {ExecutiveState.INTAKE, ExecutiveState.CLARIFICATION_REQUIRED} else replace(project, state=ExecutiveState.INTAKE.value),
-                ExecutiveState.CHARTER_DRAFT,
-            )
+            drafted_project,
+            expected=project,
         )
         return charter
 
@@ -154,7 +165,12 @@ class CharterService:
         proposed = replace(charter, status=CharterStatus.PROPOSED.value, updated_at=utc_now())
         self.repository.save_charter(proposed, expected=charter)
         project = self.repository.project(charter.project_id)
-        self.repository.save_project(transition_project(project, ExecutiveState.AWAITING_CHARTER_APPROVAL))
+        self.repository.save_project(
+            transition_project(
+                project, ExecutiveState.AWAITING_CHARTER_APPROVAL
+            ),
+            expected=project,
+        )
         return proposed
 
     def approve(
@@ -244,7 +260,7 @@ class CharterService:
         self.repository.save_charter(revised)
         project = self.repository.project(active.project_id)
         paused = replace(project, state=ExecutiveState.PAUSED.value, pause_reason="Charter revision awaiting approval", updated_at=utc_now())
-        self.repository.save_project(paused)
+        self.repository.save_project(paused, expected=project)
         return revised
 
 

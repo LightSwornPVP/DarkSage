@@ -9,23 +9,33 @@ specialists, validates authority deterministically, reviews evidence, requests
 repair, and resumes from durable state.
 
 The executive never signs provider records, qualifies providers, fabricates
-completion, reads protected keys, or broadens Authority IPC. Production provider
-execution is injected through the narrow lifecycle operations already exposed by
-the Authority Service.
+completion, reads protected keys, or broadens Authority IPC. Production runtime
+construction accepts only the concrete Authority-backed gateway. That gateway
+uses the existing qualification, reservation, service-owned launch, authenticated
+completion, cancellation, query, and verification operations. Test and pilot
+transports exercise the same lifecycle semantics but are explicitly
+non-production-authoritative.
 
 ## State machines
 
 Projects move through intake, clarification, charter drafting and approval,
 activation, planning, execution, review, waiting or blocked states, pause, and a
 terminal completed, canceled, or failed state. Tasks move through proposed,
-ready, assigned, running, review, repair, completion, blocked, failed, canceled,
-or skipped states. Explicit transition maps reject arbitrary completion.
+ready, launch claimed, execution started, running, completion pending, review,
+repair, uncertain, completion, blocked, failed, canceled, or skipped states.
+Explicit transition maps and optimistic revisions reject arbitrary or stale
+completion.
 
-Approved charter content is immutable. Activation is a project-to-charter
-binding rather than a mutation of the approved record. Material changes create a
-new draft revision with exact differences, reason, authority basis, and a link to
-the prior version. Old approvals match neither the new charter identity nor its
-revision.
+Approval is one trusted transaction that reloads the exact proposed charter and
+authenticated Founder interaction, binds identity, revision, canonical content
+digest, source provenance, and expiry, then creates the immutable approval
+history and approved lifecycle state together. Public repository writes cannot
+create an approved charter. Activation reloads the durable charter, approval,
+and source; rejects unresolved material questions, revoked or expired approval,
+copied or stale binding, and superseded revisions; then atomically binds the
+active revision. Approved content remains immutable. Material changes create a
+new draft revision with exact differences, reason, authority basis, and a link
+to the prior version.
 
 ## Conversation and charter model
 
@@ -43,14 +53,21 @@ Advisory mode permits analysis, planning, drafting, and reading. Delegated mode
 permits routine actions explicitly listed by the charter. Full Delegation permits
 bounded material work inside the same envelope. It is not unlimited authority.
 
-Every proposed action is evaluated against the active revision, project state,
-action class, target, provider, tool, scope, cost, reversibility, risk, data
-classification, external side effects, expiry, revocation, workspace roots, and
-bound approvals. Ambiguity fails closed. Protected deletion, history rewrite,
+Every launch action is derived again from the durable workflow task immediately
+before claim. Classification includes objective, target, scope, provider, tool,
+workspace, cost and canonical currency, reversibility, external effects,
+publication, deployment, spending, Git mutation, security impact, and data
+classification. Conflicts such as deployment disguised as writing fail closed.
+Every non-goal is an explicit denial and is never added to allowed scope.
+Ambiguity fails closed. Protected deletion, history rewrite,
 credential access, security-boundary change, live trading, financial-authority
 change, governance change, and irreversible destruction are non-delegable.
 Push, production deployment, external publication, purchases, spending, and
-commit authorization remain separately approvable.
+commit authorization remain separately approvable. One-time approvals consume
+in the execution claim transaction with one concurrent winner. Spending is
+reserved atomically in canonical minor units against the cumulative
+charter/approval limit, preventing split-action bypass; unknown cost, absent
+budget, and implicit currency conversion are denied.
 
 ## Dynamic workflow and specialists
 
@@ -59,31 +76,46 @@ writing, and general projects. Each generated stage explains its purpose and
 rationale and creates durable tasks with dependencies, inputs, outputs,
 capabilities, authority class, evidence, review, and retry policy.
 
-Selection considers project type, capability, qualification, charter provider
-restrictions, availability, credentials, effort, cost, prior results, and
-independence identity. Specialists receive a shared project brief and a
-least-context task guide. They cannot change their role, expand scope, alter the
-charter, self-grant authority, or claim completion without outputs and evidence.
-Independent review requires a distinct independence identity. Repair records the
-failed criterion, evidence, correction, successful work to preserve, retry
-limit, and repair assignment.
+Selection starts from current authenticated Authority registration and
+qualification records; caller-created profiles cannot establish qualification.
+Before launch, the runtime persists a unique attempt binding covering project,
+charter revision, workflow, task revision, provider registration and
+qualification, executable digest, workspace, instruction digest, expected
+outputs, and evidence requirements. Only then may the Authority Service launch
+the provider. Mutable gateway strings have no completion authority.
+
+Independent review creates a separate durable review attempt. It reserves and
+executes a distinct Authority-qualified provider/session, binds the review to
+the current author attempt and artifact/evidence digest, and accepts only an
+authenticated reviewer completion. A relabeled author session, copied review,
+missing execution, stale artifact revision, or unsigned completion cannot finish
+the task.
 
 ## Persistence, restart, and surfaces
 
-Schema version 2 adds hash-checked project, charter, workflow, task, approval,
-memory, decision, assumption, conversation, and assignment stores plus
-foreign-key relationship records. Migrations are idempotent and preserve the
-existing schema and protected Authority state.
+Schema version 3 adds hash-checked execution-attempt, review, and late-result
+records plus relational one-time approval consumption and cumulative budget
+reservations. Project, charter, workflow, task, approval, execution, review, and
+evidence ownership is checked at persistence boundaries. Project, charter, and
+task updates use exact compare-and-swap state; approved content and authenticated
+identity bindings cannot be rewritten. Migrations remain idempotent and do not
+copy Authority signatures or protected state into the Executive database.
+Unkeyed local payload hashes are corruption/CAS aids only and never establish
+approval, provider identity, execution, review, or completion authority.
 
-The runtime performs one durable step per call. Completed tasks are never
-relaunched after restart. Missing authority, provider, credential, independence,
-input, or workspace scope enters an explicit pause or waiting state. Revocation
-halts new launches and prevents resume until new Founder approval exists.
+The task claim and Authority attempt ID are durable before provider launch.
+Restart reconciles the original attempt instead of creating a new one. A lost
+response after the execution boundary becomes `UNCERTAIN` and is non-retry-safe.
+Two workers yield one claim. Cancellation rechecks authority before launch,
+requests service-owned cancellation, prevents new launches, and cannot be
+overwritten by late completion. Late authenticated evidence is retained as
+history while task and project state remain canceled.
 
 The application view model exposes Keeper conversation, project summary, charter
 history, delegation and limits, unresolved questions, workflow and stage status,
-tasks, assignments, decisions, assumptions, approvals, blockers, evidence, and
-pause/resume/cancel controls. The desktop dashboard can consume this model while
+tasks, assignments, decisions, assumptions, review attempts, blockers, evidence,
+uncertain work, and late results. Controls are advertised only when valid, and
+active charter approvals are not mislabeled as pending. The desktop dashboard can consume this model while
 keeping conversation as the primary interaction.
 
 ## Pass B extension points

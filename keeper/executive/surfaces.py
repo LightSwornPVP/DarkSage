@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from keeper.executive.enums import TaskStatus
+from keeper.executive.enums import ExecutiveState, TaskStatus
 from keeper.executive.repository import ExecutiveRepository
 
 
@@ -23,6 +23,7 @@ class ProjectStatusView:
     decisions: tuple[dict[str, Any], ...]
     assumptions: tuple[dict[str, Any], ...]
     pending_approvals: tuple[dict[str, Any], ...]
+    review_attempts: tuple[dict[str, Any], ...]
     blockers: tuple[str, ...]
     evidence_history: tuple[dict[str, Any], ...]
     controls: tuple[str, ...]
@@ -45,7 +46,6 @@ class StatusSurface:
         workflows = self.repository.workflows(project_id)
         workflow = max(workflows, key=lambda item: item.revision) if workflows else None
         tasks = self.repository.tasks(project_id)
-        approvals = self.repository.approvals(project_id)
         blockers = tuple(
             item
             for item in (
@@ -66,18 +66,22 @@ class StatusSurface:
             }
             for stage in (workflow.stages if workflow else ())
         )
+        late_results = tuple(
+            {**item, "history_kind": "LATE_AUTHORITY_RESULT"}
+            for item in self.repository.late_results(project_id)
+        )
         return ProjectStatusView(
-            tuple(self.repository.conversations(project_id)),
-            project.to_dict(),
-            active.to_dict() if active else None,
-            tuple(item.to_dict() for item in charters),
-            active.delegation_mode if active else None,
-            active.authority_envelope.to_dict() if active else {},
-            active.unresolved_questions if active else (),
-            workflow.to_dict() if workflow else None,
-            stage_rows,
-            tuple(item.to_dict() for item in tasks),
-            tuple(
+            conversation=tuple(self.repository.conversations(project_id)),
+            project_summary=project.to_dict(),
+            active_charter=active.to_dict() if active else None,
+            charter_history=tuple(item.to_dict() for item in charters),
+            delegation_mode=active.delegation_mode if active else None,
+            authority_limits=active.authority_envelope.to_dict() if active else {},
+            unresolved_questions=active.unresolved_questions if active else (),
+            workflow=workflow.to_dict() if workflow else None,
+            stage_status=stage_rows,
+            task_status=tuple(item.to_dict() for item in tasks),
+            active_assignments=tuple(
                 {
                     "task_id": item.task_id,
                     "provider_id": item.provider_id,
@@ -88,25 +92,33 @@ class StatusSurface:
                 for item in tasks
                 if item.status in {
                     TaskStatus.ASSIGNED,
+                    TaskStatus.LAUNCH_CLAIMED,
+                    TaskStatus.EXECUTION_STARTED,
                     TaskStatus.RUNNING,
+                    TaskStatus.COMPLETION_PENDING,
                     TaskStatus.REVIEW_REQUIRED,
                     TaskStatus.REPAIR_REQUIRED,
+                    TaskStatus.UNCERTAIN,
                 }
             ),
-            tuple(item.to_dict() for item in self.repository.decisions(project_id)),
-            tuple(item.to_dict() for item in self.repository.assumptions(project_id)),
-            tuple(
+            decisions=tuple(
                 item.to_dict()
-                for item in approvals
-                if item.revoked_at is None and item.consumed_at is None
+                for item in self.repository.decisions(project_id)
             ),
-            blockers,
-            tuple(
+            assumptions=tuple(
+                item.to_dict()
+                for item in self.repository.assumptions(project_id)
+            ),
+            pending_approvals=(),
+            review_attempts=tuple(self.repository.reviews(project_id)),
+            blockers=blockers,
+            evidence_history=tuple(
                 memory.to_dict()
                 for memory in self.repository.memories(project_id)
                 if memory.kind in {"EVIDENCE", "OUTCOME"}
-            ),
-            ("pause", "resume", "cancel"),
+            )
+            + late_results,
+            controls=_controls(ExecutiveState(project.state)),
         )
 
 
@@ -116,8 +128,49 @@ def _stage_status(stage_id: str, tasks: list[Any]) -> str:
         return "EMPTY"
     if all(item == TaskStatus.COMPLETED for item in statuses):
         return "COMPLETED"
-    if any(item in {TaskStatus.RUNNING, TaskStatus.REVIEW_REQUIRED, TaskStatus.REPAIR_REQUIRED} for item in statuses):
+    if any(
+        item
+        in {
+            TaskStatus.LAUNCH_CLAIMED,
+            TaskStatus.EXECUTION_STARTED,
+            TaskStatus.RUNNING,
+            TaskStatus.COMPLETION_PENDING,
+            TaskStatus.REVIEW_REQUIRED,
+            TaskStatus.REPAIR_REQUIRED,
+        }
+        for item in statuses
+    ):
         return "ACTIVE"
-    if any(item in {TaskStatus.BLOCKED, TaskStatus.FAILED} for item in statuses):
+    if any(
+        item in {TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.UNCERTAIN}
+        for item in statuses
+    ):
         return "BLOCKED"
     return "PENDING"
+
+
+def _controls(state: ExecutiveState) -> tuple[str, ...]:
+    controls: list[str] = []
+    if state in {
+        ExecutiveState.ACTIVE,
+        ExecutiveState.PLANNING,
+        ExecutiveState.EXECUTING,
+        ExecutiveState.REVIEWING,
+    }:
+        controls.append("pause")
+    if state in {
+        ExecutiveState.PAUSED,
+        ExecutiveState.BLOCKED,
+        ExecutiveState.WAITING_FOR_PROVIDER,
+        ExecutiveState.WAITING_FOR_USAGE_RESET,
+        ExecutiveState.WAITING_FOR_CREDENTIAL,
+        ExecutiveState.WAITING_FOR_EXTERNAL_SYSTEM,
+    }:
+        controls.append("resume")
+    if state not in {
+        ExecutiveState.COMPLETED,
+        ExecutiveState.CANCELED,
+        ExecutiveState.FAILED,
+    }:
+        controls.append("cancel")
+    return tuple(controls)

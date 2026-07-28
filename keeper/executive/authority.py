@@ -248,6 +248,8 @@ class AuthorityEvaluator:
         expired = False
         revoked = False
         for approval in approvals:
+            if approval.kind == ApprovalKind.CHARTER_DURATION:
+                continue
             if (
                 approval.project_id != charter.project_id
                 or approval.charter_id != charter.charter_id

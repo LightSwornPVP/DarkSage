@@ -10,6 +10,7 @@ import pytest
 from keeper.executive.enums import TaskStatus
 from keeper.executive.models import utc_now
 from keeper.executive.runtime import ExecutiveRuntime
+from keeper.executive.surfaces import StatusSurface
 from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
     semantic_gateway,
@@ -106,6 +107,12 @@ def test_cancellation_wins_over_late_authenticated_completion(
     assert first_task.status == "CANCELED"
     assert first_task.late_result is True
     assert service.repository.store.list("executive_late_results")
+    view = StatusSurface(service.repository).project(project.project_id)
+    assert view.controls == ()
+    assert any(
+        item.get("history_kind") == "LATE_AUTHORITY_RESULT"
+        for item in view.evidence_history
+    )
 
 
 def test_cancellation_before_launch_prevents_authority_execution(

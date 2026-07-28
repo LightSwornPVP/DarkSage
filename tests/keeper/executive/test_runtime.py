@@ -45,6 +45,9 @@ def test_unattended_authority_execution_and_review_complete_once(
     calls = list(authority.execution_calls)
     assert runtime.progress(project.project_id).state == "COMPLETED"
     assert authority.execution_calls == calls
+    assert StatusSurface(service.repository).project(
+        project.project_id
+    ).controls == ()
 
 
 def test_restart_resumes_only_durable_authority_state(
@@ -118,6 +121,7 @@ def test_status_surface_exposes_authority_attempts(tmp_path: Path) -> None:
     runtime = ExecutiveRuntime(service.repository, gateway)
     runtime.progress(project.project_id)
     runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
     view = StatusSurface(service.repository).project(project.project_id)
     assert view.active_charter is not None
     assert view.delegation_mode == "FULL_DELEGATION"
@@ -125,3 +129,6 @@ def test_status_surface_exposes_authority_attempts(tmp_path: Path) -> None:
     assert any(
         task["authority_attempt_id"] for task in view.task_status
     )
+    assert view.pending_approvals == ()
+    assert view.review_attempts
+    assert view.controls == ("pause", "cancel")

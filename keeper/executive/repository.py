@@ -36,7 +36,12 @@ class ExecutiveRepository:
     def __init__(self, store: KeeperStore) -> None:
         self.store = store
 
-    def save_project(self, project: ProjectRecord) -> None:
+    def save_project(
+        self,
+        project: ProjectRecord,
+        *,
+        expected: ProjectRecord | None = None,
+    ) -> None:
         existing = self.store.get("executive_projects", project.project_id)
         target = ExecutiveState(project.state)
         if existing is None:
@@ -48,12 +53,38 @@ class ExecutiveRepository:
                     "new projects must begin in intake or clarification"
                 )
         else:
-            current = ExecutiveState(ProjectRecord.from_dict(existing).state)
+            prior = ProjectRecord.from_dict(existing)
+            if expected is None or prior != expected:
+                raise PermissionError(
+                    "project write is stale or lacks exact CAS"
+                )
+            current = ExecutiveState(prior.state)
+            if (
+                (target == ExecutiveState.ACTIVE and current != target)
+                or project.name != prior.name
+                or project.project_type != prior.project_type
+                or project.created_at != prior.created_at
+                or project.active_charter_id != prior.active_charter_id
+                or project.active_charter_revision
+                != prior.active_charter_revision
+            ):
+                raise PermissionError(
+                    "project identity and charter binding are trusted-state only"
+                )
             if target != current and target not in PROJECT_TRANSITIONS[current]:
                 raise PermissionError(
                     f"repository rejected executive transition: {current} -> {target}"
                 )
-        self.store.upsert("executive_projects", project.project_id, project.to_dict())
+            self._cas_entity(
+                "executive_projects",
+                project.project_id,
+                expected.to_dict(),
+                project.to_dict(),
+            )
+            return
+        self.store.insert_immutable(
+            "executive_projects", project.project_id, project.to_dict()
+        )
 
     def project(self, project_id: str) -> ProjectRecord:
         return ProjectRecord.from_dict(self._required("executive_projects", project_id))
@@ -302,7 +333,18 @@ class ExecutiveRepository:
         return sorted(values, key=lambda item: item.revision)
 
     def save_workflow(self, workflow: WorkflowRecord) -> None:
-        self.store.upsert("executive_workflows", workflow.workflow_id, workflow.to_dict())
+        project = self.project(workflow.project_id)
+        charter = self.charter(workflow.charter_id)
+        if (
+            charter.project_id != workflow.project_id
+            or charter.revision != workflow.charter_revision
+            or project.active_charter_id != workflow.charter_id
+            or project.active_charter_revision != workflow.charter_revision
+        ):
+            raise PermissionError("workflow parent-child ownership is invalid")
+        self.store.insert_immutable(
+            "executive_workflows", workflow.workflow_id, workflow.to_dict()
+        )
         self._relate(workflow.project_id, "charter", workflow.charter_id, "workflow", workflow.workflow_id)
 
     def workflows(self, project_id: str) -> list[WorkflowRecord]:
@@ -348,6 +390,8 @@ class ExecutiveRepository:
             or task.charter_id != prior.charter_id
             or task.charter_revision != prior.charter_revision
             or task.workflow_id != prior.workflow_id
+            or task_definition_digest(task)
+            != task_definition_digest(prior)
         ):
             raise PermissionError(
                 f"repository rejected task transition: {current} -> {target}"
@@ -365,6 +409,8 @@ class ExecutiveRepository:
         *,
         expected_revision: int,
         plan: dict[str, Any],
+        action: ProposedAction,
+        approval_id: str | None,
     ) -> ExecutiveTask:
         """Give one worker a durable attempt binding before Authority launch."""
         attempt_id = str(plan["authority_attempt_id"])
@@ -403,6 +449,33 @@ class ExecutiveRepository:
                 or charter.status != CharterStatus.ACTIVE
             ):
                 raise PermissionError("project is not launchable")
+            if (
+                action.project_id != task.project_id
+                or action.charter_revision != task.charter_revision
+                or action.trusted_source != "DURABLE_WORKFLOW_TASK"
+            ):
+                raise PermissionError(
+                    "execution claim action facts are misbound"
+                )
+            budget_reservation_id: str | None = None
+            if approval_id is not None:
+                _, budget_reservation_id = (
+                    self._consume_action_authority_in_transaction(
+                        connection,
+                        action,
+                        approval_id,
+                        task.task_id,
+                        timestamp,
+                    )
+                )
+            elif (
+                action.spending
+                or action.cost is None
+                or (action.cost or 0) > 0
+            ):
+                raise PermissionError(
+                    "spending claim lacks a bound action approval"
+                )
             claimed = replace(
                 task,
                 provider_id=str(plan["provider_id"]),
@@ -428,6 +501,9 @@ class ExecutiveRepository:
                 "updated_at": timestamp,
                 "completion_digest": None,
                 "artifact_digest": None,
+                "action_id": action.action_id,
+                "approval_id": approval_id,
+                "budget_reservation_id": budget_reservation_id,
             }
             self._insert_entity(
                 connection,
@@ -544,6 +620,8 @@ class ExecutiveRepository:
                 late_id = f"late-result:{attempt_id}"
                 late_payload = {
                     **result,
+                    "project_id": task.project_id,
+                    "original_task_id": task.task_id,
                     "recorded_at": timestamp,
                     "task_state": task.status,
                     "project_state": project.state,
@@ -773,6 +851,50 @@ class ExecutiveRepository:
                 connection, "executive_tasks", task_id
             )
             task = ExecutiveTask.from_dict(task_payload)
+            project_payload, _ = self._entity_in_transaction(
+                connection, "executive_projects", task.project_id
+            )
+            project = ProjectRecord.from_dict(project_payload)
+            if (
+                (
+                    project.state == ExecutiveState.CANCELED
+                    or task.status == TaskStatus.CANCELED
+                )
+                and task.review_attempt_id is not None
+                and result.get("authority_attempt_id")
+                == task.review_attempt_id
+                and result.get("authenticated") is True
+            ):
+                late_id = f"late-review:{task.review_attempt_id}"
+                try:
+                    self._insert_entity(
+                        connection,
+                        "executive_late_results",
+                        late_id,
+                        {
+                            **result,
+                            "project_id": task.project_id,
+                            "original_task_id": task.task_id,
+                            "history_kind": "LATE_REVIEW_RESULT",
+                            "recorded_at": timestamp,
+                        },
+                    )
+                except PermissionError:
+                    pass
+                recorded = replace(
+                    task,
+                    late_result=True,
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_tasks",
+                    task.task_id,
+                    task_hash,
+                    recorded.to_dict(),
+                )
+                return recorded
             if (
                 task.revision != expected_revision
                 or task.status != TaskStatus.REVIEW_REQUIRED
@@ -892,6 +1014,20 @@ class ExecutiveRepository:
     def review(self, review_attempt_id: str) -> dict[str, Any]:
         return self._required("executive_reviews", review_attempt_id)
 
+    def reviews(self, project_id: str) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.store.list("executive_reviews")
+            if item.get("project_id") == project_id
+        ]
+
+    def late_results(self, project_id: str) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.store.list("executive_late_results")
+            if item.get("project_id") == project_id
+        ]
+
     def cancel_project_execution(
         self, project_id: str
     ) -> tuple[ProjectRecord, tuple[str, ...]]:
@@ -957,6 +1093,8 @@ class ExecutiveRepository:
                 )
                 if task.authority_attempt_id:
                     attempt_ids.append(task.authority_attempt_id)
+                if task.review_attempt_id:
+                    attempt_ids.append(task.review_attempt_id)
         return canceled_project, tuple(attempt_ids)
 
     def task(self, task_id: str) -> ExecutiveTask:
@@ -1087,55 +1225,10 @@ class ExecutiveRepository:
         timestamp = utc_now()
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            approval_payload, approval_hash = self._entity_in_transaction(
-                connection, "executive_approvals", approval_id
-            )
-            approval = ApprovalRecord.from_dict(approval_payload)
-            charter_payload, _ = self._entity_in_transaction(
-                connection, "project_charters", approval.charter_id
-            )
-            charter = ProjectCharter.from_dict(charter_payload)
-            interaction, _ = self._entity_in_transaction(
+            consumed, reservation_id = self._consume_action_authority_in_transaction(
                 connection,
-                "project_conversations",
-                approval.source_interaction_id,
-            )
-            self._validate_action_approval(
-                approval, charter, interaction, action, timestamp
-            )
-            consumed = approval
-            if approval.kind == ApprovalKind.ONE_TIME:
-                consumed = replace(approval, consumed_at=timestamp)
-                self._update_entity_cas(
-                    connection,
-                    "executive_approvals",
-                    approval.approval_id,
-                    approval_hash,
-                    consumed.to_dict(),
-                )
-                try:
-                    connection.execute(
-                        "INSERT INTO executive_approval_consumptions "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            approval.approval_id,
-                            action.project_id,
-                            approval.charter_id,
-                            action.charter_revision,
-                            action.action_id,
-                            task_id,
-                            timestamp,
-                        ),
-                    )
-                except sqlite3.IntegrityError as error:
-                    raise PermissionError(
-                        "one-time approval was already consumed"
-                    ) from error
-            reservation_id = self._reserve_budget_in_transaction(
-                connection,
-                charter,
-                approval,
                 action,
+                approval_id,
                 task_id,
                 timestamp,
             )
@@ -1176,19 +1269,50 @@ class ExecutiveRepository:
 
     def revoke_approval(self, approval_id: str, revoked_at: str) -> ApprovalRecord:
         approval = ApprovalRecord.from_dict(self._required("executive_approvals", approval_id))
+        if approval.revoked_at is not None:
+            raise PermissionError("approval is already revoked")
         updated = replace(approval, revoked_at=revoked_at)
-        self.store.upsert("executive_approvals", approval_id, updated.to_dict())
+        self._cas_entity(
+            "executive_approvals",
+            approval_id,
+            approval.to_dict(),
+            updated.to_dict(),
+        )
         return updated
 
     def insert_decision(self, record: DecisionRecord) -> None:
+        project = self.project(record.project_id)
+        if (
+            project.active_charter_revision is not None
+            and record.charter_revision > project.active_charter_revision
+        ):
+            raise PermissionError("decision charter ownership is invalid")
         self.store.insert_immutable("project_decisions", record.decision_id, record.to_dict())
         self._relate(record.project_id, "project", record.project_id, "decision", record.decision_id)
 
     def insert_assumption(self, record: AssumptionRecord) -> None:
+        self.project(record.project_id)
         self.store.insert_immutable("project_assumptions", record.assumption_id, record.to_dict())
         self._relate(record.project_id, "project", record.project_id, "assumption", record.assumption_id)
 
     def insert_memory(self, record: MemoryRecord) -> None:
+        project = self.project(record.project_id)
+        if (
+            project.active_charter_revision is not None
+            and record.charter_revision > project.active_charter_revision
+        ):
+            raise PermissionError("memory charter ownership is invalid")
+        if record.task_id is not None:
+            task = self.task(record.task_id)
+            if (
+                task.project_id != record.project_id
+                or task.charter_revision != record.charter_revision
+                or (
+                    record.stage_id is not None
+                    and task.stage_id != record.stage_id
+                )
+            ):
+                raise PermissionError("memory task ownership is invalid")
         self.store.insert_immutable("project_memories", record.memory_id, record.to_dict())
         self._relate(record.project_id, "project", record.project_id, "memory", record.memory_id)
 
@@ -1515,6 +1639,68 @@ class ExecutiveRepository:
         ):
             raise PermissionError("action approval limits do not match")
 
+    def _consume_action_authority_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        action: ProposedAction,
+        approval_id: str,
+        task_id: str | None,
+        timestamp: str,
+    ) -> tuple[ApprovalRecord, str | None]:
+        approval_payload, approval_hash = self._entity_in_transaction(
+            connection, "executive_approvals", approval_id
+        )
+        approval = ApprovalRecord.from_dict(approval_payload)
+        charter_payload, _ = self._entity_in_transaction(
+            connection, "project_charters", approval.charter_id
+        )
+        charter = ProjectCharter.from_dict(charter_payload)
+        interaction, _ = self._entity_in_transaction(
+            connection,
+            "project_conversations",
+            approval.source_interaction_id,
+        )
+        self._validate_action_approval(
+            approval, charter, interaction, action, timestamp
+        )
+        consumed = approval
+        if approval.kind == ApprovalKind.ONE_TIME:
+            consumed = replace(approval, consumed_at=timestamp)
+            self._update_entity_cas(
+                connection,
+                "executive_approvals",
+                approval.approval_id,
+                approval_hash,
+                consumed.to_dict(),
+            )
+            try:
+                connection.execute(
+                    "INSERT INTO executive_approval_consumptions "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        approval.approval_id,
+                        action.project_id,
+                        approval.charter_id,
+                        action.charter_revision,
+                        action.action_id,
+                        task_id,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise PermissionError(
+                    "one-time approval was already consumed"
+                ) from error
+        reservation_id = self._reserve_budget_in_transaction(
+            connection,
+            charter,
+            approval,
+            action,
+            task_id,
+            timestamp,
+        )
+        return consumed, reservation_id
+
     @staticmethod
     def _reserve_budget_in_transaction(
         connection: sqlite3.Connection,
@@ -1612,6 +1798,27 @@ def charter_approval_digest(charter: ProjectCharter) -> str:
         "founder_approval_identity",
         "founder_approval_record_id",
         "updated_at",
+    ):
+        payload.pop(field_name)
+    return canonical_digest(payload)
+
+
+def task_definition_digest(task: ExecutiveTask) -> str:
+    payload = task.to_dict()
+    for field_name in (
+        "provider_id",
+        "model_id",
+        "session_id",
+        "status",
+        "retry_count",
+        "attempt_history",
+        "result_disposition",
+        "updated_at",
+        "revision",
+        "authority_attempt_id",
+        "artifact_digest",
+        "review_attempt_id",
+        "late_result",
     ):
         payload.pop(field_name)
     return canonical_digest(payload)

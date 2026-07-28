@@ -10,6 +10,7 @@ from keeper.app.storage import KeeperStore
 from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import ActionCategory, ApprovalKind
+from keeper.executive.enums import ExecutiveState
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import (
     ProjectCharter,
@@ -19,6 +20,7 @@ from keeper.executive.models import (
     utc_now,
 )
 from keeper.executive.planning import WorkflowPlanner
+from keeper.executive.state import transition_project
 from keeper.executive.repository import ExecutiveRepository
 
 
@@ -453,3 +455,32 @@ def test_unknown_cost_and_absent_budget_fail_closed(tmp_path: Path) -> None:
     decision = AuthorityEvaluator().evaluate(project, charter, action)
     assert decision.outcome == "DENIED"
     assert decision.rule == "unknown-cost"
+
+
+def test_stale_project_write_and_cross_project_task_are_rejected(
+    tmp_path: Path,
+) -> None:
+    service, project, proposed = _proposed(tmp_path)
+    active_project, charter = _activate(service, proposed)
+    paused = transition_project(
+        active_project, ExecutiveState.PAUSED, "test pause"
+    )
+    service.repository.save_project(paused, expected=active_project)
+    with pytest.raises(PermissionError, match="stale"):
+        service.repository.save_project(paused, expected=active_project)
+
+    resumed = replace(
+        paused,
+        state=ExecutiveState.EXECUTING.value,
+        pause_reason=None,
+        updated_at=utc_now(),
+    )
+    service.repository.save_project(resumed, expected=paused)
+    _, tasks = WorkflowPlanner(service.repository).generate(resumed, charter)
+    forged = replace(
+        tasks[0],
+        task_id="cross-project-task",
+        project_id=project.project_id + "-other",
+    )
+    with pytest.raises((KeyError, PermissionError)):
+        service.repository.save_task(forged)

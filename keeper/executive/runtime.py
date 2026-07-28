@@ -72,11 +72,13 @@ class ExecutiveRuntime:
         workflows = self.repository.workflows(project_id)
         if not workflows:
             if project.state == ExecutiveState.ACTIVE:
+                prior = project
                 project = transition_project(project, ExecutiveState.PLANNING)
-                self.repository.save_project(project)
+                self.repository.save_project(project, expected=prior)
             WorkflowPlanner(self.repository).generate(project, charter)
+            prior = project
             project = transition_project(project, ExecutiveState.EXECUTING)
-            self.repository.save_project(project)
+            self.repository.save_project(project, expected=prior)
             return project
         tasks = tuple(self.repository.tasks(project_id))
         in_flight = next(
@@ -130,10 +132,11 @@ class ExecutiveRuntime:
             task.status in {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
             for task in tasks
         ):
+            prior = project
             if project.state == ExecutiveState.EXECUTING:
                 project = transition_project(project, ExecutiveState.REVIEWING)
             project = transition_project(project, ExecutiveState.COMPLETED)
-            self.repository.save_project(project)
+            self.repository.save_project(project, expected=prior)
             return project
         candidate = self._next_candidate(tasks)
         if candidate is None:
@@ -206,6 +209,8 @@ class ExecutiveRuntime:
                 candidate.task_id,
                 expected_revision=candidate.revision,
                 plan=asdict(plan),
+                action=action,
+                approval_id=decision.approval_id,
             )
         except PermissionError:
             return self.repository.project(project_id)
@@ -226,6 +231,7 @@ class ExecutiveRuntime:
                 target_status=TaskStatus.RUNNING,
                 attempt_state="EXECUTION_STARTED",
             )
+            self._cross_budget_boundary(running)
             result = self.gateway.execute(plan)
         except BaseException as error:
             current = self.repository.task(candidate.task_id)
@@ -256,7 +262,7 @@ class ExecutiveRuntime:
     def pause(self, project_id: str, reason: str) -> ProjectRecord:
         project = self.repository.project(project_id)
         paused = transition_project(project, ExecutiveState.PAUSED, reason)
-        self.repository.save_project(paused)
+        self.repository.save_project(paused, expected=project)
         return paused
 
     def resume(self, project_id: str) -> ProjectRecord:
@@ -282,7 +288,7 @@ class ExecutiveRuntime:
             pause_reason=None,
             updated_at=utc_now(),
         )
-        self.repository.save_project(resumed)
+        self.repository.save_project(resumed, expected=project)
         return resumed
 
     def revoke_delegation(self, project_id: str) -> ProjectRecord:
@@ -396,6 +402,8 @@ class ExecutiveRuntime:
             expected_revision=claimed.revision,
             result=asdict(result),
         )
+        if disposition.status == TaskStatus.CANCELED:
+            return self.repository.project(project.project_id)
         self.repository.insert_memory(
             MemoryRecord(
                 new_id("memory"),
@@ -498,6 +506,7 @@ class ExecutiveRuntime:
                     )
                 except PermissionError:
                     return self.repository.project(project.project_id)
+                self._cross_budget_boundary(running)
                 try:
                     completion = self.gateway.execute(plan)
                 except BaseException:
@@ -699,6 +708,16 @@ class ExecutiveRuntime:
             )
         )
 
+    def _cross_budget_boundary(self, task: ExecutiveTask) -> None:
+        if task.authority_attempt_id is None:
+            raise PermissionError("execution attempt binding is missing")
+        attempt = self.repository.execution_attempt(
+            task.authority_attempt_id
+        )
+        reservation_id = attempt.get("budget_reservation_id")
+        if isinstance(reservation_id, str):
+            self.repository.mark_budget_boundary(reservation_id)
+
     @staticmethod
     def _next_candidate(
         tasks: tuple[ExecutiveTask, ...],
@@ -736,5 +755,8 @@ class ExecutiveRuntime:
                 pause_reason=reason,
                 updated_at=utc_now(),
             )
-        self.repository.save_project(paused)
+        try:
+            self.repository.save_project(paused, expected=project)
+        except PermissionError:
+            return self.repository.project(project.project_id)
         return paused
