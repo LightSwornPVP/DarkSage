@@ -24,3 +24,8 @@
 - Cross-process reroute reservation and storage races are covered directly. A
   dedicated separate-process test driving complete `WorkflowCoordinator.retry()`
   winner launch and loser exception handling remains deferred.
+- Keeper 1.0 is a personal-use, single-Founder product. It does not claim to
+  resist arbitrary code already executing in its trusted Executive interpreter,
+  a malicious local administrator, manual same-user database replacement, or
+  unsupported in-process plugins. Those are future service-isolation hardening
+  scenarios, not supported-path release claims.

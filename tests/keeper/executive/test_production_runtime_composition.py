@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import pickle
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -403,25 +402,19 @@ def test_class_level_production_transport_replacement_fails_before_execution(
     runtime._validate_composition()
 
 
-def test_same_path_production_database_rollback_fails_closed(
+def test_supported_writes_do_not_require_an_external_lineage_commit(
     tmp_path: Path,
 ) -> None:
-    repository, store = _production_repository(tmp_path, "rollback")
-    gateway, _ = _production_gateway(tmp_path, "rollback")
+    repository, store = _production_repository(tmp_path, "sqlite-only")
+    gateway, _ = _production_gateway(tmp_path, "sqlite-only")
     runtime = ExecutiveRuntime.production(repository, gateway)
-    snapshot = tmp_path / "older-production-snapshot.db"
-    store.backup(snapshot)
 
-    store.upsert("settings", "lineage-marker", {"generation": 2})
-    assert store.get("settings", "lineage-marker") == {"generation": 2}
+    store.upsert("settings", "transaction-marker", {"generation": 2})
+    assert store.get("settings", "transaction-marker") == {"generation": 2}
     runtime._validate_composition()
 
-    shutil.copyfile(snapshot, store.path)
-
-    with pytest.raises(RuntimeError, match="composition is invalid"):
-        runtime._validate_composition()
-    with pytest.raises(PermissionError, match="lineage.*rolled back"):
-        KeeperStore(store.path).migrate()
+    assert not (tmp_path / ".keeper-lineage").exists()
+    assert store.executive_repository_binding()[4] == 0
 
 
 def test_runtime_subclasses_cannot_construct_trusted_composition(
@@ -462,16 +455,14 @@ def test_module_level_transport_helper_replacement_fails_closed(
     runtime._validate_composition()
 
 
-def test_copied_production_database_and_lineage_cannot_change_paths(
+def test_copied_production_database_cannot_silently_change_paths(
     tmp_path: Path,
 ) -> None:
     _, source = _production_repository(tmp_path, "source-copy")
     copied_path = tmp_path / "copied-production.db"
     source.backup(copied_path)
     copied = KeeperStore(copied_path)
-    copied_journal = copied._lineage_journal_path()
-    copied_journal.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source._lineage_journal_path(), copied_journal)
+    copied.migrate()
 
-    with pytest.raises(PermissionError, match="lineage record is invalid"):
-        copied.migrate()
+    with pytest.raises(PermissionError, match="path.*recovery identity"):
+        copied.executive_repository_binding()

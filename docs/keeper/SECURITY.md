@@ -1,5 +1,17 @@
 # Keeper Security
 
+Keeper 1.0 uses the versioned personal-use boundary in
+[`THREAT_MODEL.md`](THREAT_MODEL.md). Installed Executive code is trusted;
+provider output and provider processes are not. Arbitrary code already executing
+inside the trusted interpreter is a post-compromise condition, not a claimed
+Python object-isolation boundary.
+
+Provider-generated code is never imported, evaluated, compiled, or executed in
+the trusted Executive process. It runs only in Authority-managed provider
+processes, isolated build/test processes, approved workspaces, deterministic
+tools, or reviewed installed updates. Keeper 1.0 exposes no in-process third-party
+plugin loader.
+
 Keeper treats task definitions and process output as untrusted data.
 
 - Paths are repository-relative, normalized, and checked for traversal.

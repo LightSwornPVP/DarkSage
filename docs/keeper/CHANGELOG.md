@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.8
+
+- Adopt the versioned Keeper 1.0 single-Founder personal-use threat model for
+  Completion Pass A and move same-process post-compromise scenarios to the
+  hardening backlog.
+- Make SQLite the only live Executive commit boundary and retire the external
+  per-transaction lineage append.
+- Add atomic integrity-checked backups, explicit Founder-approved restore with
+  Authority reconciliation, and an in-database recovery epoch.
+
 ## 0.5.7
 
 - Create Windows provider processes suspended and assign them to a configured

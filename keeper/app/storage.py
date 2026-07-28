@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, cast
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 LINEAGE_VERSION = 1
 LINEAGE_ZERO_HASH = "0" * 64
 ENTITY_TABLES = (
@@ -74,17 +74,12 @@ class KeeperStore:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA journal_mode=WAL")
-        pending_lineage: dict[str, Any] | None = None
+        connection.execute("PRAGMA synchronous=FULL")
         try:
-            self._validate_production_lineage(connection)
-            initial_changes = connection.total_changes
             yield connection
-            if connection.total_changes > initial_changes:
-                pending_lineage = self._advance_production_lineage(connection)
             connection.commit()
-            if pending_lineage is not None:
-                self._append_lineage_record(pending_lineage)
         except BaseException:
             connection.rollback()
             raise
@@ -477,6 +472,20 @@ class KeeperStore:
                     (7, _now()),
                 )
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS executive_recovery_state ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                "database_id TEXT NOT NULL, canonical_path TEXT NOT NULL, "
+                "recovery_epoch INTEGER NOT NULL CHECK(recovery_epoch>=0), "
+                "restored_at TEXT, restore_reason TEXT, "
+                "authority_reconciled_at TEXT, updated_at TEXT NOT NULL)"
+            )
+            if current < 8:
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (8, _now()),
+                )
+            connection.execute(
                 "CREATE TABLE IF NOT EXISTS executive_repository_lineage ("
                 "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
                 "database_id TEXT NOT NULL, "
@@ -496,6 +505,7 @@ class KeeperStore:
                 "reserved_at TEXT NOT NULL, "
                 "UNIQUE(run_id, destination_attempt))"
             )
+        self.verify_integrity()
 
     def bind_executive_repository_mode(self, mode: str) -> None:
         if mode not in {"PRODUCTION", "TEST"}:
@@ -525,6 +535,31 @@ class KeeperStore:
                 raise PermissionError(
                     "Executive database is bound to a different repository mode"
                 )
+            recovery = connection.execute(
+                "SELECT database_id FROM executive_recovery_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            if recovery is None:
+                legacy = connection.execute(
+                    "SELECT database_id FROM executive_repository_lineage "
+                    "WHERE singleton=1"
+                ).fetchone()
+                database_id = (
+                    str(legacy["database_id"])
+                    if legacy is not None and legacy["database_id"]
+                    else uuid.uuid4().hex
+                )
+                connection.execute(
+                    "INSERT INTO executive_recovery_state("
+                    "singleton,database_id,canonical_path,recovery_epoch,"
+                    "restored_at,restore_reason,authority_reconciled_at,updated_at"
+                    ") VALUES(1,?,?,0,NULL,NULL,NULL,?)",
+                    (
+                        database_id,
+                        self._canonical_database_path(),
+                        _now(),
+                    ),
+                )
 
     def executive_repository_mode(self) -> str | None:
         with self.connect() as connection:
@@ -535,41 +570,35 @@ class KeeperStore:
 
     def executive_repository_binding(
         self,
-    ) -> tuple[str, str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, int]:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT m.mode, m.bound_at, l.database_id "
+                "SELECT m.mode, m.bound_at, r.database_id, "
+                "r.canonical_path, r.recovery_epoch "
                 "FROM executive_repository_mode AS m "
-                "LEFT JOIN executive_repository_lineage AS l "
-                "ON l.singleton=m.singleton "
+                "LEFT JOIN executive_recovery_state AS r "
+                "ON r.singleton=m.singleton "
                 "WHERE m.singleton=1"
             ).fetchone()
         if row is None:
             raise PermissionError(
                 "Executive database has no trusted repository mode binding"
             )
-        if row["mode"] == "PRODUCTION" and not row["database_id"]:
+        if not row["database_id"] or row["recovery_epoch"] is None:
             raise PermissionError(
-                "production Executive database has no lineage identity"
+                "Executive database has no recovery identity"
             )
-        database_id = str(row["database_id"] or "TEST")
-        file_dev, file_ino = self._database_file_identity()
-        if row["mode"] == "PRODUCTION":
-            journal_stat = self._lineage_journal_path().stat()
-            journal_dev = str(int(journal_stat.st_dev))
-            journal_ino = str(int(journal_stat.st_ino))
-        else:
-            journal_dev = "TEST"
-            journal_ino = "TEST"
+        canonical_path = self._canonical_database_path()
+        if row["canonical_path"] != canonical_path:
+            raise PermissionError(
+                "Executive database path does not match its recovery identity"
+            )
         return (
-            self._canonical_database_path(),
+            canonical_path,
             str(row["mode"]),
             str(row["bound_at"]),
-            database_id,
-            file_dev,
-            file_ino,
-            journal_dev,
-            journal_ino,
+            str(row["database_id"]),
+            int(row["recovery_epoch"]),
         )
 
     def consume_reroute_authorization(
@@ -774,11 +803,204 @@ class KeeperStore:
         with self.connect() as connection:
             connection.execute(f'DELETE FROM "{table}" WHERE id=?', (identifier,))
 
+    def verify_integrity(self) -> None:
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            integrity = [
+                str(row[0])
+                for row in connection.execute("PRAGMA integrity_check").fetchall()
+            ]
+            if integrity != ["ok"]:
+                raise RuntimeError(
+                    "Keeper database failed SQLite integrity validation"
+                )
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError(
+                    "Keeper database failed foreign-key validation"
+                )
+        except sqlite3.DatabaseError as error:
+            raise RuntimeError(
+                "Keeper database is corrupt or unreadable"
+            ) from error
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _sqlite_backup(source: Path, destination: Path) -> None:
+        source_connection = sqlite3.connect(source)
+        target_connection = sqlite3.connect(destination)
+        try:
+            source_connection.backup(target_connection)
+            target_connection.commit()
+        finally:
+            target_connection.close()
+            source_connection.close()
+
     def backup(self, destination: Path) -> Path:
+        destination = destination.resolve()
+        if destination == self.path:
+            raise ValueError("backup destination must differ from source")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as source, sqlite3.connect(destination) as target:
-            source.backup(target)
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            self.verify_integrity()
+            self._sqlite_backup(self.path, temporary)
+            KeeperStore(temporary).verify_integrity()
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         return destination
+
+    def restore_backup(
+        self,
+        backup: Path,
+        *,
+        reason: str,
+        confirm_founder_restore: Callable[[Path, Path, str], None],
+        reconcile_authority: Callable[[KeeperStore], None],
+    ) -> int:
+        """Explicitly restore a production backup after approval and reconciliation.
+
+        Normal startup never calls this method. The trusted application must stop
+        other Executive writers, authenticate the Founder in
+        ``confirm_founder_restore``, and reconcile the staged state with
+        KeeperAuthority in ``reconcile_authority``. The live database is replaced
+        only after both callbacks and SQLite integrity validation succeed.
+        """
+        backup = backup.resolve()
+        if backup == self.path:
+            raise ValueError("restore source must differ from live database")
+        if not backup.is_file():
+            raise FileNotFoundError(backup)
+        if not reason.strip():
+            raise ValueError("restore reason is required")
+
+        current = self.executive_repository_binding()
+        if current[1] != "PRODUCTION":
+            raise PermissionError(
+                "explicit restore requires a production Executive database"
+            )
+        confirm_founder_restore(backup, self.path, reason.strip())
+
+        staged_path = self.path.with_name(
+            f".{self.path.name}.{uuid.uuid4().hex}.restore"
+        )
+        staged = KeeperStore(staged_path)
+        restored_at = _now()
+        recovery_epoch = int(current[4]) + 1
+        try:
+            self._sqlite_backup(backup, staged_path)
+            staged.migrate()
+            with staged.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                mode = connection.execute(
+                    "SELECT mode FROM executive_repository_mode "
+                    "WHERE singleton=1"
+                ).fetchone()
+                if mode is None or mode["mode"] != "PRODUCTION":
+                    raise PermissionError(
+                        "restore source is not a production Executive backup"
+                    )
+                connection.execute(
+                    "INSERT INTO executive_recovery_state("
+                    "singleton,database_id,canonical_path,recovery_epoch,"
+                    "restored_at,restore_reason,authority_reconciled_at,updated_at"
+                    ") VALUES(1,?,?,?,?,?,NULL,?) "
+                    "ON CONFLICT(singleton) DO UPDATE SET "
+                    "database_id=excluded.database_id,"
+                    "canonical_path=excluded.canonical_path,"
+                    "recovery_epoch=excluded.recovery_epoch,"
+                    "restored_at=excluded.restored_at,"
+                    "restore_reason=excluded.restore_reason,"
+                    "authority_reconciled_at=NULL,"
+                    "updated_at=excluded.updated_at",
+                    (
+                        current[3],
+                        staged._canonical_database_path(),
+                        recovery_epoch,
+                        restored_at,
+                        reason.strip(),
+                        restored_at,
+                    ),
+                )
+                self._pause_projects_for_restore(connection, restored_at)
+
+            reconcile_authority(staged)
+
+            reconciled_at = _now()
+            with staged.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    "UPDATE executive_recovery_state "
+                    "SET canonical_path=?, authority_reconciled_at=?, updated_at=? "
+                    "WHERE singleton=1 AND recovery_epoch=? "
+                    "AND authority_reconciled_at IS NULL",
+                    (
+                        self._canonical_database_path(),
+                        reconciled_at,
+                        reconciled_at,
+                        recovery_epoch,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "staged Executive restore reconciliation is invalid"
+                    )
+            staged.verify_integrity()
+            self._sqlite_backup(staged_path, self.path)
+            self.verify_integrity()
+        finally:
+            for candidate in (
+                staged_path,
+                Path(f"{staged_path}-wal"),
+                Path(f"{staged_path}-shm"),
+            ):
+                candidate.unlink(missing_ok=True)
+        return recovery_epoch
+
+    @staticmethod
+    def _pause_projects_for_restore(
+        connection: sqlite3.Connection,
+        timestamp: str,
+    ) -> None:
+        terminal = {"COMPLETED", "CANCELED", "FAILED"}
+        rows = connection.execute(
+            'SELECT id, payload, payload_hash FROM "executive_projects"'
+        ).fetchall()
+        for row in rows:
+            serialized = str(row["payload"])
+            if _sha256(serialized.encode("utf-8")) != row["payload_hash"]:
+                raise RuntimeError(
+                    "stored executive_projects record failed integrity validation"
+                )
+            payload = json.loads(serialized)
+            if not isinstance(payload, dict):
+                raise RuntimeError(
+                    "stored executive_projects record is not an object"
+                )
+            if payload.get("state") in terminal:
+                continue
+            payload["state"] = "PAUSED"
+            payload["pause_reason"] = "RESTORE_RECONCILIATION_REQUIRED"
+            payload["updated_at"] = timestamp
+            updated = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            )
+            connection.execute(
+                'UPDATE "executive_projects" '
+                "SET updated_at=?, payload=?, payload_hash=? "
+                "WHERE id=? AND payload_hash=?",
+                (
+                    timestamp,
+                    updated,
+                    _sha256(updated.encode("utf-8")),
+                    str(row["id"]),
+                    str(row["payload_hash"]),
+                ),
+            )
 
     def export_json(self, destination: Path) -> Path:
         document = {

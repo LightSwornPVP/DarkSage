@@ -16,3 +16,7 @@ access or external credentials.
 
 Keeper never grants itself authority to merge, rewrite history, force-push, deploy,
 trade, spend money, or delete repositories, branches, or worktrees.
+
+Keeper 1.0 release audits use the controlled personal-use boundary in
+[`THREAT_MODEL.md`](THREAT_MODEL.md). Provider output remains untrusted and is
+never loaded as code into the trusted Executive interpreter.

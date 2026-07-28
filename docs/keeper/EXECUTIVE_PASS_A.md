@@ -1,5 +1,13 @@
 # Keeper Executive Completion Pass A
 
+## Audit authority
+
+[`THREAT_MODEL.md`](THREAT_MODEL.md), version 1.0, is the authoritative threat
+boundary for Completion Pass A. Supported-path failures remain release blockers.
+Arbitrary code already executing in the trusted Executive interpreter, deliberate
+same-process monkey-patching, and same-user manual database replacement are
+post-compromise hardening scenarios and are not Critical/High Pass A blockers.
+
 ## Product boundary
 
 Keeper Executive is the conversation-first project manager above the independently
@@ -123,14 +131,21 @@ the task.
 ## Persistence, restart, and surfaces
 
 Executive schema version 6 adds the production/test repository-mode marker and
-the signed Founder capability entity; Authority schema version 4 adds the durable
-project-wide capability-consumption ledger. Existing hash-checked execution,
+the signed Founder capability entity. Schema version 8 records the database
+recovery identity and explicit recovery epoch wholly inside SQLite. Authority
+schema version 4 adds the durable project-wide capability-consumption ledger.
+Existing hash-checked execution,
 review, late-result, one-time approval-consumption, and cumulative budget records
 remain intact. Project, charter, workflow, task, approval, execution, review, and
 evidence ownership is checked at persistence boundaries. Project, charter, and
 task updates use exact compare-and-swap state; approved content and authenticated
 identity bindings cannot be rewritten. Migrations remain idempotent and do not
 copy Authority signatures or protected state into the Executive database.
+SQLite is the sole live Executive commit boundary; no adjacent lineage append is
+required after a business transaction. Pass A supports multiple runtime writers
+through SQLite transactions, CAS, and uniqueness constraints. Explicit restore
+pauses nonterminal projects, requires Founder approval and KeeperAuthority
+reconciliation, and advances the in-database recovery epoch.
 Unkeyed local payload hashes are corruption/CAS aids only and never establish
 approval, provider identity, execution, review, or completion authority.
 

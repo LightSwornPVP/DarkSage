@@ -13,3 +13,8 @@ Nonblocking future work:
 - Optional Discord notification-only integration with OS credential storage.
 - Expand the completed rendered Windows Tk smoke into broader accessibility and
   long-duration interaction coverage.
+- If Keeper becomes public, multi-user, or accepts unknown plugins, isolate the
+  Executive as a separate service between the Desktop/UI and KeeperAuthority.
+  That version requires a new threat model for hostile same-user clients and
+  plugin compromise; Python object sealing is not a substitute for the process
+  boundary.

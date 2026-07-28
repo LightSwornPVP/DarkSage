@@ -106,7 +106,14 @@ _IMMUTABLE_RUNTIME_NAMES = frozenset(
 
 
 class ExecutiveRuntime:
-    """Production runtime: every provider boundary is KeeperAuthority-owned."""
+    """Production runtime: every provider boundary is KeeperAuthority-owned.
+
+    Public composition is immutable for supported application use. Provider
+    output is data and is never imported into this interpreter. Deliberate
+    private-field mutation or monkey-patching after arbitrary code is already
+    executing here is post-compromise behavior outside the Keeper 1.0
+    personal-use threat model.
+    """
 
     __repository: ExecutiveRepository
     __gateway: AuthorityBackedSpecialistGateway

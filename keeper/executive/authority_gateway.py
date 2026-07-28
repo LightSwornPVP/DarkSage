@@ -871,7 +871,13 @@ class _ProductionGatewayRuntimeIdentity:
 class ProductionAuthorityBackedSpecialistGateway(
     AuthorityBackedSpecialistGateway
 ):
-    """Sealed production gateway accepting only the real IPC client type."""
+    """Supported production gateway accepting only the real IPC client type.
+
+    The gateway keeps its dependencies stable through public application paths.
+    Its defensive identity checks are not a claim that Python objects resist
+    arbitrary code already executing in the trusted Executive interpreter.
+    Provider-generated code is never loaded into that interpreter.
+    """
 
     _production_client: ProductionAuthorityServiceClient
     __operations: _PinnedProductionAuthorityOperations
