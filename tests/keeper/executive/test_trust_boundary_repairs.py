@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from keeper.app.storage import KeeperStore
+from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
 from keeper.executive.charters import CharterService
+from keeper.executive.enums import ActionCategory, ApprovalKind
 from keeper.executive.intake import ConversationIntake
-from keeper.executive.models import ProjectCharter, ProjectRecord, utc_now
+from keeper.executive.models import (
+    ProjectCharter,
+    ProjectRecord,
+    ProposedAction,
+    SpecialistProfile,
+    utc_now,
+)
+from keeper.executive.planning import WorkflowPlanner
 from keeper.executive.repository import ExecutiveRepository
 
 
@@ -17,6 +27,7 @@ def _proposed(
     *,
     interaction_id: str = "founder-approval",
     resolve_questions: bool = True,
+    budget_limit: float = 0,
 ) -> tuple[CharterService, ProjectRecord, ProjectCharter]:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
@@ -26,6 +37,14 @@ def _proposed(
         "approved_providers": ("mock",),
         "approved_tools": ("filesystem",),
     }
+    if budget_limit:
+        replacements.update(
+            {
+                "budget_limit": budget_limit,
+                "budget_policy": f"up to {budget_limit:.2f} USD",
+                "budget_currency": "USD",
+            }
+        )
     if resolve_questions:
         replacements["success_criteria"] = ("tests pass",)
     intake = ConversationIntake.revise(
@@ -146,3 +165,291 @@ def test_unresolved_material_question_blocks_activation(tmp_path: Path) -> None:
     )
     with pytest.raises(PermissionError, match="unresolved"):
         service.activate(approved)
+
+
+def test_exact_non_goal_and_disguised_deployment_are_denied(
+    tmp_path: Path,
+) -> None:
+    service, project, proposed = _proposed(tmp_path)
+    approved, _ = service.approve(
+        proposed,
+        approver="Founder",
+        source_interaction_id="founder-approval",
+    )
+    active_project = service.activate(approved)
+    active = service.repository.charter(approved.charter_id)
+    denied_charter = replace(active, non_goals=("production deployment",))
+    action = ProposedAction(
+        "deploy",
+        project.project_id,
+        active.revision,
+        ActionCategory.WRITE.value,
+        "production deployment",
+        "mock",
+        "filesystem",
+        str(tmp_path),
+        active.deliverables,
+        0,
+        False,
+        "LOW",
+        "INTERNAL",
+        True,
+        objective="Deploy the application to production",
+        deployment=True,
+        trusted_source="DURABLE_WORKFLOW_TASK",
+    )
+    decision = AuthorityEvaluator().evaluate(
+        active_project, denied_charter, action
+    )
+    assert decision.outcome == "DENIED"
+    assert decision.rule == "explicit-non-goal"
+
+
+@pytest.mark.parametrize(
+    ("objective", "flag"),
+    [
+        ("Publish externally as a public release", "publication"),
+        ("Select and buy access to a paid provider", "spending"),
+    ],
+)
+def test_publication_or_spending_disguised_as_write_is_denied(
+    tmp_path: Path,
+    objective: str,
+    flag: str,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    approved, _ = service.approve(
+        proposed,
+        approver="Founder",
+        source_interaction_id="founder-approval",
+    )
+    project = service.activate(approved)
+    charter = service.repository.charter(approved.charter_id)
+    action = ProposedAction(
+        "hidden-side-effect",
+        project.project_id,
+        charter.revision,
+        ActionCategory.WRITE.value,
+        objective,
+        "mock",
+        "filesystem",
+        str(tmp_path),
+        charter.deliverables,
+        None if flag == "spending" else 0,
+        False,
+        "LOW",
+        "INTERNAL",
+        True,
+        objective=objective,
+        publication=flag == "publication",
+        spending=flag == "spending",
+        trusted_source="DURABLE_WORKFLOW_TASK",
+    )
+    decision = AuthorityEvaluator().evaluate(project, charter, action)
+    assert decision.outcome == "DENIED"
+    assert decision.rule == "classification-mismatch"
+
+
+def test_readiness_classification_uses_actual_task_objective(
+    tmp_path: Path,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    approved, _ = service.approve(
+        proposed,
+        approver="Founder",
+        source_interaction_id="founder-approval",
+    )
+    project = service.activate(approved)
+    charter = service.repository.charter(approved.charter_id)
+    _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
+    task = tasks[0]
+    specialist = SpecialistProfile(
+        "mock",
+        "model",
+        "session",
+        task.required_capabilities,
+        ("software",),
+        True,
+        True,
+        "independent-1",
+        0,
+        ("medium",),
+        True,
+        1.0,
+    )
+    action = TrustedActionClassifier().classify(task, charter, specialist)
+    assert action.objective == task.objective
+    assert action.target_resource == task.objective
+    assert action.scope == charter.deliverables
+
+
+def _activate(
+    service: CharterService,
+    proposed: ProjectCharter,
+) -> tuple[ProjectRecord, ProjectCharter]:
+    approved, _ = service.approve(
+        proposed,
+        approver="Founder",
+        source_interaction_id="founder-approval",
+    )
+    project = service.activate(approved)
+    return project, service.repository.charter(approved.charter_id)
+
+
+def _record_action_approval_interaction(
+    service: CharterService,
+    project_id: str,
+) -> None:
+    service.repository.save_conversation(
+        "action-approval",
+        {
+            "interaction_id": "action-approval",
+            "project_id": project_id,
+            "speaker": "Founder",
+            "message": "Approve the exact bounded action.",
+            "created_at": utc_now(),
+        },
+    )
+
+
+def test_one_time_approval_is_consumed_atomically_once(tmp_path: Path) -> None:
+    service, project, proposed = _proposed(tmp_path)
+    _, charter = _activate(service, proposed)
+    _record_action_approval_interaction(service, project.project_id)
+    approval = service.repository.grant_action_approval(
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        kind=ApprovalKind.ONE_TIME,
+        action_category=ActionCategory.COMMIT,
+        scope=charter.deliverables,
+        limits={"action_id": "commit-once"},
+        approver="Founder",
+        source_interaction_id="action-approval",
+    )
+    action = ProposedAction(
+        "commit-once",
+        project.project_id,
+        charter.revision,
+        ActionCategory.COMMIT.value,
+        "repository commit",
+        "mock",
+        "filesystem",
+        str(tmp_path),
+        charter.deliverables,
+        0,
+        False,
+        "LOW",
+        "INTERNAL",
+        True,
+        objective="Commit the reviewed changes",
+        git_mutation="MUTATE",
+        trusted_source="DURABLE_WORKFLOW_TASK",
+    )
+
+    def consume() -> str:
+        repository = ExecutiveRepository(KeeperStore(tmp_path / "keeper.db"))
+        try:
+            repository.reserve_action_authority(
+                action,
+                approval_id=approval.approval_id,
+                task_id="task-commit",
+            )
+        except PermissionError:
+            return "rejected"
+        return "consumed"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = sorted(pool.map(lambda _: consume(), range(2)))
+    assert outcomes == ["consumed", "rejected"]
+    with pytest.raises(PermissionError, match="binding"):
+        service.repository.reserve_action_authority(
+            action,
+            approval_id=approval.approval_id,
+            task_id="task-commit",
+        )
+
+
+def test_cumulative_spending_prevents_split_action_bypass(
+    tmp_path: Path,
+) -> None:
+    service, project, proposed = _proposed(tmp_path, budget_limit=50)
+    _, charter = _activate(service, proposed)
+    _record_action_approval_interaction(service, project.project_id)
+    approval = service.repository.grant_action_approval(
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        kind=ApprovalKind.AMOUNT_LIMITED,
+        action_category=ActionCategory.SPEND,
+        scope=charter.deliverables,
+        limits={
+            "maximum_cost": 50,
+            "currency": "USD",
+            "provider": "mock",
+            "workspace": str(tmp_path),
+        },
+        approver="Founder",
+        source_interaction_id="action-approval",
+    )
+    outcomes: list[str] = []
+    for index in range(10):
+        action = ProposedAction(
+            f"paid-action-{index}",
+            project.project_id,
+            charter.revision,
+            ActionCategory.SPEND.value,
+            f"paid provider action {index}",
+            "mock",
+            "filesystem",
+            str(tmp_path),
+            charter.deliverables,
+            10,
+            False,
+            "LOW",
+            "INTERNAL",
+            True,
+            objective="Use the explicitly approved paid provider",
+            currency="USD",
+            spending=True,
+            trusted_source="DURABLE_WORKFLOW_TASK",
+        )
+        try:
+            service.repository.reserve_action_authority(
+                action,
+                approval_id=approval.approval_id,
+                task_id=f"paid-task-{index}",
+            )
+        except PermissionError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("reserved")
+    assert outcomes == ["reserved"] * 5 + ["rejected"] * 5
+
+
+def test_unknown_cost_and_absent_budget_fail_closed(tmp_path: Path) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    project, charter = _activate(service, proposed)
+    action = ProposedAction(
+        "unknown-cost",
+        project.project_id,
+        charter.revision,
+        ActionCategory.SPEND.value,
+        "paid provider",
+        "mock",
+        "filesystem",
+        str(tmp_path),
+        charter.deliverables,
+        None,
+        False,
+        "LOW",
+        "INTERNAL",
+        True,
+        objective="Use a paid provider",
+        currency="USD",
+        spending=True,
+        trusted_source="DURABLE_WORKFLOW_TASK",
+    )
+    decision = AuthorityEvaluator().evaluate(project, charter, action)
+    assert decision.outcome == "DENIED"
+    assert decision.rule == "unknown-cost"

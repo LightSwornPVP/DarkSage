@@ -65,6 +65,7 @@ class AuthorityEnvelope(StrictRecord):
     risk_limit: str
     data_classifications: tuple[str, ...]
     expires_at: str | None
+    currency: str | None = None
 
     FIELDS = frozenset(
         {
@@ -78,6 +79,7 @@ class AuthorityEnvelope(StrictRecord):
             "risk_limit",
             "data_classifications",
             "expires_at",
+            "currency",
         }
     )
 
@@ -86,10 +88,16 @@ class AuthorityEnvelope(StrictRecord):
             raise ValueError("maximum_cost cannot be negative")
         if self.expires_at is not None:
             validate_timestamp(self.expires_at, "expires_at")
+        if self.currency is not None and (
+            len(self.currency) != 3 or not self.currency.isalpha()
+        ):
+            raise ValueError("currency must be a three-letter code")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> AuthorityEnvelope:
-        data = cls._validated_data(value)
+        normalized = dict(value)
+        normalized.setdefault("currency", None)
+        data = cls._validated_data(normalized)
         for key in (
             "allowed_actions",
             "separately_approvable_actions",
@@ -285,28 +293,54 @@ class ProposedAction(StrictRecord):
     tool: str | None
     workspace: str | None
     scope: tuple[str, ...]
-    cost: float
+    cost: float | None
     reversible: bool
     risk: str
     data_classification: str
     external_side_effect: bool
+    objective: str = ""
+    currency: str | None = None
+    publication: bool = False
+    deployment: bool = False
+    spending: bool = False
+    git_mutation: str | None = None
+    security_boundary_impact: bool = False
+    trusted_source: str = "CALLER"
 
     FIELDS = frozenset(
         {
             "action_id", "project_id", "charter_revision", "category",
             "target_resource", "provider", "tool", "workspace", "scope", "cost",
             "reversible", "risk", "data_classification", "external_side_effect",
+            "objective", "currency", "publication", "deployment", "spending",
+            "git_mutation", "security_boundary_impact", "trusted_source",
         }
     )
 
     def __post_init__(self) -> None:
         ActionCategory(self.category)
-        if self.cost < 0:
+        if self.cost is not None and self.cost < 0:
             raise ValueError("action cost cannot be negative")
+        if self.currency is not None and (
+            len(self.currency) != 3 or not self.currency.isalpha()
+        ):
+            raise ValueError("currency must be a three-letter code")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ProposedAction:
-        data = cls._validated_data(value)
+        normalized = dict(value)
+        for key, default in {
+            "objective": "",
+            "currency": None,
+            "publication": False,
+            "deployment": False,
+            "spending": False,
+            "git_mutation": None,
+            "security_boundary_impact": False,
+            "trusted_source": "CALLER",
+        }.items():
+            normalized.setdefault(key, default)
+        data = cls._validated_data(normalized)
         data["scope"] = tuple(data["scope"])
         return cls(**data)
 

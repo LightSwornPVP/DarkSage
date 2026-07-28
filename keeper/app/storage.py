@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ENTITY_TABLES = (
     "projects",
     "worktrees",
@@ -38,6 +38,9 @@ ENTITY_TABLES = (
     "project_assumptions",
     "project_conversations",
     "specialist_assignments",
+    "executive_execution_attempts",
+    "executive_reviews",
+    "executive_late_results",
 )
 
 
@@ -109,6 +112,43 @@ class KeeperStore:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (2, _now()),
+                )
+            if current < 3:
+                for table in ENTITY_TABLES:
+                    connection.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{table}" ('
+                        "id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                        "payload TEXT NOT NULL, payload_hash TEXT NOT NULL)"
+                    )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS executive_approval_consumptions ("
+                    "approval_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+                    "charter_id TEXT NOT NULL, charter_revision INTEGER NOT NULL, "
+                    "action_id TEXT NOT NULL UNIQUE, task_id TEXT, "
+                    "consumed_at TEXT NOT NULL, "
+                    "FOREIGN KEY(approval_id) REFERENCES executive_approvals(id), "
+                    "FOREIGN KEY(project_id) REFERENCES executive_projects(id))"
+                )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS executive_budget_reservations ("
+                    "reservation_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+                    "charter_id TEXT NOT NULL, charter_revision INTEGER NOT NULL, "
+                    "approval_id TEXT NOT NULL, action_id TEXT NOT NULL UNIQUE, "
+                    "task_id TEXT, amount_minor INTEGER NOT NULL, "
+                    "currency TEXT NOT NULL, state TEXT NOT NULL, "
+                    "reserved_at TEXT NOT NULL, "
+                    "FOREIGN KEY(approval_id) REFERENCES executive_approvals(id), "
+                    "FOREIGN KEY(project_id) REFERENCES executive_projects(id))"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS ix_executive_budget_scope "
+                    "ON executive_budget_reservations("
+                    "project_id, charter_id, charter_revision, currency, state)"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, _now()),
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reroute_reservations ("

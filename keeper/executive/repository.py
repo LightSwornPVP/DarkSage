@@ -6,10 +6,16 @@ import sqlite3
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from keeper.app.storage import SCHEMA_VERSION, KeeperStore
-from keeper.executive.enums import CharterStatus, ExecutiveState
+from keeper.executive.enums import (
+    ActionCategory,
+    ApprovalKind,
+    CharterStatus,
+    ExecutiveState,
+)
 from keeper.executive.models import (
     ApprovalRecord,
     AssumptionRecord,
@@ -18,6 +24,7 @@ from keeper.executive.models import (
     MemoryRecord,
     ProjectCharter,
     ProjectRecord,
+    ProposedAction,
     WorkflowRecord,
     utc_now,
 )
@@ -319,8 +326,198 @@ class ExecutiveRepository:
         ]
 
     def insert_approval(self, approval: ApprovalRecord) -> None:
-        self.store.insert_immutable("executive_approvals", approval.approval_id, approval.to_dict())
-        self._relate(approval.project_id, "charter", approval.charter_id, "approval", approval.approval_id)
+        del approval
+        raise PermissionError(
+            "approvals may only be created by trusted approval operations"
+        )
+
+    def grant_action_approval(
+        self,
+        *,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+        kind: ApprovalKind,
+        action_category: ActionCategory,
+        scope: tuple[str, ...],
+        limits: dict[str, Any],
+        approver: str,
+        source_interaction_id: str,
+        expires_at: str | None = None,
+    ) -> ApprovalRecord:
+        """Create a Founder-authenticated action approval from durable state."""
+        if approver != "Founder" or kind is ApprovalKind.CHARTER_DURATION:
+            raise PermissionError("a valid Founder action approval is required")
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            charter_payload, _ = self._entity_in_transaction(
+                connection, "project_charters", charter_id
+            )
+            charter = ProjectCharter.from_dict(charter_payload)
+            if (
+                charter.project_id != project_id
+                or charter.revision != charter_revision
+                or charter.status != CharterStatus.ACTIVE
+                or not set(scope).issubset(set(charter.deliverables))
+            ):
+                raise PermissionError(
+                    "action approval is outside the active charter"
+                )
+            interaction, _ = self._entity_in_transaction(
+                connection,
+                "project_conversations",
+                source_interaction_id,
+            )
+            if (
+                interaction.get("project_id") != project_id
+                or interaction.get("speaker") != "Founder"
+            ):
+                raise PermissionError(
+                    "action approval source is not a Founder interaction"
+                )
+            if expires_at is not None:
+                expiration = datetime.fromisoformat(expires_at)
+                if expiration.tzinfo is None or expiration <= datetime.now(UTC):
+                    raise PermissionError("action approval expiration is invalid")
+            normalized_limits = dict(limits)
+            normalized_limits.update(
+                {
+                    "authentication_method": "trusted-founder-interaction",
+                    "source_interaction_digest": canonical_digest(interaction),
+                }
+            )
+            binding = {
+                "project_id": project_id,
+                "charter_id": charter_id,
+                "charter_revision": charter_revision,
+                "kind": kind.value,
+                "action_category": action_category.value,
+                "scope": scope,
+                "limits": normalized_limits,
+                "source_interaction_id": source_interaction_id,
+            }
+            approval = ApprovalRecord(
+                new_id("approval"),
+                project_id,
+                charter_id,
+                charter_revision,
+                kind.value,
+                action_category.value,
+                approver,
+                scope,
+                normalized_limits,
+                timestamp,
+                expires_at,
+                None,
+                None,
+                canonical_digest(binding),
+                source_interaction_id,
+            )
+            self._insert_entity(
+                connection,
+                "executive_approvals",
+                approval.approval_id,
+                approval.to_dict(),
+            )
+            self._insert_relation(
+                connection,
+                project_id,
+                "charter",
+                charter_id,
+                "approval",
+                approval.approval_id,
+            )
+        return approval
+
+    def reserve_action_authority(
+        self,
+        action: ProposedAction,
+        *,
+        approval_id: str,
+        task_id: str | None = None,
+    ) -> tuple[ApprovalRecord, str | None]:
+        """Atomically consume one-time authority and reserve cumulative spend."""
+        if action.trusted_source != "DURABLE_WORKFLOW_TASK":
+            raise PermissionError("caller-classified action facts are not consumable")
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            approval_payload, approval_hash = self._entity_in_transaction(
+                connection, "executive_approvals", approval_id
+            )
+            approval = ApprovalRecord.from_dict(approval_payload)
+            charter_payload, _ = self._entity_in_transaction(
+                connection, "project_charters", approval.charter_id
+            )
+            charter = ProjectCharter.from_dict(charter_payload)
+            interaction, _ = self._entity_in_transaction(
+                connection,
+                "project_conversations",
+                approval.source_interaction_id,
+            )
+            self._validate_action_approval(
+                approval, charter, interaction, action, timestamp
+            )
+            consumed = approval
+            if approval.kind == ApprovalKind.ONE_TIME:
+                consumed = replace(approval, consumed_at=timestamp)
+                self._update_entity_cas(
+                    connection,
+                    "executive_approvals",
+                    approval.approval_id,
+                    approval_hash,
+                    consumed.to_dict(),
+                )
+                try:
+                    connection.execute(
+                        "INSERT INTO executive_approval_consumptions "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            approval.approval_id,
+                            action.project_id,
+                            approval.charter_id,
+                            action.charter_revision,
+                            action.action_id,
+                            task_id,
+                            timestamp,
+                        ),
+                    )
+                except sqlite3.IntegrityError as error:
+                    raise PermissionError(
+                        "one-time approval was already consumed"
+                    ) from error
+            reservation_id = self._reserve_budget_in_transaction(
+                connection,
+                charter,
+                approval,
+                action,
+                task_id,
+                timestamp,
+            )
+        return consumed, reservation_id
+
+    def mark_budget_boundary(self, reservation_id: str) -> None:
+        with self.store.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE executive_budget_reservations SET state='CROSSED' "
+                "WHERE reservation_id=? AND state='RESERVED'",
+                (reservation_id,),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("budget reservation is not crossable")
+
+    def release_budget_reservation(self, reservation_id: str) -> None:
+        with self.store.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE executive_budget_reservations SET state='RELEASED' "
+                "WHERE reservation_id=? AND state='RESERVED'",
+                (reservation_id,),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "crossed or missing budget reservation cannot be released"
+                )
 
     def approvals(self, project_id: str, charter_revision: int | None = None) -> list[ApprovalRecord]:
         values = [
@@ -599,6 +796,144 @@ class ExecutiveRepository:
             <= datetime.fromisoformat(now).astimezone(UTC)
         ):
             raise PermissionError("charter approval is expired")
+
+    @staticmethod
+    def _validate_action_approval(
+        approval: ApprovalRecord,
+        charter: ProjectCharter,
+        interaction: dict[str, Any],
+        action: ProposedAction,
+        now: str,
+    ) -> None:
+        binding = {
+            "project_id": approval.project_id,
+            "charter_id": approval.charter_id,
+            "charter_revision": approval.charter_revision,
+            "kind": approval.kind,
+            "action_category": approval.action_category,
+            "scope": approval.scope,
+            "limits": approval.limits,
+            "source_interaction_id": approval.source_interaction_id,
+        }
+        if (
+            approval.project_id != action.project_id
+            or approval.charter_id != charter.charter_id
+            or approval.charter_revision != action.charter_revision
+            or charter.revision != action.charter_revision
+            or charter.status != CharterStatus.ACTIVE
+            or approval.approver != "Founder"
+            or approval.action_category not in {None, action.category}
+            or not set(action.scope).issubset(set(approval.scope))
+            or approval.revoked_at is not None
+            or approval.consumed_at is not None
+            or interaction.get("interaction_id")
+            != approval.source_interaction_id
+            or interaction.get("project_id") != action.project_id
+            or interaction.get("speaker") != "Founder"
+            or approval.limits.get("authentication_method")
+            != "trusted-founder-interaction"
+            or approval.limits.get("source_interaction_digest")
+            != canonical_digest(interaction)
+            or approval.evidence_digest != canonical_digest(binding)
+        ):
+            raise PermissionError("action approval binding is invalid")
+        if (
+            approval.expires_at is not None
+            and datetime.fromisoformat(approval.expires_at)
+            <= datetime.fromisoformat(now).astimezone(UTC)
+        ):
+            raise PermissionError("action approval is expired")
+        provider = approval.limits.get("provider")
+        workspace = approval.limits.get("workspace")
+        action_id = approval.limits.get("action_id")
+        if (
+            (provider is not None and action.provider != provider)
+            or (workspace is not None and action.workspace != workspace)
+            or (action_id is not None and action.action_id != action_id)
+        ):
+            raise PermissionError("action approval limits do not match")
+
+    @staticmethod
+    def _reserve_budget_in_transaction(
+        connection: sqlite3.Connection,
+        charter: ProjectCharter,
+        approval: ApprovalRecord,
+        action: ProposedAction,
+        task_id: str | None,
+        timestamp: str,
+    ) -> str | None:
+        spending = action.spending or action.cost is None or (action.cost or 0) > 0
+        if not spending:
+            return None
+        if action.cost is None:
+            raise PermissionError("unknown action cost fails closed")
+        currency = action.currency
+        approved_currency = approval.limits.get("currency")
+        if (
+            currency is None
+            or currency != charter.authority_envelope.currency
+            or currency != approved_currency
+        ):
+            raise PermissionError("spending currency is not explicitly approved")
+        try:
+            amount = Decimal(str(action.cost))
+            amount_minor_decimal = amount * 100
+            if amount_minor_decimal != amount_minor_decimal.to_integral_value():
+                raise PermissionError("spending amount has unsupported precision")
+            amount_minor = int(amount_minor_decimal)
+            approval_limit = Decimal(str(approval.limits["maximum_cost"]))
+        except (InvalidOperation, KeyError, TypeError, ValueError) as error:
+            raise PermissionError("spending approval limit is invalid") from error
+        if amount_minor <= 0:
+            raise PermissionError("spending reservation must be positive")
+        charter_limit = min(
+            Decimal(str(charter.budget_limit)),
+            Decimal(str(charter.authority_envelope.maximum_cost)),
+            approval_limit,
+        )
+        limit_minor = int(charter_limit * 100)
+        reserved = int(
+            connection.execute(
+                "SELECT COALESCE(SUM(amount_minor), 0) "
+                "FROM executive_budget_reservations "
+                "WHERE project_id=? AND charter_id=? AND charter_revision=? "
+                "AND currency=? AND state IN ('RESERVED', 'CROSSED')",
+                (
+                    action.project_id,
+                    charter.charter_id,
+                    charter.revision,
+                    currency,
+                ),
+            ).fetchone()[0]
+        )
+        if reserved + amount_minor > limit_minor:
+            raise PermissionError(
+                "cumulative spending would exceed the approved limit"
+            )
+        reservation_id = new_id("budget")
+        try:
+            connection.execute(
+                "INSERT INTO executive_budget_reservations "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    reservation_id,
+                    action.project_id,
+                    charter.charter_id,
+                    charter.revision,
+                    approval.approval_id,
+                    action.action_id,
+                    task_id,
+                    amount_minor,
+                    currency,
+                    "RESERVED",
+                    timestamp,
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            raise PermissionError(
+                "spending action already has a reservation"
+            ) from error
+        return reservation_id
 
 
 def canonical_digest(value: dict[str, Any]) -> str:

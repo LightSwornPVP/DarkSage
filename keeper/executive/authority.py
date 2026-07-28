@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+import re
 
 from keeper.executive.enums import (
     ActionCategory,
@@ -13,9 +14,11 @@ from keeper.executive.enums import (
 from keeper.executive.models import (
     ApprovalRecord,
     AuthorityDecision,
+    ExecutiveTask,
     ProjectCharter,
     ProjectRecord,
     ProposedAction,
+    SpecialistProfile,
 )
 
 
@@ -85,7 +88,18 @@ class AuthorityEvaluator:
             return self._decision(AuthorityOutcome.DENIED, "non-delegable-action", "authority_envelope.denied_actions", "this action class cannot be delegated", "Founder must perform the action outside Keeper")
         if action.category in charter.authority_envelope.denied_actions:
             return self._decision(AuthorityOutcome.DENIED, "charter-denial", "authority_envelope.denied_actions", "the active charter explicitly denies this action", "revise the charter")
-        if category is ActionCategory.EXPAND_SCOPE or not set(action.scope).issubset(set(charter.deliverables) | set(charter.non_goals)):
+        if any(_action_matches_non_goal(action, item) for item in charter.non_goals):
+            return self._decision(
+                AuthorityOutcome.DENIED,
+                "explicit-non-goal",
+                "non_goals",
+                "the action targets or materially contributes to an explicit non-goal",
+                "remove the action or obtain a charter revision",
+            )
+        classification_error = self._classification_error(action)
+        if classification_error is not None:
+            return classification_error
+        if category is ActionCategory.EXPAND_SCOPE or not set(action.scope).issubset(set(charter.deliverables)):
             return self._decision(AuthorityOutcome.CHARTER_REVISION_REQUIRED, "scope-containment", "deliverables", "the action expands or does not map to charter scope", "create a charter amendment")
         constraint_error = self._constraint_error(charter, action)
         if constraint_error is not None:
@@ -125,7 +139,36 @@ class AuthorityEvaluator:
         self, charter: ProjectCharter, action: ProposedAction
     ) -> AuthorityDecision | None:
         envelope = charter.authority_envelope
-        if action.cost > min(charter.budget_limit, envelope.maximum_cost):
+        if action.spending or action.cost is None or (action.cost or 0) > 0:
+            if action.cost is None:
+                return self._decision(
+                    AuthorityOutcome.DENIED,
+                    "unknown-cost",
+                    "cost",
+                    "paid or potentially paid work requires a known cost",
+                    "supply a trusted exact cost before approval",
+                )
+            if (
+                charter.budget_limit <= 0
+                or envelope.maximum_cost <= 0
+                or envelope.currency is None
+            ):
+                return self._decision(
+                    AuthorityOutcome.DENIED,
+                    "absent-spending-authority",
+                    "budget_policy",
+                    "delegation does not itself grant spending authority",
+                    "obtain explicit Founder spending authority",
+                )
+            if action.currency != envelope.currency:
+                return self._decision(
+                    AuthorityOutcome.DENIED,
+                    "currency-mismatch",
+                    "authority_envelope.currency",
+                    "implicit currency conversion is not permitted",
+                    "use the approved canonical currency",
+                )
+        if (action.cost or 0) > min(charter.budget_limit, envelope.maximum_cost):
             return self._decision(AuthorityOutcome.DENIED, "budget-limit", "budget_limit", "action cost exceeds the approved budget", "reduce cost or revise the charter")
         if action.provider and (
             action.provider in charter.prohibited_providers
@@ -149,6 +192,50 @@ class AuthorityEvaluator:
                 return self._decision(AuthorityOutcome.DENIED, "workspace-containment", "workspaces", "workspace is outside approved roots", "use an approved workspace")
         if action.data_classification not in envelope.data_classifications:
             return self._decision(AuthorityOutcome.DENIED, "data-classification", "data_privacy_restrictions", "data classification is not approved", "revise data authority")
+        return None
+
+    def _classification_error(
+        self, action: ProposedAction
+    ) -> AuthorityDecision | None:
+        category = ActionCategory(action.category)
+        text = _normalized(
+            " ".join((action.objective, action.target_resource, *action.scope))
+        )
+        required: ActionCategory | None = None
+        if action.deployment or _contains_any(
+            text, ("production deployment", "deploy production", "deploy to production")
+        ):
+            required = ActionCategory.DEPLOY_PRODUCTION
+        elif action.publication or _contains_any(
+            text, ("publish externally", "external publication", "public release")
+        ):
+            required = ActionCategory.PUBLISH_EXTERNAL
+        elif action.spending or _contains_any(
+            text, ("purchase", "paid provider", "spend money", "buy ")
+        ):
+            required = (
+                ActionCategory.PURCHASE
+                if "purchase" in text or "buy " in text
+                else ActionCategory.SPEND
+            )
+        elif action.git_mutation == "REWRITE_HISTORY" or _contains_any(
+            text, ("rewrite history", "force push", "reset --hard")
+        ):
+            required = ActionCategory.REWRITE_HISTORY
+        elif action.security_boundary_impact or _contains_any(
+            text, ("change security boundary", "disable authentication")
+        ):
+            required = ActionCategory.CHANGE_SECURITY_BOUNDARY
+        elif _contains_any(text, ("enable live trading", "place live trade")):
+            required = ActionCategory.ENABLE_LIVE_TRADING
+        if required is not None and category is not required:
+            return self._decision(
+                AuthorityOutcome.DENIED,
+                "classification-mismatch",
+                "category",
+                f"trusted action facts require {required.value}, not {category.value}",
+                "correct the durable workflow classification",
+            )
         return None
 
     def _matching_approval(
@@ -178,7 +265,9 @@ class AuthorityEvaluator:
             if approval.kind == ApprovalKind.ONE_TIME and approval.consumed_at is not None:
                 continue
             amount = approval.limits.get("maximum_cost")
-            if isinstance(amount, (int, float)) and action.cost > float(amount):
+            if isinstance(amount, (int, float)) and (
+                action.cost is None or action.cost > float(amount)
+            ):
                 continue
             provider = approval.limits.get("provider")
             if provider is not None and action.provider != provider:
@@ -202,3 +291,111 @@ class AuthorityEvaluator:
         next_step: str,
     ) -> AuthorityDecision:
         return AuthorityDecision(outcome.value, rule, field, {}, reason, next_step)
+
+
+class TrustedActionClassifier:
+    """Derive launch facts from the durable task and charter, never caller labels."""
+
+    def classify(
+        self,
+        task: ExecutiveTask,
+        charter: ProjectCharter,
+        specialist: SpecialistProfile,
+    ) -> ProposedAction:
+        if task.project_id != charter.project_id or task.charter_id != charter.charter_id:
+            raise PermissionError("task and charter identity do not match")
+        if len(charter.workspaces) != 1 or len(charter.approved_tools) != 1:
+            raise PermissionError(
+                "workflow launch requires one explicit workspace and tool"
+            )
+        if not charter.authority_envelope.data_classifications:
+            raise PermissionError("workflow data classification is missing")
+        text = _normalized(
+            " ".join((task.title, task.objective, *task.instructions))
+        )
+        deployment = _contains_any(
+            text, ("production deployment", "deploy production", "deploy to production")
+        )
+        publication = _contains_any(
+            text, ("publish externally", "external publication", "public release")
+        )
+        spending = _contains_any(
+            text, ("purchase", "paid provider", "spend money", "buy ")
+        )
+        git_mutation = (
+            "REWRITE_HISTORY"
+            if _contains_any(text, ("rewrite history", "force push", "reset --hard"))
+            else ("MUTATE" if "commit" in text or "push" in text else None)
+        )
+        security_impact = _contains_any(
+            text, ("change security boundary", "disable authentication")
+        )
+        action = ProposedAction(
+            action_id=f"task-action:{task.task_id}",
+            project_id=task.project_id,
+            charter_revision=task.charter_revision,
+            category=task.authority_category,
+            target_resource=task.objective,
+            provider=specialist.provider_id,
+            tool=charter.approved_tools[0],
+            workspace=charter.workspaces[0],
+            scope=charter.deliverables,
+            cost=0.0,
+            reversible=not (
+                deployment
+                or publication
+                or spending
+                or git_mutation == "REWRITE_HISTORY"
+            ),
+            risk=charter.risk_classification,
+            data_classification=charter.authority_envelope.data_classifications[0],
+            external_side_effect=deployment
+            or publication
+            or spending
+            or git_mutation is not None,
+            objective=task.objective,
+            currency=charter.authority_envelope.currency,
+            publication=publication,
+            deployment=deployment,
+            spending=spending,
+            git_mutation=git_mutation,
+            security_boundary_impact=security_impact,
+            trusted_source="DURABLE_WORKFLOW_TASK",
+        )
+        mismatch = AuthorityEvaluator()._classification_error(action)
+        if mismatch is not None:
+            raise PermissionError(mismatch.reason)
+        return action
+
+
+def _normalized(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9/ ._-]+", " ", value.casefold())).strip()
+
+
+def _contains_any(value: str, phrases: tuple[str, ...]) -> bool:
+    return any(phrase in value for phrase in phrases)
+
+
+def _action_matches_non_goal(action: ProposedAction, non_goal: str) -> bool:
+    denied = _normalized(non_goal)
+    if not denied:
+        return False
+    material = _normalized(
+        " ".join(
+            (
+                action.objective,
+                action.target_resource,
+                action.category,
+                *action.scope,
+            )
+        )
+    )
+    if denied in material:
+        return True
+    denied_tokens = {
+        token
+        for token in denied.split()
+        if len(token) > 3 and token not in {"with", "from", "that", "this"}
+    }
+    material_tokens = set(material.split())
+    return bool(denied_tokens) and denied_tokens.issubset(material_tokens)

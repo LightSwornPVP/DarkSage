@@ -54,6 +54,12 @@ class CharterService:
         tool_values = tuple(str(item) for item in intake.explicit("approved_tools", ("filesystem",)))
         deliverables = tuple(str(item) for item in intake.explicit("deliverables", ("project deliverable",)))
         mode = str(intake.explicit("delegation_mode", "ADVISORY"))
+        budget_limit = float(intake.explicit("budget_limit", 0.0))
+        budget_currency = (
+            str(intake.explicit("budget_currency", "USD")).upper()
+            if budget_limit > 0
+            else None
+        )
         allowed_actions = (
             ActionCategory.ANALYZE.value,
             ActionCategory.PLAN.value,
@@ -71,10 +77,11 @@ class CharterService:
             workspace_values,
             tool_values,
             provider_values,
-            float(intake.explicit("budget_limit", 0.0)),
+            budget_limit,
             str(intake.explicit("risk_classification", "LOW")),
             tuple(str(item) for item in intake.explicit("data_classifications", ("INTERNAL",))),
             None,
+            budget_currency,
         )
         charter = ProjectCharter(
             new_id("charter"),
@@ -92,7 +99,7 @@ class CharterService:
             intake.unresolved_questions,
             _optional_string(intake.explicit("timeline")),
             str(intake.explicit("budget_policy", "spending prohibited")),
-            float(intake.explicit("budget_limit", 0.0)),
+            budget_limit,
             tool_values,
             provider_values,
             tuple(str(item) for item in intake.explicit("prohibited_tools", ())),

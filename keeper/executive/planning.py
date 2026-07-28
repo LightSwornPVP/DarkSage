@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from keeper.executive.authority import AuthorityEvaluator
+from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
 from keeper.executive.enums import ActionCategory, TaskStatus
 from keeper.executive.models import (
     ExecutiveTask,
     ProjectCharter,
     ProjectRecord,
-    ProposedAction,
     SpecialistProfile,
     WorkflowRecord,
     WorkflowStage,
@@ -215,31 +214,22 @@ class TaskReadiness:
                 reasons.append("assigned specialist lacks required capabilities")
             if specialist.provider_id not in charter.approved_providers:
                 reasons.append("assigned provider is outside the charter")
-        workspace = charter.workspaces[0] if charter.workspaces else None
-        action = ProposedAction(
-            f"readiness-{task.task_id}",
-            task.project_id,
-            task.charter_revision,
-            task.authority_category,
-            task.task_id,
-            specialist.provider_id if specialist else None,
-            charter.approved_tools[0] if charter.approved_tools else None,
-            workspace,
-            (charter.deliverables[0],),
-            0,
-            True,
-            charter.risk_classification,
-            charter.authority_envelope.data_classifications[0],
-            False,
-        )
-        decision = self.evaluator.evaluate(
-            project,
-            charter,
-            action,
-            tuple(),
-        )
-        if decision.outcome not in {"ALLOWED", "ALLOWED_WITHIN_LIMIT"}:
-            reasons.append(f"authority is not present: {decision.outcome}")
+        if specialist is not None:
+            try:
+                action = TrustedActionClassifier().classify(
+                    task, charter, specialist
+                )
+            except PermissionError as error:
+                reasons.append(f"trusted action classification failed: {error}")
+            else:
+                decision = self.evaluator.evaluate(
+                    project,
+                    charter,
+                    action,
+                    tuple(),
+                )
+                if decision.outcome not in {"ALLOWED", "ALLOWED_WITHIN_LIMIT"}:
+                    reasons.append(f"authority is not present: {decision.outcome}")
         return ReadinessResult(not reasons, tuple(reasons))
 
     @staticmethod
