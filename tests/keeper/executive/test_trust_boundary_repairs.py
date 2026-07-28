@@ -34,7 +34,7 @@ def _proposed(
     service = CharterService(ExecutiveRepository(store))
     replacements: dict[str, object] = {
         "target_audience": "Founder",
-        "approved_providers": ("mock",),
+        "approved_providers": ("codex", "claude"),
         "approved_tools": ("filesystem",),
     }
     if budget_limit:
@@ -185,7 +185,7 @@ def test_exact_non_goal_and_disguised_deployment_are_denied(
         active.revision,
         ActionCategory.WRITE.value,
         "production deployment",
-        "mock",
+        "codex",
         "filesystem",
         str(tmp_path),
         active.deliverables,
@@ -231,7 +231,7 @@ def test_publication_or_spending_disguised_as_write_is_denied(
         charter.revision,
         ActionCategory.WRITE.value,
         objective,
-        "mock",
+        "codex",
         "filesystem",
         str(tmp_path),
         charter.deliverables,
@@ -264,7 +264,7 @@ def test_readiness_classification_uses_actual_task_objective(
     _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
     task = tasks[0]
     specialist = SpecialistProfile(
-        "mock",
+        "codex",
         "model",
         "session",
         task.required_capabilities,
@@ -333,7 +333,7 @@ def test_one_time_approval_is_consumed_atomically_once(tmp_path: Path) -> None:
         charter.revision,
         ActionCategory.COMMIT.value,
         "repository commit",
-        "mock",
+        "codex",
         "filesystem",
         str(tmp_path),
         charter.deliverables,
@@ -386,7 +386,7 @@ def test_cumulative_spending_prevents_split_action_bypass(
         limits={
             "maximum_cost": 50,
             "currency": "USD",
-            "provider": "mock",
+            "provider": "codex",
             "workspace": str(tmp_path),
         },
         approver="Founder",
@@ -400,7 +400,7 @@ def test_cumulative_spending_prevents_split_action_bypass(
             charter.revision,
             ActionCategory.SPEND.value,
             f"paid provider action {index}",
-            "mock",
+            "codex",
             "filesystem",
             str(tmp_path),
             charter.deliverables,
@@ -436,7 +436,7 @@ def test_unknown_cost_and_absent_budget_fail_closed(tmp_path: Path) -> None:
         charter.revision,
         ActionCategory.SPEND.value,
         "paid provider",
-        "mock",
+        "codex",
         "filesystem",
         str(tmp_path),
         charter.deliverables,

@@ -14,7 +14,7 @@ from tests.keeper.executive.test_intake_charters import approved_project
 
 def specialist(capability: str) -> SpecialistProfile:
     return SpecialistProfile(
-        "mock", "model", "session", (capability,), ("software", "research"),
+        "codex", "model", "session", (capability,), ("software", "research"),
         True, True, "identity-1", 0, ("medium",), True, 1.0,
     )
 

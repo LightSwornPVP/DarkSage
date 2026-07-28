@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 
-from keeper.executive.authority import AuthorityEvaluator
+from keeper.executive.authority import (
+    AuthorityEvaluator,
+    TrustedActionClassifier,
+)
+from keeper.executive.authority_gateway import (
+    AuthorityBackedSpecialistGateway,
+    AuthorityExecutionPlan,
+)
 from keeper.executive.enums import ExecutiveState, TaskStatus
 from keeper.executive.models import (
+    ApprovalRecord,
     ExecutiveTask,
     MemoryRecord,
     ProjectCharter,
@@ -14,30 +22,37 @@ from keeper.executive.models import (
 )
 from keeper.executive.planning import TaskReadiness, WorkflowPlanner
 from keeper.executive.repository import ExecutiveRepository, new_id
-from keeper.executive.specialists import (
-    ReviewOrchestrator,
-    SpecialistGateway,
-    SpecialistOrchestrator,
-    SpecialistSelector,
-)
+from keeper.executive.specialists import SpecialistSelector
 from keeper.executive.state import transition_project
 
 
+IN_FLIGHT = frozenset(
+    {
+        TaskStatus.LAUNCH_CLAIMED,
+        TaskStatus.EXECUTION_STARTED,
+        TaskStatus.RUNNING,
+        TaskStatus.COMPLETION_PENDING,
+        TaskStatus.UNCERTAIN,
+    }
+)
+
+
 class ExecutiveRuntime:
-    """One durable bounded progression step per call."""
+    """Production runtime: every provider boundary is KeeperAuthority-owned."""
 
     def __init__(
         self,
         repository: ExecutiveRepository,
-        gateway: SpecialistGateway,
-        specialists: tuple[SpecialistProfile, ...],
+        gateway: AuthorityBackedSpecialistGateway,
     ) -> None:
+        if type(gateway) is not AuthorityBackedSpecialistGateway:
+            raise RuntimeError(
+                "production Executive requires the concrete Authority-backed gateway"
+            )
         self.repository = repository
         self.gateway = gateway
-        self.specialists = specialists
         self.evaluator = AuthorityEvaluator()
         self.selector = SpecialistSelector()
-        self.reviewer = ReviewOrchestrator()
 
     def progress(self, project_id: str) -> ProjectRecord:
         project = self.repository.project(project_id)
@@ -64,7 +79,57 @@ class ExecutiveRuntime:
             self.repository.save_project(project)
             return project
         tasks = tuple(self.repository.tasks(project_id))
-        if tasks and all(task.status in {TaskStatus.COMPLETED, TaskStatus.SKIPPED} for task in tasks):
+        in_flight = next(
+            (task for task in tasks if TaskStatus(task.status) in IN_FLIGHT),
+            None,
+        )
+        if in_flight is not None:
+            return self._reconcile_author(project, charter, in_flight)
+        review_pending = next(
+            (
+                task
+                for task in tasks
+                if task.status == TaskStatus.REVIEW_REQUIRED
+                and task.review_attempt_id is not None
+            ),
+            None,
+        )
+        if review_pending is not None:
+            return self._reconcile_review(project, charter, review_pending)
+        unclaimed_review = next(
+            (
+                task
+                for task in tasks
+                if task.status == TaskStatus.REVIEW_REQUIRED
+                and task.review_attempt_id is None
+            ),
+            None,
+        )
+        if unclaimed_review is not None:
+            profiles = self.gateway.specialists(charter)
+            author = next(
+                (
+                    item
+                    for item in profiles
+                    if item.provider_id == unclaimed_review.provider_id
+                    and item.model_id == unclaimed_review.model_id
+                    and item.session_id == unclaimed_review.session_id
+                ),
+                None,
+            )
+            if author is None:
+                return self._pause(
+                    project,
+                    ExecutiveState.BLOCKED,
+                    "Author Authority identity is unavailable for review binding.",
+                )
+            return self._review(
+                project, charter, unclaimed_review, author
+            )
+        if tasks and all(
+            task.status in {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
+            for task in tasks
+        ):
             if project.state == ExecutiveState.EXECUTING:
                 project = transition_project(project, ExecutiveState.REVIEWING)
             project = transition_project(project, ExecutiveState.COMPLETED)
@@ -72,27 +137,30 @@ class ExecutiveRuntime:
             return project
         candidate = self._next_candidate(tasks)
         if candidate is None:
-            return self._pause(project, ExecutiveState.BLOCKED, "No task can progress from durable state.")
-        author = self.selector.select(candidate, charter, self.specialists)
-        if author is None:
-            matching = [
-                item for item in self.specialists
-                if not set(item.capabilities).isdisjoint(candidate.required_capabilities)
-                and item.provider_id in charter.approved_providers
-            ]
-            state = (
-                ExecutiveState.WAITING_FOR_CREDENTIAL
-                if matching and any(not item.credential_available for item in matching)
-                else ExecutiveState.WAITING_FOR_PROVIDER
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "No task can progress from durable state.",
             )
-            return self._pause(project, state, "No qualified available specialist can accept the task.")
+        profiles = self.gateway.specialists(charter)
+        author = self.selector.select(candidate, charter, profiles)
+        if author is None:
+            return self._pause(
+                project,
+                ExecutiveState.WAITING_FOR_PROVIDER,
+                "No Authority-qualified provider can accept the task.",
+            )
         available_inputs = frozenset(
             output
             for task in tasks
             if task.status == TaskStatus.COMPLETED
             for output in task.expected_outputs
         )
-        if candidate.status in {TaskStatus.PROPOSED, TaskStatus.BLOCKED, TaskStatus.WAITING}:
+        if candidate.status in {
+            TaskStatus.PROPOSED,
+            TaskStatus.BLOCKED,
+            TaskStatus.WAITING,
+        }:
             readiness = TaskReadiness(self.evaluator).evaluate(
                 candidate,
                 all_tasks=tasks,
@@ -107,78 +175,83 @@ class ExecutiveRuntime:
                     ExecutiveState.BLOCKED,
                     "; ".join(readiness.reasons),
                 )
-            candidate = TaskReadiness.mark_ready(candidate, readiness)
-            self.repository.save_task(candidate)
-        returned, result = SpecialistOrchestrator(self.gateway).run(
+            ready = TaskReadiness.mark_ready(candidate, readiness)
+            try:
+                self.repository.save_task(ready, expected=candidate)
+            except PermissionError:
+                return self.repository.project(project_id)
+            candidate = ready
+        action = TrustedActionClassifier().classify(
             candidate, charter, author
         )
-        self.repository.save_task(returned)
-        self.repository.insert_memory(
-            MemoryRecord(
-                new_id("memory"),
-                project.project_id,
-                charter.revision,
-                returned.task_id,
-                returned.stage_id,
-                "EVIDENCE",
-                "VERIFIED",
-                "specialist result",
-                f"{result.status}: {', '.join(result.outputs)}",
-                True,
-                result.evidence,
-                None,
-                utc_now(),
-            )
-        )
-        requires_independent = any(
-            "independent" in item.casefold()
-            for item in returned.review_requirements
-        )
-        reviewer = self.selector.select(
-            returned,
+        decision = self.evaluator.evaluate(
+            project,
             charter,
-            self.specialists,
-            author=author,
-            independent=requires_independent,
+            action,
+            tuple(
+                self.repository.approvals(
+                    project.project_id, charter.revision
+                )
+            ),
         )
-        checks = result.verification
-        review = self.reviewer.evaluate(
-            returned,
-            result,
-            reviewer=reviewer,
-            author=author,
-            deterministic_checks=checks,
-        )
-        disposition = self.reviewer.apply(returned, review)
-        self.repository.save_task(disposition)
-        self.repository.insert_memory(
-            MemoryRecord(
-                new_id("memory"),
-                project.project_id,
-                charter.revision,
-                disposition.task_id,
-                disposition.stage_id,
-                "OUTCOME",
-                "VERIFIED",
-                "review disposition",
-                review.disposition,
-                True,
-                review.evidence,
-                None,
-                utc_now(),
-            )
-        )
-        if disposition.status == TaskStatus.BLOCKED:
+        if decision.outcome not in {"ALLOWED", "ALLOWED_WITHIN_LIMIT"}:
             return self._pause(
                 project,
-                ExecutiveState.BLOCKED,
-                "Required independent review is unavailable.",
+                ExecutiveState.WAITING_FOR_FOUNDER,
+                f"Authority denied launch: {decision.outcome}.",
             )
-        if disposition.status == TaskStatus.FAILED:
+        plan = self.gateway.prepare(candidate, charter, author)
+        try:
+            claimed = self.repository.claim_execution(
+                candidate.task_id,
+                expected_revision=candidate.revision,
+                plan=asdict(plan),
+            )
+        except PermissionError:
+            return self.repository.project(project_id)
+        try:
+            self.gateway.reserve(plan)
+            claimed = self.repository.transition_execution(
+                claimed.task_id,
+                expected_revision=claimed.revision,
+                expected_status=TaskStatus.LAUNCH_CLAIMED,
+                target_status=TaskStatus.EXECUTION_STARTED,
+                attempt_state="RESERVED",
+            )
+            self._recheck_launch(claimed, charter, author)
+            running = self.repository.transition_execution(
+                claimed.task_id,
+                expected_revision=claimed.revision,
+                expected_status=TaskStatus.EXECUTION_STARTED,
+                target_status=TaskStatus.RUNNING,
+                attempt_state="EXECUTION_STARTED",
+            )
+            result = self.gateway.execute(plan)
+        except BaseException as error:
+            current = self.repository.task(candidate.task_id)
+            if current.status != TaskStatus.CANCELED:
+                try:
+                    self.repository.mark_execution_uncertain(
+                        current.task_id,
+                        expected_revision=current.revision,
+                        reason=f"Authority reconciliation required: {type(error).__name__}",
+                    )
+                except PermissionError:
+                    pass
             return self._pause(
-                project, ExecutiveState.BLOCKED, "Task retry limit was exceeded."
+                self.repository.project(project_id),
+                ExecutiveState.BLOCKED,
+                "Provider execution is uncertain and is not retry-safe.",
             )
-        return project
+        imported = self.repository.accept_author_completion(
+            running.task_id,
+            expected_revision=running.revision,
+            result=asdict(result),
+        )
+        self._record_author_evidence(imported, result.completion_digest)
+        if imported.status == TaskStatus.CANCELED:
+            return self.repository.project(project_id)
+        return self._review(project, charter, imported, author)
 
     def pause(self, project_id: str, reason: str) -> ProjectRecord:
         project = self.repository.project(project_id)
@@ -197,11 +270,12 @@ class ExecutiveRuntime:
             ExecutiveState.WAITING_FOR_USAGE_RESET,
         }:
             raise PermissionError("project is not resumable")
-        approvals = self.repository.approvals(
-            project_id, project.active_charter_revision
-        )
-        if not any(item.revoked_at is None for item in approvals):
-            raise PermissionError("delegation was revoked; new Founder approval is required")
+        charter = self._active_charter(project)
+        approval = self._active_charter_approval(charter)
+        if approval.revoked_at is not None:
+            raise PermissionError(
+                "delegation was revoked; new Founder approval is required"
+            )
         resumed = replace(
             project,
             state=ExecutiveState.EXECUTING.value,
@@ -217,24 +291,354 @@ class ExecutiveRuntime:
             project_id, project.active_charter_revision
         ):
             if approval.revoked_at is None:
-                self.repository.revoke_approval(approval.approval_id, utc_now())
+                self.repository.revoke_approval(
+                    approval.approval_id, utc_now()
+                )
         return self.pause(project_id, "Founder revoked delegation.")
 
     def cancel(self, project_id: str) -> ProjectRecord:
-        project = self.repository.project(project_id)
-        canceled = transition_project(project, ExecutiveState.CANCELED)
-        self.repository.save_project(canceled)
-        for task in self.repository.tasks(project_id):
-            if task.status not in {
-                TaskStatus.COMPLETED,
-                TaskStatus.FAILED,
-                TaskStatus.CANCELED,
-                TaskStatus.SKIPPED,
-            }:
-                self.repository.save_task(
-                    replace(task, status=TaskStatus.CANCELED.value, updated_at=utc_now())
-                )
+        canceled, attempt_ids = self.repository.cancel_project_execution(
+            project_id
+        )
+        for attempt_id in attempt_ids:
+            try:
+                self.gateway.cancel(attempt_id)
+            except PermissionError:
+                # A terminal Authority attempt is reconciled as late evidence;
+                # local cancellation remains authoritative.
+                continue
         return canceled
+
+    def _review(
+        self,
+        project: ProjectRecord,
+        charter: ProjectCharter,
+        task: ExecutiveTask,
+        author: SpecialistProfile,
+    ) -> ProjectRecord:
+        requires_independent = any(
+            "independent" in item.casefold()
+            for item in task.review_requirements
+        )
+        if not requires_independent:
+            self.repository.complete_automated_review(
+                task.task_id, expected_revision=task.revision
+            )
+            return project
+        profiles = self.gateway.specialists(charter)
+        reviewer = self.selector.select(
+            task,
+            charter,
+            profiles,
+            author=author,
+            independent=True,
+        )
+        if reviewer is None:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "A distinct Authority-qualified reviewer is unavailable.",
+            )
+        artifact_digest = task.artifact_digest
+        if artifact_digest is None:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "Author artifact evidence is missing.",
+            )
+        review_task_id = (
+            f"{task.task_id}:review:r{task.revision}:"
+            f"{artifact_digest[:16]}"
+        )
+        plan = self.gateway.prepare(
+            task,
+            charter,
+            reviewer,
+            task_id=review_task_id,
+            role="independent reviewer",
+            artifact_revision_digest=artifact_digest,
+            review_instructions=(
+                "Review the exact bound artifact and evidence revision.",
+                "Return success only when every charter review criterion passes.",
+                "Do not approve your own session or attempt.",
+            ),
+        )
+        claimed = self.repository.claim_review(
+            task.task_id,
+            expected_revision=task.revision,
+            plan=asdict(plan),
+        )
+        try:
+            self.gateway.reserve(plan)
+            self.repository.transition_review(
+                plan.authority_attempt_id,
+                expected_state="LAUNCH_CLAIMED",
+                target_state="EXECUTION_STARTED",
+            )
+            self._recheck_review(claimed, artifact_digest)
+            result = self.gateway.execute(plan)
+        except BaseException as error:
+            try:
+                self.repository.transition_review(
+                    plan.authority_attempt_id,
+                    expected_state="EXECUTION_STARTED",
+                    target_state="UNCERTAIN",
+                )
+            except PermissionError:
+                pass
+            return self._pause(
+                self.repository.project(project.project_id),
+                ExecutiveState.BLOCKED,
+                f"Independent review is uncertain: {type(error).__name__}.",
+            )
+        disposition = self.repository.accept_review_completion(
+            task.task_id,
+            expected_revision=claimed.revision,
+            result=asdict(result),
+        )
+        self.repository.insert_memory(
+            MemoryRecord(
+                new_id("memory"),
+                task.project_id,
+                task.charter_revision,
+                task.task_id,
+                task.stage_id,
+                "OUTCOME",
+                "VERIFIED",
+                "authenticated independent review",
+                disposition.result_disposition or "",
+                True,
+                (
+                    result.authority_attempt_id,
+                    result.completion_digest,
+                    result.artifact_digest,
+                ),
+                None,
+                utc_now(),
+            )
+        )
+        if disposition.status in {
+            TaskStatus.REPAIR_REQUIRED,
+            TaskStatus.FAILED,
+        }:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                disposition.result_disposition
+                or "Independent review requires repair.",
+            )
+        return project
+
+    def _reconcile_author(
+        self,
+        project: ProjectRecord,
+        charter: ProjectCharter,
+        task: ExecutiveTask,
+    ) -> ProjectRecord:
+        if task.authority_attempt_id is None:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "In-flight task has no Authority attempt binding.",
+            )
+        record = self.repository.execution_attempt(
+            task.authority_attempt_id
+        )
+        plan = self.gateway.plan_from_record(record)
+        completion = self.gateway.reconcile(plan)
+        if completion is None:
+            state = self.gateway.attempt_state(plan.authority_attempt_id)
+            if (
+                state == "RESERVED"
+                and task.status
+                in {
+                    TaskStatus.LAUNCH_CLAIMED,
+                    TaskStatus.EXECUTION_STARTED,
+                }
+            ):
+                current = task
+                if current.status == TaskStatus.LAUNCH_CLAIMED:
+                    try:
+                        current = self.repository.transition_execution(
+                            current.task_id,
+                            expected_revision=current.revision,
+                            expected_status=TaskStatus.LAUNCH_CLAIMED,
+                            target_status=TaskStatus.EXECUTION_STARTED,
+                            attempt_state="RESERVED",
+                        )
+                    except PermissionError:
+                        return self.repository.project(
+                            project.project_id
+                        )
+                profiles = self.gateway.specialists(charter)
+                author = next(
+                    (
+                        item
+                        for item in profiles
+                        if item.provider_id == current.provider_id
+                        and item.model_id == current.model_id
+                        and item.session_id == current.session_id
+                    ),
+                    None,
+                )
+                if author is None:
+                    return self._pause(
+                        project,
+                        ExecutiveState.BLOCKED,
+                        "The claimed Authority provider is no longer qualified.",
+                    )
+                self._recheck_launch(current, charter, author)
+                try:
+                    running = self.repository.transition_execution(
+                        current.task_id,
+                        expected_revision=current.revision,
+                        expected_status=TaskStatus.EXECUTION_STARTED,
+                        target_status=TaskStatus.RUNNING,
+                        attempt_state="EXECUTION_STARTED",
+                    )
+                except PermissionError:
+                    return self.repository.project(project.project_id)
+                try:
+                    completion = self.gateway.execute(plan)
+                except BaseException:
+                    self.repository.mark_execution_uncertain(
+                        running.task_id,
+                        expected_revision=running.revision,
+                        reason="Authority reconciliation required after launch",
+                    )
+                    return self._pause(
+                        project,
+                        ExecutiveState.BLOCKED,
+                        "Provider execution is uncertain and not retry-safe.",
+                    )
+                task = running
+            else:
+                if task.status != TaskStatus.UNCERTAIN:
+                    try:
+                        self.repository.mark_execution_uncertain(
+                            task.task_id,
+                            expected_revision=task.revision,
+                            reason="Authority completion is not yet authenticated",
+                        )
+                    except PermissionError:
+                        pass
+                return self._pause(
+                    project,
+                    ExecutiveState.BLOCKED,
+                    "Claimed execution awaits Authority reconciliation; no retry was created.",
+                )
+        imported = self.repository.accept_author_completion(
+            task.task_id,
+            expected_revision=task.revision,
+            result=asdict(completion),
+        )
+        if imported.status == TaskStatus.CANCELED:
+            self._record_author_evidence(
+                imported, completion.completion_digest
+            )
+            return self.repository.project(project.project_id)
+        profiles = self.gateway.specialists(charter)
+        author = next(
+            (
+                item
+                for item in profiles
+                if item.provider_id == imported.provider_id
+                and item.model_id == imported.model_id
+                and item.session_id == imported.session_id
+            ),
+            None,
+        )
+        if author is None:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "Completed provider identity is no longer Authority-qualified.",
+            )
+        self._record_author_evidence(
+            imported, completion.completion_digest
+        )
+        return self._review(project, charter, imported, author)
+
+    def _reconcile_review(
+        self,
+        project: ProjectRecord,
+        charter: ProjectCharter,
+        task: ExecutiveTask,
+    ) -> ProjectRecord:
+        if task.review_attempt_id is None:
+            return project
+        review = self.repository.review(task.review_attempt_id)
+        plan = self.gateway.plan_from_record(review["plan"])
+        completion = self.gateway.reconcile(plan)
+        if completion is None:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                "Independent review awaits Authority reconciliation.",
+            )
+        disposition = self.repository.accept_review_completion(
+            task.task_id,
+            expected_revision=task.revision,
+            result=asdict(completion),
+        )
+        if disposition.status != TaskStatus.COMPLETED:
+            return self._pause(
+                project,
+                ExecutiveState.BLOCKED,
+                disposition.result_disposition
+                or "Independent review requires repair.",
+            )
+        return project
+
+    def _recheck_launch(
+        self,
+        task: ExecutiveTask,
+        charter: ProjectCharter,
+        specialist: SpecialistProfile,
+    ) -> None:
+        project = self.repository.project(task.project_id)
+        durable_task = self.repository.task(task.task_id)
+        durable_charter = self._active_charter(project)
+        approval = self._active_charter_approval(durable_charter)
+        if (
+            durable_task.revision != task.revision
+            or durable_task.status != task.status
+            or approval.revoked_at is not None
+            or durable_charter.charter_id != charter.charter_id
+        ):
+            raise PermissionError("launch authority changed before execution")
+        action = TrustedActionClassifier().classify(
+            durable_task, durable_charter, specialist
+        )
+        decision = self.evaluator.evaluate(
+            project,
+            durable_charter,
+            action,
+            tuple(
+                self.repository.approvals(
+                    project.project_id, durable_charter.revision
+                )
+            ),
+        )
+        if decision.outcome not in {"ALLOWED", "ALLOWED_WITHIN_LIMIT"}:
+            raise PermissionError("launch authority was revoked or changed")
+
+    def _recheck_review(
+        self,
+        task: ExecutiveTask,
+        artifact_digest: str,
+    ) -> None:
+        project = self.repository.project(task.project_id)
+        current = self.repository.task(task.task_id)
+        charter = self._active_charter(project)
+        approval = self._active_charter_approval(charter)
+        if (
+            project.state == ExecutiveState.CANCELED
+            or current.status != TaskStatus.REVIEW_REQUIRED
+            or current.artifact_digest != artifact_digest
+            or approval.revoked_at is not None
+        ):
+            raise PermissionError("review authority changed before execution")
 
     def _active_charter(self, project: ProjectRecord) -> ProjectCharter:
         if project.active_charter_id is None:
@@ -247,12 +651,62 @@ class ExecutiveRuntime:
             raise PermissionError("active charter binding is invalid")
         return charter
 
+    def _active_charter_approval(
+        self, charter: ProjectCharter
+    ) -> ApprovalRecord:
+        approval_id = charter.founder_approval_record_id
+        if approval_id is None:
+            raise PermissionError("active charter approval is missing")
+        approvals = self.repository.approvals(
+            charter.project_id, charter.revision
+        )
+        approval = next(
+            (
+                item
+                for item in approvals
+                if item.approval_id == approval_id
+            ),
+            None,
+        )
+        if approval is None:
+            raise PermissionError("active charter approval is unavailable")
+        return approval
+
+    def _record_author_evidence(
+        self,
+        task: ExecutiveTask,
+        completion_digest: str,
+    ) -> None:
+        self.repository.insert_memory(
+            MemoryRecord(
+                new_id("memory"),
+                task.project_id,
+                task.charter_revision,
+                task.task_id,
+                task.stage_id,
+                "EVIDENCE",
+                "VERIFIED",
+                "authenticated Authority completion",
+                "KeeperAuthority completed the bound provider attempt.",
+                True,
+                (
+                    task.authority_attempt_id or "",
+                    completion_digest,
+                    task.artifact_digest or "",
+                ),
+                None,
+                utc_now(),
+            )
+        )
+
     @staticmethod
     def _next_candidate(
         tasks: tuple[ExecutiveTask, ...],
     ) -> ExecutiveTask | None:
         completed = {
-            item.task_id for item in tasks if item.status == TaskStatus.COMPLETED
+            item.task_id
+            for item in tasks
+            if item.status == TaskStatus.COMPLETED
         }
         for task in tasks:
             if task.status in {
@@ -271,9 +725,16 @@ class ExecutiveRuntime:
         state: ExecutiveState,
         reason: str,
     ) -> ProjectRecord:
+        if project.state == ExecutiveState.CANCELED:
+            return project
         try:
             paused = transition_project(project, state, reason)
         except PermissionError:
-            paused = replace(project, state=state.value, pause_reason=reason, updated_at=utc_now())
+            paused = replace(
+                project,
+                state=state.value,
+                pause_reason=reason,
+                updated_at=utc_now(),
+            )
         self.repository.save_project(paused)
         return paused

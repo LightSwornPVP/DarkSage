@@ -451,6 +451,11 @@ class ExecutiveTask(StrictRecord):
     result_disposition: str | None
     created_at: str
     updated_at: str
+    revision: int = 1
+    authority_attempt_id: str | None = None
+    artifact_digest: str | None = None
+    review_attempt_id: str | None = None
+    late_result: bool = False
 
     FIELDS = frozenset(
         {
@@ -461,7 +466,8 @@ class ExecutiveTask(StrictRecord):
             "authority_category", "inputs", "expected_outputs",
             "evidence_requirements", "review_requirements", "retry_count",
             "max_retries", "attempt_history", "result_disposition", "created_at",
-            "updated_at",
+            "updated_at", "revision", "authority_attempt_id", "artifact_digest",
+            "review_attempt_id", "late_result",
         }
     )
     TUPLE_FIELDS = (
@@ -475,12 +481,23 @@ class ExecutiveTask(StrictRecord):
         ActionCategory(self.authority_category)
         if self.retry_count < 0 or self.max_retries < 0:
             raise ValueError("retry counts cannot be negative")
+        if self.revision < 1:
+            raise ValueError("task revision must be positive")
         validate_timestamp(self.created_at, "created_at")
         validate_timestamp(self.updated_at, "updated_at")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ExecutiveTask:
-        data = cls._validated_data(value)
+        normalized = dict(value)
+        for key, default in {
+            "revision": 1,
+            "authority_attempt_id": None,
+            "artifact_digest": None,
+            "review_attempt_id": None,
+            "late_result": False,
+        }.items():
+            normalized.setdefault(key, default)
+        data = cls._validated_data(normalized)
         for key in cls.TUPLE_FIELDS:
             data[key] = tuple(data[key])
         return cls(**data)

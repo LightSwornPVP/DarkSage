@@ -24,7 +24,7 @@ from tests.keeper.executive.test_intake_charters import approved_project
 def profile(
     capability: str,
     *,
-    provider: str = "mock",
+    provider: str = "codex",
     identity: str = "author",
     qualified: bool = True,
     cost: int = 0,
@@ -83,8 +83,8 @@ def test_selector_uses_qualification_constraints_and_cost(tmp_path: Path) -> Non
     charter, task, _ = setup_task(tmp_path)
     candidates = (
         profile(task.required_capabilities[0], provider="expensive", cost=3),
-        profile(task.required_capabilities[0], provider="mock", cost=0),
-        profile(task.required_capabilities[0], provider="mock", qualified=False),
+        profile(task.required_capabilities[0], provider="codex", cost=0),
+        profile(task.required_capabilities[0], provider="codex", qualified=False),
     )
     selected = SpecialistSelector().select(task, charter, candidates)
     assert selected is not None

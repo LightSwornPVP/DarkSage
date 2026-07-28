@@ -74,16 +74,20 @@ PROJECT_TRANSITIONS: dict[ExecutiveState, frozenset[ExecutiveState]] = {
 
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PROPOSED: frozenset({TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.CANCELED, TaskStatus.SKIPPED}),
-    TaskStatus.READY: frozenset({TaskStatus.ASSIGNED, TaskStatus.BLOCKED, TaskStatus.CANCELED}),
+    TaskStatus.READY: frozenset({TaskStatus.ASSIGNED, TaskStatus.LAUNCH_CLAIMED, TaskStatus.BLOCKED, TaskStatus.CANCELED}),
     TaskStatus.ASSIGNED: frozenset({TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.BLOCKED, TaskStatus.CANCELED}),
-    TaskStatus.RUNNING: frozenset({TaskStatus.REVIEW_REQUIRED, TaskStatus.WAITING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
+    TaskStatus.LAUNCH_CLAIMED: frozenset({TaskStatus.EXECUTION_STARTED, TaskStatus.CANCELED, TaskStatus.UNCERTAIN}),
+    TaskStatus.EXECUTION_STARTED: frozenset({TaskStatus.RUNNING, TaskStatus.COMPLETION_PENDING, TaskStatus.CANCELED, TaskStatus.UNCERTAIN}),
+    TaskStatus.RUNNING: frozenset({TaskStatus.COMPLETION_PENDING, TaskStatus.REVIEW_REQUIRED, TaskStatus.WAITING, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELED, TaskStatus.UNCERTAIN}),
+    TaskStatus.COMPLETION_PENDING: frozenset({TaskStatus.REVIEW_REQUIRED, TaskStatus.CANCELED, TaskStatus.UNCERTAIN}),
     TaskStatus.WAITING: frozenset({TaskStatus.READY, TaskStatus.ASSIGNED, TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.CANCELED}),
     TaskStatus.REVIEW_REQUIRED: frozenset({TaskStatus.COMPLETED, TaskStatus.REPAIR_REQUIRED, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.REPAIR_REQUIRED: frozenset({TaskStatus.ASSIGNED, TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
+    TaskStatus.REPAIR_REQUIRED: frozenset({TaskStatus.ASSIGNED, TaskStatus.LAUNCH_CLAIMED, TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.COMPLETED: frozenset(),
     TaskStatus.BLOCKED: frozenset({TaskStatus.READY, TaskStatus.CANCELED, TaskStatus.FAILED}),
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELED: frozenset(),
+    TaskStatus.UNCERTAIN: frozenset({TaskStatus.REVIEW_REQUIRED, TaskStatus.CANCELED}),
     TaskStatus.SKIPPED: frozenset(),
 }
 
@@ -114,4 +118,9 @@ def transition_task(task: ExecutiveTask, target: TaskStatus) -> ExecutiveTask:
     current = TaskStatus(task.status)
     if target not in TASK_TRANSITIONS[current]:
         raise PermissionError(f"invalid task transition: {current} -> {target}")
-    return replace(task, status=target.value, updated_at=utc_now())
+    return replace(
+        task,
+        status=target.value,
+        revision=task.revision + 1,
+        updated_at=utc_now(),
+    )

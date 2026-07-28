@@ -9,7 +9,7 @@ from keeper.executive.authority import AuthorityEvaluator
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import ActionCategory, TaskStatus
 from keeper.executive.intake import ConversationIntake
-from keeper.executive.models import ProposedAction, SpecialistProfile
+from keeper.executive.models import ProposedAction
 from keeper.executive.planning import WorkflowPlanner
 from keeper.executive.runtime import ExecutiveRuntime
 from keeper.executive.service import KeeperExecutive
@@ -18,7 +18,10 @@ from keeper.executive.specialists import (
     SpecialistResult,
 )
 from tests.keeper.executive.test_intake_charters import approved_project
-from tests.keeper.executive.test_runtime import RuntimeGateway, profiles
+from tests.keeper.executive.authority_semantics import (
+    SemanticAuthorityTransport,
+    semantic_gateway,
+)
 from tests.keeper.executive.test_specialists import FakeGateway, profile, result_for
 
 
@@ -34,7 +37,7 @@ def test_scenario_a_software_full_delegation_repair_and_completion(tmp_path: Pat
         founder_revisions={
             "success_criteria": ("all acceptance checks pass",),
             "target_audience": "personal users",
-            "approved_providers": ("mock",),
+            "approved_providers": ("codex", "claude"),
             "approved_tools": ("filesystem",),
         },
     )
@@ -48,14 +51,18 @@ def test_scenario_a_software_full_delegation_repair_and_completion(tmp_path: Pat
         source_interaction_id=interaction_id,
     )
     active = service.activate(approved)
-    gateway = RuntimeGateway()
-    runtime = ExecutiveRuntime(executive.repository, gateway, profiles())
+    gateway, authority = semantic_gateway(tmp_path)
+    runtime = ExecutiveRuntime(executive.repository, gateway)
     for _ in range(20):
         active = runtime.progress(active.project_id)
         if active.state == "COMPLETED":
             break
     assert active.state == "COMPLETED"
-    assert any(task.retry_count == 1 for task in executive.repository.tasks(active.project_id))
+    assert all(
+        task.authority_attempt_id
+        for task in executive.repository.tasks(active.project_id)
+    )
+    assert authority.execution_calls
     assert executive.repository.decisions(active.project_id)
     assert executive.repository.memories(active.project_id)
 
@@ -69,7 +76,7 @@ def test_scenario_b_non_software_workflow(tmp_path: Path) -> None:
         founder_revisions={
             "success_criteria": ("all material claims are sourced",),
             "target_audience": "city planners",
-            "approved_providers": ("mock",),
+            "approved_providers": ("codex", "claude"),
             "approved_tools": ("filesystem",),
             "workspaces": (str(tmp_path),),
             "delegation_mode": "FULL_DELEGATION",
@@ -105,7 +112,7 @@ def test_scenario_c_authority_exceeded_pauses_or_denies(
     _, project, charter = approved_project(tmp_path)
     action = ProposedAction(
         "outside", project.project_id, charter.revision, category.value, "external",
-        "mock", "filesystem", str(tmp_path), (charter.deliverables[0],), 10, False,
+        "codex", "filesystem", str(tmp_path), (charter.deliverables[0],), 10, False,
         "HIGH", "INTERNAL", True,
     )
     decision = AuthorityEvaluator().evaluate(project, charter, action)
@@ -114,13 +121,13 @@ def test_scenario_c_authority_exceeded_pauses_or_denies(
 
 def test_scenario_d_revocation_stops_new_launches(tmp_path: Path) -> None:
     service, project, _ = approved_project(tmp_path)
-    gateway = RuntimeGateway()
-    runtime = ExecutiveRuntime(service.repository, gateway, profiles())
+    gateway, authority = semantic_gateway(tmp_path)
+    runtime = ExecutiveRuntime(service.repository, gateway)
     runtime.progress(project.project_id)
     runtime.revoke_delegation(project.project_id)
-    count = len(gateway.calls)
+    count = len(authority.execution_calls)
     runtime.progress(project.project_id)
-    assert len(gateway.calls) == count
+    assert len(authority.execution_calls) == count
 
 
 def test_scenario_e_charter_expansion_requires_new_approval(tmp_path: Path) -> None:
@@ -148,8 +155,9 @@ def test_scenario_f_specialist_overreach_is_rejected(tmp_path: Path) -> None:
 
 def test_scenario_g_restart_does_not_duplicate_completed_work(tmp_path: Path) -> None:
     service, project, _ = approved_project(tmp_path)
-    gateway = RuntimeGateway()
-    runtime = ExecutiveRuntime(service.repository, gateway, profiles())
+    authority = SemanticAuthorityTransport()
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
     runtime.progress(project.project_id)
     runtime.progress(project.project_id)
     completed_before = {
@@ -157,7 +165,12 @@ def test_scenario_g_restart_does_not_duplicate_completed_work(tmp_path: Path) ->
         if task.status == "COMPLETED"
     }
     reopened = KeeperExecutive(service.repository.store.path)
-    ExecutiveRuntime(reopened.repository, gateway, profiles()).progress(project.project_id)
+    reopened_gateway, _ = semantic_gateway(
+        tmp_path, transport=authority
+    )
+    ExecutiveRuntime(
+        reopened.repository, reopened_gateway
+    ).progress(project.project_id)
     completed_after = [
         task.task_id for task in reopened.repository.tasks(project.project_id)
         if task.status == "COMPLETED"
@@ -168,14 +181,10 @@ def test_scenario_g_restart_does_not_duplicate_completed_work(tmp_path: Path) ->
 
 def test_scenario_h_missing_provider_or_credential_waits(tmp_path: Path) -> None:
     service, project, _ = approved_project(tmp_path)
-    runtime = ExecutiveRuntime(service.repository, RuntimeGateway(), ())
+    authority = SemanticAuthorityTransport()
+    for registration in authority.registrations.values():
+        registration["service_state"] = "REVOKED"
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
     runtime.progress(project.project_id)
     assert runtime.progress(project.project_id).state == "WAITING_FOR_PROVIDER"
-
-    service2, project2, _ = approved_project(tmp_path / "credential")
-    unavailable: SpecialistProfile = replace(
-        profiles()[0], credential_available=False
-    )
-    runtime2 = ExecutiveRuntime(service2.repository, RuntimeGateway(), (unavailable,))
-    runtime2.progress(project2.project_id)
-    assert runtime2.progress(project2.project_id).state == "WAITING_FOR_CREDENTIAL"

@@ -31,7 +31,7 @@ def approved_project(
         replacements={
             "success_criteria": ("users can add and complete items",),
             "target_audience": "personal users",
-            "approved_providers": ("mock",),
+            "approved_providers": ("codex", "claude"),
             "approved_tools": ("filesystem",),
         },
     )

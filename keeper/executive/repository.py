@@ -15,6 +15,7 @@ from keeper.executive.enums import (
     ApprovalKind,
     CharterStatus,
     ExecutiveState,
+    TaskStatus,
 )
 from keeper.executive.models import (
     ApprovalRecord,
@@ -28,7 +29,7 @@ from keeper.executive.models import (
     WorkflowRecord,
     utc_now,
 )
-from keeper.executive.state import PROJECT_TRANSITIONS
+from keeper.executive.state import PROJECT_TRANSITIONS, TASK_TRANSITIONS
 
 
 class ExecutiveRepository:
@@ -311,9 +312,652 @@ class ExecutiveRepository:
             if item.get("project_id") == project_id
         ]
 
-    def save_task(self, task: ExecutiveTask) -> None:
-        self.store.upsert("executive_tasks", task.task_id, task.to_dict())
-        self._relate(task.project_id, "workflow", task.workflow_id, "task", task.task_id)
+    def save_task(
+        self,
+        task: ExecutiveTask,
+        *,
+        expected: ExecutiveTask | None = None,
+    ) -> None:
+        existing = self.store.get("executive_tasks", task.task_id)
+        if existing is None:
+            if task.status != TaskStatus.PROPOSED or task.revision != 1:
+                raise PermissionError(
+                    "new tasks must begin proposed at revision one"
+                )
+            self._validate_task_parentage(task)
+            self.store.insert_immutable(
+                "executive_tasks", task.task_id, task.to_dict()
+            )
+            self._relate(
+                task.project_id,
+                "workflow",
+                task.workflow_id,
+                "task",
+                task.task_id,
+            )
+            return
+        prior = ExecutiveTask.from_dict(existing)
+        if expected is None or prior != expected:
+            raise PermissionError("task write is stale or lacks exact CAS")
+        current = TaskStatus(prior.status)
+        target = TaskStatus(task.status)
+        if (
+            task.revision != prior.revision + 1
+            or target not in TASK_TRANSITIONS[current]
+            or task.project_id != prior.project_id
+            or task.charter_id != prior.charter_id
+            or task.charter_revision != prior.charter_revision
+            or task.workflow_id != prior.workflow_id
+        ):
+            raise PermissionError(
+                f"repository rejected task transition: {current} -> {target}"
+            )
+        self._cas_entity(
+            "executive_tasks",
+            task.task_id,
+            expected.to_dict(),
+            task.to_dict(),
+        )
+
+    def claim_execution(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        plan: dict[str, Any],
+    ) -> ExecutiveTask:
+        """Give one worker a durable attempt binding before Authority launch."""
+        attempt_id = str(plan["authority_attempt_id"])
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            if (
+                task.revision != expected_revision
+                or task.status
+                not in {TaskStatus.READY, TaskStatus.REPAIR_REQUIRED}
+                or task.authority_attempt_id is not None
+                or plan.get("project_id") != task.project_id
+                or plan.get("charter_id") != task.charter_id
+                or plan.get("charter_revision") != task.charter_revision
+                or plan.get("workflow_id") != task.workflow_id
+                or plan.get("task_id") != task.task_id
+                or plan.get("task_revision") != task.revision
+            ):
+                raise PermissionError("task execution claim is stale or misbound")
+            project_payload, _ = self._entity_in_transaction(
+                connection, "executive_projects", task.project_id
+            )
+            project = ProjectRecord.from_dict(project_payload)
+            charter_payload, _ = self._entity_in_transaction(
+                connection, "project_charters", task.charter_id
+            )
+            charter = ProjectCharter.from_dict(charter_payload)
+            if (
+                project.state != ExecutiveState.EXECUTING
+                or project.active_charter_id != task.charter_id
+                or project.active_charter_revision != task.charter_revision
+                or charter.status != CharterStatus.ACTIVE
+            ):
+                raise PermissionError("project is not launchable")
+            claimed = replace(
+                task,
+                provider_id=str(plan["provider_id"]),
+                model_id=str(plan["model_id"]),
+                session_id=str(plan["session_id"]),
+                status=TaskStatus.LAUNCH_CLAIMED.value,
+                authority_attempt_id=attempt_id,
+                revision=task.revision + 1,
+                attempt_history=task.attempt_history
+                + (
+                    {
+                        "authority_attempt_id": attempt_id,
+                        "state": "LAUNCH_CLAIMED",
+                        "recorded_at": timestamp,
+                    },
+                ),
+                updated_at=timestamp,
+            )
+            attempt_record = {
+                **plan,
+                "state": "LAUNCH_CLAIMED",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "completion_digest": None,
+                "artifact_digest": None,
+            }
+            self._insert_entity(
+                connection,
+                "executive_execution_attempts",
+                attempt_id,
+                attempt_record,
+            )
+            self._insert_relation(
+                connection,
+                task.project_id,
+                "task",
+                task.task_id,
+                "authority_attempt",
+                attempt_id,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                claimed.to_dict(),
+            )
+        return claimed
+
+    def transition_execution(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        expected_status: TaskStatus,
+        target_status: TaskStatus,
+        attempt_state: str,
+    ) -> ExecutiveTask:
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            if (
+                task.revision != expected_revision
+                or task.status != expected_status
+                or target_status not in TASK_TRANSITIONS[expected_status]
+                or task.authority_attempt_id is None
+            ):
+                raise PermissionError("execution transition is stale")
+            attempt_payload, attempt_hash = self._entity_in_transaction(
+                connection,
+                "executive_execution_attempts",
+                task.authority_attempt_id,
+            )
+            updated_task = replace(
+                task,
+                status=target_status.value,
+                revision=task.revision + 1,
+                updated_at=timestamp,
+            )
+            updated_attempt = {
+                **attempt_payload,
+                "state": attempt_state,
+                "updated_at": timestamp,
+            }
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                updated_task.to_dict(),
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_execution_attempts",
+                task.authority_attempt_id,
+                attempt_hash,
+                updated_attempt,
+            )
+        return updated_task
+
+    def accept_author_completion(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> ExecutiveTask:
+        """Import one authenticated Authority completion without reviving cancel."""
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            project_payload, _ = self._entity_in_transaction(
+                connection, "executive_projects", task.project_id
+            )
+            project = ProjectRecord.from_dict(project_payload)
+            attempt_id = str(result.get("authority_attempt_id", ""))
+            if (
+                task.authority_attempt_id != attempt_id
+                or result.get("task_id") != task.task_id
+                or result.get("authenticated") is not True
+            ):
+                raise PermissionError("completion does not bind to the task attempt")
+            attempt_payload, attempt_hash = self._entity_in_transaction(
+                connection, "executive_execution_attempts", attempt_id
+            )
+            late = (
+                project.state == ExecutiveState.CANCELED
+                or task.status == TaskStatus.CANCELED
+            )
+            if late:
+                late_id = f"late-result:{attempt_id}"
+                late_payload = {
+                    **result,
+                    "recorded_at": timestamp,
+                    "task_state": task.status,
+                    "project_state": project.state,
+                }
+                try:
+                    self._insert_entity(
+                        connection,
+                        "executive_late_results",
+                        late_id,
+                        late_payload,
+                    )
+                except PermissionError:
+                    pass
+                recorded = replace(
+                    task,
+                    late_result=True,
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_tasks",
+                    task.task_id,
+                    task_hash,
+                    recorded.to_dict(),
+                )
+                return recorded
+            if (
+                task.revision != expected_revision
+                or task.status
+                not in {
+                    TaskStatus.EXECUTION_STARTED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.COMPLETION_PENDING,
+                    TaskStatus.UNCERTAIN,
+                }
+            ):
+                raise PermissionError("completion import is stale")
+            artifact_digest = str(result["artifact_digest"])
+            completed_attempt = {
+                **attempt_payload,
+                "state": "COMPLETED",
+                "completion_digest": result["completion_digest"],
+                "artifact_digest": artifact_digest,
+                "updated_at": timestamp,
+            }
+            imported = replace(
+                task,
+                status=TaskStatus.REVIEW_REQUIRED.value,
+                artifact_digest=artifact_digest,
+                revision=task.revision + 1,
+                result_disposition="AUTHORITY_COMPLETED",
+                attempt_history=task.attempt_history
+                + (
+                    {
+                        "authority_attempt_id": attempt_id,
+                        "state": "COMPLETED",
+                        "artifact_digest": artifact_digest,
+                        "completion_digest": result["completion_digest"],
+                        "recorded_at": timestamp,
+                    },
+                ),
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_execution_attempts",
+                attempt_id,
+                attempt_hash,
+                completed_attempt,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                imported.to_dict(),
+            )
+        return imported
+
+    def mark_execution_uncertain(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        reason: str,
+    ) -> ExecutiveTask:
+        task = self.task(task_id)
+        if task.revision != expected_revision:
+            raise PermissionError("uncertain execution write is stale")
+        if TaskStatus.UNCERTAIN not in TASK_TRANSITIONS[TaskStatus(task.status)]:
+            raise PermissionError("task cannot become uncertain")
+        uncertain = replace(
+            task,
+            status=TaskStatus.UNCERTAIN.value,
+            result_disposition=reason,
+            revision=task.revision + 1,
+            updated_at=utc_now(),
+        )
+        self.save_task(uncertain, expected=task)
+        return uncertain
+
+    def execution_attempt(self, attempt_id: str) -> dict[str, Any]:
+        return self._required("executive_execution_attempts", attempt_id)
+
+    def claim_review(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        plan: dict[str, Any],
+    ) -> ExecutiveTask:
+        timestamp = utc_now()
+        review_attempt_id = str(plan["authority_attempt_id"])
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            if (
+                task.revision != expected_revision
+                or task.status != TaskStatus.REVIEW_REQUIRED
+                or task.artifact_digest is None
+                or task.review_attempt_id is not None
+                or plan.get("artifact_revision_digest")
+                != task.artifact_digest
+                or plan.get("project_id") != task.project_id
+                or plan.get("charter_id") != task.charter_id
+                or plan.get("charter_revision") != task.charter_revision
+                or plan.get("workflow_id") != task.workflow_id
+                or plan.get("session_id") == task.session_id
+                or review_attempt_id == task.authority_attempt_id
+            ):
+                raise PermissionError("review claim is stale or not independent")
+            review_record = {
+                "review_attempt_id": review_attempt_id,
+                "review_task_id": plan["task_id"],
+                "project_id": task.project_id,
+                "charter_id": task.charter_id,
+                "charter_revision": task.charter_revision,
+                "workflow_id": task.workflow_id,
+                "task_id": task.task_id,
+                "task_revision": task.revision,
+                "artifact_revision_digest": task.artifact_digest,
+                "author_attempt_id": task.authority_attempt_id,
+                "author_provider_id": task.provider_id,
+                "author_session_id": task.session_id,
+                "reviewer_provider_id": plan["provider_id"],
+                "reviewer_model_id": plan["model_id"],
+                "reviewer_session_id": plan["session_id"],
+                "reviewer_registration_id": plan["registration_id"],
+                "reviewer_qualification_id": plan["qualification_id"],
+                "state": "LAUNCH_CLAIMED",
+                "findings_digest": None,
+                "disposition": None,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "plan": plan,
+            }
+            claimed = replace(
+                task,
+                review_attempt_id=review_attempt_id,
+                revision=task.revision + 1,
+                updated_at=timestamp,
+            )
+            self._insert_entity(
+                connection,
+                "executive_reviews",
+                review_attempt_id,
+                review_record,
+            )
+            self._insert_relation(
+                connection,
+                task.project_id,
+                "task",
+                task.task_id,
+                "review_attempt",
+                review_attempt_id,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                claimed.to_dict(),
+            )
+        return claimed
+
+    def transition_review(
+        self,
+        review_attempt_id: str,
+        *,
+        expected_state: str,
+        target_state: str,
+    ) -> None:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            payload, payload_hash = self._entity_in_transaction(
+                connection, "executive_reviews", review_attempt_id
+            )
+            if payload.get("state") != expected_state:
+                raise PermissionError("review transition is stale")
+            self._update_entity_cas(
+                connection,
+                "executive_reviews",
+                review_attempt_id,
+                payload_hash,
+                {
+                    **payload,
+                    "state": target_state,
+                    "updated_at": utc_now(),
+                },
+            )
+
+    def accept_review_completion(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> ExecutiveTask:
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            if (
+                task.revision != expected_revision
+                or task.status != TaskStatus.REVIEW_REQUIRED
+                or task.review_attempt_id is None
+                or result.get("authority_attempt_id")
+                != task.review_attempt_id
+                or result.get("authenticated") is not True
+            ):
+                raise PermissionError("review completion import is stale")
+            review_payload, review_hash = self._entity_in_transaction(
+                connection,
+                "executive_reviews",
+                task.review_attempt_id,
+            )
+            if (
+                review_payload.get("state")
+                not in {"EXECUTION_STARTED", "COMPLETION_PENDING", "UNCERTAIN"}
+                or result.get("task_id")
+                != review_payload.get("review_task_id")
+                or result.get("session_id")
+                != review_payload.get("reviewer_session_id")
+                or result.get("registration_id")
+                != review_payload.get("reviewer_registration_id")
+                or review_payload.get("reviewer_session_id")
+                == review_payload.get("author_session_id")
+                or review_payload.get("review_attempt_id")
+                == review_payload.get("author_attempt_id")
+                or review_payload.get("artifact_revision_digest")
+                != task.artifact_digest
+            ):
+                raise PermissionError(
+                    "review completion independence or artifact binding is invalid"
+                )
+            accepted = result.get("normalized_result") == "completed"
+            review_updated = {
+                **review_payload,
+                "state": "COMPLETED",
+                "findings_digest": result["artifact_digest"],
+                "completion_digest": result["completion_digest"],
+                "disposition": "ACCEPTED" if accepted else "REPAIR_REQUIRED",
+                "updated_at": timestamp,
+            }
+            if accepted:
+                disposition = replace(
+                    task,
+                    status=TaskStatus.COMPLETED.value,
+                    result_disposition="INDEPENDENT_REVIEW_ACCEPTED",
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+            elif task.retry_count >= task.max_retries:
+                disposition = replace(
+                    task,
+                    status=TaskStatus.FAILED.value,
+                    result_disposition="RETRY_LIMIT_EXCEEDED",
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+            else:
+                disposition = replace(
+                    task,
+                    status=TaskStatus.REPAIR_REQUIRED.value,
+                    provider_id=None,
+                    model_id=None,
+                    session_id=None,
+                    authority_attempt_id=None,
+                    artifact_digest=None,
+                    review_attempt_id=None,
+                    retry_count=task.retry_count + 1,
+                    result_disposition="INDEPENDENT_REVIEW_REPAIR_REQUIRED",
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+            self._update_entity_cas(
+                connection,
+                "executive_reviews",
+                task.review_attempt_id,
+                review_hash,
+                review_updated,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                disposition.to_dict(),
+            )
+        return disposition
+
+    def complete_automated_review(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+    ) -> ExecutiveTask:
+        task = self.task(task_id)
+        if (
+            task.revision != expected_revision
+            or task.status != TaskStatus.REVIEW_REQUIRED
+            or task.artifact_digest is None
+            or any(
+                "independent" in item.casefold()
+                for item in task.review_requirements
+            )
+        ):
+            raise PermissionError("local review cannot complete this task")
+        completed = replace(
+            task,
+            status=TaskStatus.COMPLETED.value,
+            result_disposition="AUTHORITY_EVIDENCE_ACCEPTED",
+            revision=task.revision + 1,
+            updated_at=utc_now(),
+        )
+        self.save_task(completed, expected=task)
+        return completed
+
+    def review(self, review_attempt_id: str) -> dict[str, Any]:
+        return self._required("executive_reviews", review_attempt_id)
+
+    def cancel_project_execution(
+        self, project_id: str
+    ) -> tuple[ProjectRecord, tuple[str, ...]]:
+        timestamp = utc_now()
+        attempt_ids: list[str] = []
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            project_payload, project_hash = self._entity_in_transaction(
+                connection, "executive_projects", project_id
+            )
+            project = ProjectRecord.from_dict(project_payload)
+            if ExecutiveState.CANCELED not in PROJECT_TRANSITIONS[
+                ExecutiveState(project.state)
+            ]:
+                raise PermissionError("project cannot be canceled")
+            canceled_project = replace(
+                project,
+                state=ExecutiveState.CANCELED.value,
+                pause_reason=None,
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_projects",
+                project_id,
+                project_hash,
+                canceled_project.to_dict(),
+            )
+            rows = connection.execute(
+                'SELECT id, payload, payload_hash FROM "executive_tasks"'
+            ).fetchall()
+            for row in rows:
+                serialized = str(row["payload"])
+                if _digest_serialized(serialized) != row["payload_hash"]:
+                    raise RuntimeError(
+                        "stored executive task failed integrity validation"
+                    )
+                payload = json.loads(serialized)
+                if not isinstance(payload, dict) or payload.get(
+                    "project_id"
+                ) != project_id:
+                    continue
+                task = ExecutiveTask.from_dict(payload)
+                if task.status in {
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELED,
+                    TaskStatus.SKIPPED,
+                }:
+                    continue
+                canceled_task = replace(
+                    task,
+                    status=TaskStatus.CANCELED.value,
+                    revision=task.revision + 1,
+                    updated_at=timestamp,
+                )
+                self._update_entity_cas(
+                    connection,
+                    "executive_tasks",
+                    task.task_id,
+                    str(row["payload_hash"]),
+                    canceled_task.to_dict(),
+                )
+                if task.authority_attempt_id:
+                    attempt_ids.append(task.authority_attempt_id)
+        return canceled_project, tuple(attempt_ids)
 
     def task(self, task_id: str) -> ExecutiveTask:
         return ExecutiveTask.from_dict(self._required("executive_tasks", task_id))
@@ -637,6 +1281,24 @@ class ExecutiveRepository:
             self._update_entity_cas(
                 connection, table, identifier, expected_hash, updated
             )
+
+    def _validate_task_parentage(self, task: ExecutiveTask) -> None:
+        project = self.project(task.project_id)
+        workflows = {
+            item.workflow_id: item for item in self.workflows(task.project_id)
+        }
+        workflow = workflows.get(task.workflow_id)
+        if (
+            workflow is None
+            or workflow.project_id != task.project_id
+            or workflow.charter_id != task.charter_id
+            or workflow.charter_revision != task.charter_revision
+            or project.active_charter_id != task.charter_id
+            or project.active_charter_revision != task.charter_revision
+            or task.stage_id
+            not in {stage.stage_id for stage in workflow.stages}
+        ):
+            raise PermissionError("task parent-child ownership is invalid")
 
     @staticmethod
     def _entity_in_transaction(

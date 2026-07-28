@@ -236,4 +236,9 @@ class TaskReadiness:
     def mark_ready(task: ExecutiveTask, readiness: ReadinessResult) -> ExecutiveTask:
         if not readiness.ready:
             raise PermissionError("; ".join(readiness.reasons))
-        return replace(task, status=TaskStatus.READY.value, updated_at=utc_now())
+        return replace(
+            task,
+            status=TaskStatus.READY.value,
+            revision=task.revision + 1,
+            updated_at=utc_now(),
+        )
