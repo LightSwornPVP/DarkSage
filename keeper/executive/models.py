@@ -283,6 +283,103 @@ class ApprovalRecord(StrictRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class FounderApprovalChallenge(StrictRecord):
+    challenge_id: str
+    schema_version: int
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    charter_digest: str
+    approval_action: str
+    nonce: str
+    requested_at: str
+    expires_at: str
+    state: str
+    consumed_event_id: str | None
+
+    FIELDS = frozenset(
+        {
+            "challenge_id",
+            "schema_version",
+            "project_id",
+            "charter_id",
+            "charter_revision",
+            "charter_digest",
+            "approval_action",
+            "nonce",
+            "requested_at",
+            "expires_at",
+            "state",
+            "consumed_event_id",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1 or self.state not in {"PENDING", "CONSUMED"}:
+            raise ValueError("Founder approval challenge is invalid")
+        validate_timestamp(self.requested_at, "requested_at")
+        validate_timestamp(self.expires_at, "expires_at")
+
+    @classmethod
+    def from_dict(
+        cls, value: dict[str, Any]
+    ) -> FounderApprovalChallenge:
+        return cls(**cls._validated_data(value))
+
+
+@dataclass(frozen=True, slots=True)
+class FounderApprovalEvent(StrictRecord):
+    event_id: str
+    schema_version: int
+    authenticated_identity: str
+    authentication_method: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    charter_digest: str
+    approval_action: str
+    explicit_intent: str
+    challenge_id: str
+    challenge_nonce: str
+    confirmed_at: str
+    expires_at: str | None
+
+    FIELDS = frozenset(
+        {
+            "event_id",
+            "schema_version",
+            "authenticated_identity",
+            "authentication_method",
+            "project_id",
+            "charter_id",
+            "charter_revision",
+            "charter_digest",
+            "approval_action",
+            "explicit_intent",
+            "challenge_id",
+            "challenge_nonce",
+            "confirmed_at",
+            "expires_at",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or self.authenticated_identity != "LOCAL_FOUNDER"
+            or self.authentication_method != "LOCAL_FOUNDER_EXPLICIT_CONFIRMATION"
+        ):
+            raise ValueError("Founder approval event is invalid")
+        validate_timestamp(self.confirmed_at, "confirmed_at")
+        if self.expires_at is not None:
+            validate_timestamp(self.expires_at, "expires_at")
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> FounderApprovalEvent:
+        return cls(**cls._validated_data(value))
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedAction(StrictRecord):
     action_id: str
     project_id: str

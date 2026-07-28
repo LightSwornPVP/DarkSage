@@ -9,7 +9,7 @@ from keeper.executive.models import SpecialistProfile
 from keeper.executive.models import utc_now
 from keeper.executive.repository import ExecutiveRepository
 from keeper.executive.planning import TaskReadiness, WorkflowPlanner
-from tests.keeper.executive.test_intake_charters import approved_project
+from tests.keeper.executive.test_intake_charters import approved_project, explicitly_approve
 
 
 def specialist(capability: str) -> SpecialistProfile:
@@ -59,11 +59,7 @@ def test_research_workflow_is_not_software_pipeline(tmp_path: Path) -> None:
         },
     )
     draft = service.draft(created, intake)
-    approved, _ = service.approve(
-        service.propose(draft),
-        approver="Founder",
-        source_interaction_id="m",
-    )
+    approved, _ = explicitly_approve(service, service.propose(draft))
     project = service.activate(approved)
     workflow, _ = WorkflowPlanner(service.repository).generate(project, approved)
     titles = [stage.title for stage in workflow.stages]

@@ -15,6 +15,7 @@ from keeper.executive.authority_gateway import (
     AuthorityBackedSpecialistGateway,
     AuthorityProviderBinding,
 )
+from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.runtime import ExecutiveRuntime
 from keeper.executive.service import KeeperExecutive
 
@@ -192,15 +193,11 @@ def main() -> int:
                 "approved_tools": ("filesystem",),
             },
         )
-        interaction_id = str(
-            executive.repository.conversations(project.project_id)[0][
-                "interaction_id"
-            ]
-        )
-        approved, _ = executive.charters.approve(
-            executive.charters.propose(draft),
-            approver="Founder",
-            source_interaction_id=interaction_id,
+        proposed = executive.charters.propose(draft)
+        challenge = executive.charters.request_approval(proposed)
+        approved, _, _ = executive.charters.confirm_approval(
+            challenge.challenge_id,
+            intent=FounderApprovalIntent.APPROVE_CHARTER,
         )
         active = executive.charters.activate(approved)
         authority = PilotAuthorityTransport()

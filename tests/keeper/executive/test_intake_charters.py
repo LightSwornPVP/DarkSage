@@ -6,6 +6,7 @@ import pytest
 
 from keeper.app.storage import KeeperStore
 from keeper.executive.charters import CharterService
+from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import ProjectCharter, ProjectRecord
 from keeper.executive.models import utc_now
@@ -16,6 +17,18 @@ def service(tmp_path: Path) -> CharterService:
     store = KeeperStore(tmp_path / "keeper.db")
     store.migrate()
     return CharterService(ExecutiveRepository(store))
+
+
+def explicitly_approve(
+    charter_service: CharterService,
+    proposed: ProjectCharter,
+) -> tuple[ProjectCharter, object]:
+    challenge = charter_service.request_approval(proposed)
+    approved, approval, _ = charter_service.confirm_approval(
+        challenge.challenge_id,
+        intent=FounderApprovalIntent.APPROVE_CHARTER,
+    )
+    return approved, approval
 
 
 def approved_project(
@@ -48,9 +61,7 @@ def approved_project(
     )
     draft = charter_service.draft(project, intake)
     proposed = charter_service.propose(draft)
-    approved, _ = charter_service.approve(
-        proposed, approver="Founder", source_interaction_id="message-1"
-    )
+    approved, _ = explicitly_approve(charter_service, proposed)
     active = charter_service.activate(approved)
     return (
         charter_service,

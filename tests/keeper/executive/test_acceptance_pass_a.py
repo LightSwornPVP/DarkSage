@@ -17,7 +17,7 @@ from keeper.executive.specialists import (
     SpecialistOrchestrator,
     SpecialistResult,
 )
-from tests.keeper.executive.test_intake_charters import approved_project
+from tests.keeper.executive.test_intake_charters import approved_project, explicitly_approve
 from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
     semantic_gateway,
@@ -42,14 +42,7 @@ def test_scenario_a_software_full_delegation_repair_and_completion(tmp_path: Pat
         },
     )
     service = executive.charters
-    interaction_id = str(
-        executive.repository.conversations(project.project_id)[0]["interaction_id"]
-    )
-    approved, _ = service.approve(
-        service.propose(draft),
-        approver="Founder",
-        source_interaction_id=interaction_id,
-    )
+    approved, _ = explicitly_approve(service, service.propose(draft))
     active = service.activate(approved)
     gateway, authority = semantic_gateway(tmp_path)
     runtime = ExecutiveRuntime(executive.repository, gateway)
@@ -82,13 +75,8 @@ def test_scenario_b_non_software_workflow(tmp_path: Path) -> None:
             "delegation_mode": "FULL_DELEGATION",
         },
     )
-    interaction_id = str(
-        executive.repository.conversations(project.project_id)[0]["interaction_id"]
-    )
-    approved, _ = executive.charters.approve(
-        executive.charters.propose(draft),
-        approver="Founder",
-        source_interaction_id=interaction_id,
+    approved, _ = explicitly_approve(
+        executive.charters, executive.charters.propose(draft)
     )
     active = executive.charters.activate(approved)
     workflow, _ = WorkflowPlanner(executive.repository).generate(active, approved)

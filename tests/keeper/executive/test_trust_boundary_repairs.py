@@ -10,7 +10,7 @@ from keeper.app.storage import KeeperStore
 from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import ActionCategory, ApprovalKind
-from keeper.executive.enums import ExecutiveState
+from keeper.executive.enums import ExecutiveState, FounderApprovalIntent
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import (
     ProjectCharter,
@@ -21,7 +21,7 @@ from keeper.executive.models import (
 )
 from keeper.executive.planning import WorkflowPlanner
 from keeper.executive.state import transition_project
-from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.repository import ExecutiveRepository, charter_approval_digest
 
 
 def _proposed(
@@ -69,6 +69,18 @@ def _proposed(
     return service, project, service.propose(service.draft(project, intake))
 
 
+def _approve(
+    service: CharterService,
+    proposed: ProjectCharter,
+) -> tuple[ProjectCharter, object]:
+    challenge = service.request_approval(proposed)
+    approved, approval, _ = service.confirm_approval(
+        challenge.challenge_id,
+        intent=FounderApprovalIntent.APPROVE_CHARTER,
+    )
+    return approved, approval
+
+
 def test_direct_or_caller_constructed_approved_charter_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -91,7 +103,7 @@ def test_only_exact_authenticated_founder_identity_can_approve(
     identity: str,
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
-    with pytest.raises(PermissionError, match="Founder"):
+    with pytest.raises(PermissionError, match="cannot approve"):
         service.approve(
             proposed,
             approver=identity,
@@ -103,7 +115,7 @@ def test_missing_or_cross_project_approval_source_is_rejected(
     tmp_path: Path,
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
-    with pytest.raises(PermissionError, match="source"):
+    with pytest.raises(PermissionError, match="cannot approve"):
         service.approve(
             proposed,
             approver="Founder",
@@ -128,7 +140,7 @@ def test_missing_or_cross_project_approval_source_is_rejected(
             "created_at": utc_now(),
         },
     )
-    with pytest.raises(PermissionError, match="source"):
+    with pytest.raises(PermissionError, match="cannot approve"):
         service.approve(
             proposed,
             approver="Founder",
@@ -140,11 +152,7 @@ def test_activation_reloads_durable_charter_and_approval(
     tmp_path: Path,
 ) -> None:
     service, project, proposed = _proposed(tmp_path)
-    approved, approval = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, approval = _approve(service, proposed)
     caller_substitution = replace(
         approved,
         title="same ID but caller-mutated content",
@@ -174,11 +182,7 @@ def test_copied_or_misbound_durable_approval_is_rejected(
     value: object,
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
-    approved, approval = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, approval = _approve(service, proposed)
     tampered = approval.to_dict()
     tampered[field] = value
     service.repository.store.upsert(
@@ -198,17 +202,13 @@ def test_missing_approval_and_same_content_different_id_are_rejected(
         proposed,
         charter_id="same-content-different-id",
     )
-    with pytest.raises(PermissionError, match="unavailable"):
+    with pytest.raises(PermissionError, match="cannot approve"):
         service.approve(
             substituted,
             approver="Founder",
             source_interaction_id="founder-approval",
         )
-    approved, approval = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, approval = _approve(service, proposed)
     service.repository.store.delete(
         "executive_approvals", approval.approval_id
     )
@@ -216,13 +216,81 @@ def test_missing_approval_and_same_content_different_id_are_rejected(
         service.activate(approved)
 
 
+def test_explicit_challenge_is_one_time_and_requires_structured_intent(
+    tmp_path: Path,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    challenge = service.request_approval(proposed)
+    with pytest.raises(PermissionError, match="intent"):
+        service.confirm_approval(challenge.challenge_id, intent=None)  # type: ignore[arg-type]
+    approved, _, event = service.confirm_approval(
+        challenge.challenge_id,
+        intent=FounderApprovalIntent.APPROVE_CHARTER,
+    )
+    assert event.authenticated_identity == "LOCAL_FOUNDER"
+    assert event.charter_digest == charter_approval_digest(proposed)
+    assert service.activate(approved).state == "ACTIVE"
+    with pytest.raises(PermissionError, match="consumed"):
+        service.confirm_approval(
+            challenge.challenge_id,
+            intent=FounderApprovalIntent.APPROVE_CHARTER,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("charter_digest", "0" * 64, "matches"),
+        ("project_id", "another-project", "identify"),
+        ("charter_revision", 999, "identify"),
+        ("expires_at", "2000-01-01T00:00:00+00:00", "stale"),
+    ],
+)
+def test_tampered_stale_or_cross_bound_challenge_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    challenge = service.request_approval(proposed)
+    tampered = challenge.to_dict()
+    tampered[field] = value
+    service.repository.store.upsert(
+        "executive_founder_approval_challenges",
+        challenge.challenge_id,
+        tampered,
+    )
+    with pytest.raises(PermissionError, match=message):
+        service.confirm_approval(
+            challenge.challenge_id,
+            intent=FounderApprovalIntent.APPROVE_CHARTER,
+        )
+
+
+def test_copied_or_modified_approval_event_cannot_activate(
+    tmp_path: Path,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    approved, approval = _approve(service, proposed)
+    event = service.repository.store.get(
+        "executive_founder_approval_events",
+        approval.source_interaction_id,
+    )
+    assert event is not None
+    event["project_id"] = "copied-project"
+    service.repository.store.upsert(
+        "executive_founder_approval_events",
+        approval.source_interaction_id,
+        event,
+    )
+    with pytest.raises(PermissionError, match="binding"):
+        service.activate(approved)
+
+
 def test_unresolved_material_question_blocks_activation(tmp_path: Path) -> None:
     service, _, proposed = _proposed(tmp_path, resolve_questions=False)
-    approved, _ = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, _ = _approve(service, proposed)
     with pytest.raises(PermissionError, match="unresolved"):
         service.activate(approved)
 
@@ -231,11 +299,7 @@ def test_exact_non_goal_and_disguised_deployment_are_denied(
     tmp_path: Path,
 ) -> None:
     service, project, proposed = _proposed(tmp_path)
-    approved, _ = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, _ = _approve(service, proposed)
     active_project = service.activate(approved)
     active = service.repository.charter(approved.charter_id)
     denied_charter = replace(active, non_goals=("production deployment",))
@@ -278,11 +342,7 @@ def test_publication_or_spending_disguised_as_write_is_denied(
     flag: str,
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
-    approved, _ = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, _ = _approve(service, proposed)
     project = service.activate(approved)
     charter = service.repository.charter(approved.charter_id)
     action = ProposedAction(
@@ -314,11 +374,7 @@ def test_readiness_classification_uses_actual_task_objective(
     tmp_path: Path,
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
-    approved, _ = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, _ = _approve(service, proposed)
     project = service.activate(approved)
     charter = service.repository.charter(approved.charter_id)
     _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
@@ -347,11 +403,7 @@ def _activate(
     service: CharterService,
     proposed: ProjectCharter,
 ) -> tuple[ProjectRecord, ProjectCharter]:
-    approved, _ = service.approve(
-        proposed,
-        approver="Founder",
-        source_interaction_id="founder-approval",
-    )
+    approved, _ = _approve(service, proposed)
     project = service.activate(approved)
     return project, service.repository.charter(approved.charter_id)
 

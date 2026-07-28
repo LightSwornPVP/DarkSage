@@ -98,6 +98,11 @@ class ApprovalKind(StrEnum):
     ACTION_CATEGORY = "ACTION_CATEGORY"
 
 
+class FounderApprovalIntent(StrEnum):
+    APPROVE_CHARTER = "APPROVE_CHARTER"
+    APPROVE_ACTION = "APPROVE_ACTION"
+
+
 class TaskStatus(StrEnum):
     PROPOSED = "PROPOSED"
     READY = "READY"

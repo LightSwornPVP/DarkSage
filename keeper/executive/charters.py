@@ -7,6 +7,7 @@ from keeper.executive.enums import (
     ActionCategory,
     CharterStatus,
     ExecutiveState,
+    FounderApprovalIntent,
 )
 from keeper.executive.intake import IntakeResult
 from keeper.executive.models import (
@@ -14,6 +15,8 @@ from keeper.executive.models import (
     AssumptionRecord,
     AuthorityEnvelope,
     DecisionRecord,
+    FounderApprovalChallenge,
+    FounderApprovalEvent,
     ProjectCharter,
     ProjectRecord,
     utc_now,
@@ -188,6 +191,26 @@ class CharterService:
             source_interaction_id=source_interaction_id,
         )
 
+    def request_approval(
+        self, charter: ProjectCharter
+    ) -> FounderApprovalChallenge:
+        return self.repository.create_charter_approval_challenge(
+            project_id=charter.project_id,
+            charter_id=charter.charter_id,
+            charter_revision=charter.revision,
+        )
+
+    def confirm_approval(
+        self,
+        challenge_id: str,
+        *,
+        intent: FounderApprovalIntent,
+    ) -> tuple[ProjectCharter, ApprovalRecord, FounderApprovalEvent]:
+        return self.repository.confirm_charter_approval(
+            challenge_id=challenge_id,
+            explicit_intent=intent,
+        )
+
     def activate(self, charter: ProjectCharter) -> ProjectRecord:
         active, stored_charter, approval = self.repository.activate_charter(
             project_id=charter.project_id,
@@ -202,8 +225,8 @@ class CharterService:
                 "Activate Project Charter",
                 ("keep draft", "activate approved charter"),
                 "activate approved charter",
-                "Founder approval authorizes project execution within the charter.",
-                approval.approver,
+                "Explicit local Founder approval authorizes project execution within the charter.",
+                "LOCAL_FOUNDER",
                 approval.approval_id,
                 (approval.approval_id,),
                 ("Keeper may plan and act only within the active authority envelope.",),

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -15,6 +16,7 @@ from keeper.executive.enums import (
     ApprovalKind,
     CharterStatus,
     ExecutiveState,
+    FounderApprovalIntent,
     TaskStatus,
 )
 from keeper.executive.models import (
@@ -22,6 +24,8 @@ from keeper.executive.models import (
     AssumptionRecord,
     DecisionRecord,
     ExecutiveTask,
+    FounderApprovalChallenge,
+    FounderApprovalEvent,
     MemoryRecord,
     ProjectCharter,
     ProjectRecord,
@@ -143,6 +147,54 @@ class ExecutiveRepository:
             "approved charters may only be created by the trusted approval transaction"
         )
 
+    def create_charter_approval_challenge(
+        self,
+        *,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+    ) -> FounderApprovalChallenge:
+        """Create a one-use challenge for explicit local-Founder confirmation."""
+        requested = datetime.now(UTC)
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            charter_payload, _ = self._entity_in_transaction(
+                connection, "project_charters", charter_id
+            )
+            charter = ProjectCharter.from_dict(charter_payload)
+            if (
+                charter.project_id != project_id
+                or charter.revision != charter_revision
+                or charter.status != CharterStatus.PROPOSED
+            ):
+                raise PermissionError(
+                    "approval challenge requires the exact proposed charter"
+                )
+            self._require_no_newer_charter(
+                connection, project_id, charter_revision
+            )
+            challenge = FounderApprovalChallenge(
+                challenge_id=new_id("founder-challenge"),
+                schema_version=1,
+                project_id=project_id,
+                charter_id=charter_id,
+                charter_revision=charter_revision,
+                charter_digest=charter_approval_digest(charter),
+                approval_action=FounderApprovalIntent.APPROVE_CHARTER.value,
+                nonce=secrets.token_hex(32),
+                requested_at=requested.isoformat(),
+                expires_at=(requested + timedelta(minutes=10)).isoformat(),
+                state="PENDING",
+                consumed_event_id=None,
+            )
+            self._insert_entity(
+                connection,
+                "executive_founder_approval_challenges",
+                challenge.challenge_id,
+                challenge.to_dict(),
+            )
+        return challenge
+
     def approve_charter(
         self,
         *,
@@ -152,12 +204,50 @@ class ExecutiveRepository:
         approver: str,
         source_interaction_id: str,
     ) -> tuple[ProjectCharter, ApprovalRecord]:
-        """Authenticate and approve the exact durable proposed charter atomically."""
-        if approver != "Founder":
-            raise PermissionError("the authenticated Founder identity is required")
+        del (
+            project_id,
+            charter_id,
+            charter_revision,
+            approver,
+            source_interaction_id,
+        )
+        raise PermissionError(
+            "caller identities and conversation rows cannot approve charters"
+        )
+
+    def confirm_charter_approval(
+        self,
+        *,
+        challenge_id: str,
+        explicit_intent: FounderApprovalIntent,
+    ) -> tuple[ProjectCharter, ApprovalRecord, FounderApprovalEvent]:
+        """Consume one explicit Founder challenge and approve atomically."""
+        if explicit_intent is not FounderApprovalIntent.APPROVE_CHARTER:
+            raise PermissionError("explicit charter approval intent is required")
         timestamp = utc_now()
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            challenge_payload, challenge_hash = self._entity_in_transaction(
+                connection,
+                "executive_founder_approval_challenges",
+                challenge_id,
+            )
+            challenge = FounderApprovalChallenge.from_dict(
+                challenge_payload
+            )
+            if (
+                challenge.state != "PENDING"
+                or challenge.consumed_event_id is not None
+                or challenge.approval_action != explicit_intent
+                or datetime.fromisoformat(challenge.expires_at)
+                <= datetime.now(UTC)
+            ):
+                raise PermissionError(
+                    "Founder approval challenge is stale or consumed"
+                )
+            project_id = challenge.project_id
+            charter_id = challenge.charter_id
+            charter_revision = challenge.charter_revision
             try:
                 charter_payload, charter_hash = self._entity_in_transaction(
                     connection, "project_charters", charter_id
@@ -178,26 +268,34 @@ class ExecutiveRepository:
             self._require_no_newer_charter(
                 connection, project_id, charter_revision
             )
-            try:
-                interaction_payload, _ = self._entity_in_transaction(
-                    connection,
-                    "project_conversations",
-                    source_interaction_id,
-                )
-            except KeyError as error:
-                raise PermissionError(
-                    "Founder approval source is unavailable"
-                ) from error
             if (
-                interaction_payload.get("project_id") != project_id
-                or interaction_payload.get("speaker") != "Founder"
+                challenge.charter_digest
+                != charter_approval_digest(charter)
             ):
                 raise PermissionError(
-                    "approval source is not an authenticated Founder interaction"
+                    "approval challenge no longer matches the proposed charter"
                 )
+            event_id = new_id("founder-approval-event")
+            event = FounderApprovalEvent(
+                event_id=event_id,
+                schema_version=1,
+                authenticated_identity="LOCAL_FOUNDER",
+                authentication_method=(
+                    "LOCAL_FOUNDER_EXPLICIT_CONFIRMATION"
+                ),
+                project_id=project_id,
+                charter_id=charter_id,
+                charter_revision=charter_revision,
+                charter_digest=challenge.charter_digest,
+                approval_action=explicit_intent.value,
+                explicit_intent=explicit_intent.value,
+                challenge_id=challenge.challenge_id,
+                challenge_nonce=challenge.nonce,
+                confirmed_at=timestamp,
+                expires_at=charter.authority_envelope.expires_at,
+            )
             approval_id = new_id("approval")
             charter_digest = charter_approval_digest(charter)
-            interaction_digest = canonical_digest(interaction_payload)
             approval = ApprovalRecord(
                 approval_id,
                 project_id,
@@ -205,11 +303,15 @@ class ExecutiveRepository:
                 charter_revision,
                 "CHARTER_DURATION",
                 None,
-                approver,
+                "LOCAL_FOUNDER",
                 charter.deliverables,
                 {
-                    "authentication_method": "trusted-founder-interaction",
-                    "source_interaction_digest": interaction_digest,
+                    "authentication_method": (
+                        "LOCAL_FOUNDER_EXPLICIT_CONFIRMATION"
+                    ),
+                    "approval_event_digest": canonical_digest(
+                        event.to_dict()
+                    ),
                     "delegation_mode": charter.delegation_mode,
                     "maximum_cost": charter.budget_limit,
                 },
@@ -218,14 +320,20 @@ class ExecutiveRepository:
                 None,
                 None,
                 charter_digest,
-                source_interaction_id,
+                event_id,
             )
             approved = replace(
                 charter,
                 status=CharterStatus.APPROVED.value,
-                founder_approval_identity=approver,
+                founder_approval_identity="LOCAL_FOUNDER",
                 founder_approval_record_id=approval_id,
                 updated_at=timestamp,
+            )
+            self._insert_entity(
+                connection,
+                "executive_founder_approval_events",
+                event_id,
+                event.to_dict(),
             )
             self._insert_entity(
                 connection,
@@ -248,7 +356,19 @@ class ExecutiveRepository:
                 charter_hash,
                 approved.to_dict(),
             )
-        return approved, approval
+            consumed_challenge = replace(
+                challenge,
+                state="CONSUMED",
+                consumed_event_id=event_id,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_founder_approval_challenges",
+                challenge.challenge_id,
+                challenge_hash,
+                consumed_challenge.to_dict(),
+            )
+        return approved, approval, event
 
     def activate_charter(
         self,
@@ -296,13 +416,16 @@ class ExecutiveRepository:
                     "charter approval record is unavailable"
                 ) from error
             approval = ApprovalRecord.from_dict(approval_payload)
-            interaction_payload, _ = self._entity_in_transaction(
+            event_payload, _ = self._entity_in_transaction(
                 connection,
-                "project_conversations",
+                "executive_founder_approval_events",
                 approval.source_interaction_id,
             )
             self._validate_charter_approval(
-                charter, approval, interaction_payload, timestamp
+                charter,
+                approval,
+                FounderApprovalEvent.from_dict(event_payload),
+                timestamp,
             )
             current_state = ExecutiveState(project.state)
             if ExecutiveState.ACTIVE not in PROJECT_TRANSITIONS[current_state]:
@@ -1568,7 +1691,7 @@ class ExecutiveRepository:
     def _validate_charter_approval(
         charter: ProjectCharter,
         approval: ApprovalRecord,
-        interaction: dict[str, Any],
+        event: FounderApprovalEvent,
         now: str,
     ) -> None:
         if (
@@ -1576,19 +1699,24 @@ class ExecutiveRepository:
             or approval.project_id != charter.project_id
             or approval.charter_id != charter.charter_id
             or approval.charter_revision != charter.revision
-            or approval.approver != "Founder"
-            or charter.founder_approval_identity != "Founder"
+            or approval.approver != "LOCAL_FOUNDER"
+            or charter.founder_approval_identity != "LOCAL_FOUNDER"
             or approval.evidence_digest != charter_approval_digest(charter)
             or approval.revoked_at is not None
             or approval.consumed_at is not None
-            or interaction.get("interaction_id")
-            != approval.source_interaction_id
-            or interaction.get("project_id") != charter.project_id
-            or interaction.get("speaker") != "Founder"
+            or event.event_id != approval.source_interaction_id
+            or event.project_id != charter.project_id
+            or event.charter_id != charter.charter_id
+            or event.charter_revision != charter.revision
+            or event.charter_digest != charter_approval_digest(charter)
+            or event.approval_action
+            != FounderApprovalIntent.APPROVE_CHARTER
+            or event.explicit_intent
+            != FounderApprovalIntent.APPROVE_CHARTER
             or approval.limits.get("authentication_method")
-            != "trusted-founder-interaction"
-            or approval.limits.get("source_interaction_digest")
-            != canonical_digest(interaction)
+            != "LOCAL_FOUNDER_EXPLICIT_CONFIRMATION"
+            or approval.limits.get("approval_event_digest")
+            != canonical_digest(event.to_dict())
         ):
             raise PermissionError(
                 "charter approval authentication or binding is invalid"

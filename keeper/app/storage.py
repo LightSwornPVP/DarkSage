@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ENTITY_TABLES = (
     "projects",
     "worktrees",
@@ -41,6 +41,8 @@ ENTITY_TABLES = (
     "executive_execution_attempts",
     "executive_reviews",
     "executive_late_results",
+    "executive_founder_approval_challenges",
+    "executive_founder_approval_events",
 )
 
 
@@ -149,6 +151,19 @@ class KeeperStore:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (3, _now()),
+                )
+                current = 3
+            if current < 4:
+                for table in ENTITY_TABLES:
+                    connection.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{table}" ('
+                        "id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, "
+                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                        "payload TEXT NOT NULL, payload_hash TEXT NOT NULL)"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (4, _now()),
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reroute_reservations ("
