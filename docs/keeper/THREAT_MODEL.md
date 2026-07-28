@@ -144,15 +144,20 @@ unique bindings, one-use approvals, budget reservations, and restart
 reconciliation protect supported operation.
 
 There is no database-commit-then-lineage-file-append protocol. Backups are atomic
-SQLite snapshots outside the business transaction path. Restore is an explicit
-trusted maintenance workflow: authenticate the Founder, stage and integrity-check
-the backup, pause every nonterminal project, reconcile against KeeperAuthority,
-record a new in-database recovery epoch, and only then replace the live database.
+SQLite snapshots outside the business transaction path. Restore requires a fresh,
+one-use, Windows-authenticated Founder proof bound to the exact backup, target
+database and generation, project scope, operation, reason, and lifetime. It stages
+and checks the backup, then validates a KeeperAuthority-signed complete project-scope
+snapshot twice before recording the reconciliation receipt and advancing the
+in-database recovery epoch. Arbitrary callbacks and test proofs are not production
+authority.
 
 KeeperAuthority remains authoritative for provider attempts, launches,
-cancellation, and completion. Restored Executive planning state cannot override
-newer authenticated Authority truth. Uncertain execution remains non-retry-safe.
-Normal startup fails closed on genuine SQLite or foreign-key corruption.
+cancellation, revocation, and completion. Missing or conflicting Authority-linked
+Executive state rejects restore. Newer terminal Authority truth is durably
+represented as non-retry-safe uncertainty pending normal authenticated import;
+one-use approvals and crossed-launch budget reservations cannot disappear. Normal
+startup fails closed on genuine SQLite or foreign-key corruption.
 
 ## Supported concurrency
 
@@ -162,9 +167,16 @@ restart tests deliberately exercise two runtime instances. Supported writes use
 SQLite transactions, `BEGIN IMMEDIATE`, unique constraints, and exact CAS; they no
 longer depend on a second file commit.
 
-An explicit restore is a maintenance operation, not a concurrent writer
-operation. Other Executive writers must be stopped before it begins. Provider
-processes remain independently concurrent behind KeeperAuthority.
+An explicit restore is an enforced exclusive maintenance operation, not a concurrent
+writer. Every supported database connection holds a shared OS lock for its entire
+transaction; restore takes the bounded exclusive form, records a durable SQLite
+maintenance state, and rechecks write generation and recovery identity immediately
+before replacement. A pre-existing writer finishes before restore validates its
+boundary, a new writer is rejected, and a generation change aborts without replacing
+live state. Interrupted maintenance remains conservatively blocked until explicit
+integrity- and generation-checked recovery. The empty lock file is an OS locking
+primitive, not a second persistence protocol. Provider processes remain independently
+concurrent behind KeeperAuthority.
 
 ## Finding classification
 

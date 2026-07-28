@@ -81,6 +81,34 @@ digest permanently one-use for the project across revocation, restart, and
 package upgrade. Exact retries return the one existing canonical generation;
 failed creation rolls back both generation and consumption.
 
+## Restore authorization and reconciliation
+
+Production restore does not accept callback success as authority. It verifies an
+exact Windows Founder confirmation whose signed challenge digest covers the restore
+operation ID, backup SHA-256 and source recovery identity, target database path, ID,
+epoch and generation, complete project scope, reason, and two-minute lifetime. A
+successful restore consumes the authorization identity in SQLite; replay and stale
+target identity fail closed. Production rejects all test proof, authenticator, and
+Authority-client concrete types.
+
+KeeperAuthority enumerates the complete current attempt and project-launch state for
+the authorized project scope and signs that snapshot with its service key. The
+Executive validates the protocol, service key, client SID, operation and persistence
+identities, snapshot digest, and signature twice: during staged reconciliation and
+immediately before replacement. Omitted or altered attempts, completions,
+cancellations, or revocations invalidate the proof. Executive-only approval
+consumption and budget reservations are checked locally against every Authority
+attempt and included in the durable reconciliation assessment. New terminal truth
+that has not yet completed normal artifact import is retained as non-retry-safe
+`UNCERTAIN` state.
+
+Every supported database connection holds a shared OS advisory lock for its full
+transaction. Restore holds the exclusive form from initial identity validation
+through the SQLite replacement and records an in-database maintenance lease. This
+prevents an acknowledged supported write from being overwritten. A stale active
+lease blocks supported connections until explicit integrity- and generation-checked
+recovery. The lock file contains no authority or commit metadata.
+
 ## Authenticated lifecycle authority
 
 Keeper creates a 256-bit installation authority key with the operating system

@@ -132,7 +132,9 @@ the task.
 
 Executive schema version 6 adds the production/test repository-mode marker and
 the signed Founder capability entity. Schema version 8 records the database
-recovery identity and explicit recovery epoch wholly inside SQLite. Authority
+recovery identity and explicit recovery epoch wholly inside SQLite. Schema version
+9 adds the write generation, durable restore-maintenance state, one-use restore
+authorization consumption, and signed Authority reconciliation receipt. Authority
 schema version 4 adds the durable project-wide capability-consumption ledger.
 Existing hash-checked execution,
 review, late-result, one-time approval-consumption, and cumulative budget records
@@ -143,9 +145,12 @@ identity bindings cannot be rewritten. Migrations remain idempotent and do not
 copy Authority signatures or protected state into the Executive database.
 SQLite is the sole live Executive commit boundary; no adjacent lineage append is
 required after a business transaction. Pass A supports multiple runtime writers
-through SQLite transactions, CAS, and uniqueness constraints. Explicit restore
-pauses nonterminal projects, requires Founder approval and KeeperAuthority
-reconciliation, and advances the in-database recovery epoch.
+through SQLite transactions, CAS, uniqueness constraints, and a shared OS
+transaction lock. Explicit restore requires an exact typed Founder authorization
+and production Authority client, takes the exclusive lock, validates a signed
+complete Authority snapshot twice, preserves approval and budget safety, pauses
+nonterminal projects, rechecks generation, and advances the in-database recovery
+epoch only in the validated staged replacement.
 Unkeyed local payload hashes are corruption/CAS aids only and never establish
 approval, provider identity, execution, review, or completion authority.
 

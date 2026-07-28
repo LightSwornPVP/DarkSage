@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.9
+
+- Replace restore confirmation and reconciliation callbacks with exact typed
+  production Founder authorization and a signed KeeperAuthority project-scope
+  snapshot bound to the operation, backup, database identities, and generation.
+- Preserve newer Authority terminal truth as non-retry-safe uncertainty, validate
+  one-time approval consumption and budget reservations, and record the validated
+  receipt before setting the reconciliation timestamp.
+- Enforce restore exclusivity with a bounded OS shared/exclusive lock, durable SQLite
+  maintenance state, write generations, final identity rechecks, and conservative
+  interrupted-lease recovery.
+
 ## 0.5.8
 
 - Adopt the versioned Keeper 1.0 single-Founder personal-use threat model for

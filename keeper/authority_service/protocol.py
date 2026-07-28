@@ -41,6 +41,7 @@ class Operation(StrEnum):
     FINALIZE_COMPLETION = "finalize_completion"
     QUERY_STATE = "query_state"
     VERIFY_EVIDENCE = "verify_evidence"
+    RECONCILE_EXECUTIVE_RESTORE = "reconcile_executive_restore"
     PAUSE_ATTEMPT = "pause_attempt"
     RESUME_ATTEMPT = "resume_attempt"
     CANCEL_ATTEMPT = "cancel_attempt"

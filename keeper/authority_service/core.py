@@ -178,6 +178,9 @@ class AuthorityServiceCore:
             Operation.RECORD_PROVIDER_START: self._record_provider_start,
             Operation.FINALIZE_COMPLETION: self._finalize_completion,
             Operation.QUERY_STATE: self._query_state,
+            Operation.RECONCILE_EXECUTIVE_RESTORE: (
+                self._reconcile_executive_restore
+            ),
             Operation.VERIFY_EVIDENCE: self._verify_evidence,
             Operation.PAUSE_ATTEMPT: self._pause_attempt,
             Operation.RESUME_ATTEMPT: self._resume_attempt,
@@ -981,6 +984,92 @@ class AuthorityServiceCore:
             },
         )
 
+    def _reconcile_executive_restore(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        fields = {
+            "restore_operation_id",
+            "backup_sha256",
+            "source_database_id",
+            "source_recovery_epoch",
+            "target_database_id",
+            "target_recovery_epoch",
+            "target_generation",
+            "project_scope",
+        }
+        _exact(payload, fields)
+        operation_id = _text(
+            payload["restore_operation_id"], "restore operation ID"
+        )
+        backup_sha256 = _sha256_text(
+            payload["backup_sha256"], "backup SHA-256"
+        )
+        source_database_id = _text(
+            payload["source_database_id"], "source database ID"
+        )
+        target_database_id = _text(
+            payload["target_database_id"], "target database ID"
+        )
+        source_epoch = _nonnegative_int(
+            payload["source_recovery_epoch"], "source recovery epoch"
+        )
+        target_epoch = _nonnegative_int(
+            payload["target_recovery_epoch"], "target recovery epoch"
+        )
+        target_generation = _nonnegative_int(
+            payload["target_generation"], "target generation"
+        )
+        scope_value = payload["project_scope"]
+        if (
+            not isinstance(scope_value, list)
+            or not all(isinstance(item, str) and item for item in scope_value)
+            or scope_value != sorted(set(scope_value))
+        ):
+            raise ValueError("Authority restore project scope is invalid")
+        project_scope = set(scope_value)
+        attempts = sorted(
+            (
+                record
+                for record in self.store.list_records("attempts")
+                if record.get("project_id") in project_scope
+            ),
+            key=lambda item: str(item.get("id", "")),
+        )
+        authorizations = sorted(
+            (
+                record
+                for record in self.store.list_records("launch_authorizations")
+                if record.get("project_id") in project_scope
+            ),
+            key=lambda item: str(item.get("id", "")),
+        )
+        state = {
+            "attempts": attempts,
+            "launch_authorizations": authorizations,
+        }
+        receipt = self.keys.sign(
+            "executive-restore-reconciliation",
+            {
+                "schema_version": 1,
+                "kind": "executive-restore-reconciliation",
+                "restore_operation_id": operation_id,
+                "backup_sha256": backup_sha256,
+                "source_database_id": source_database_id,
+                "source_recovery_epoch": source_epoch,
+                "target_database_id": target_database_id,
+                "target_recovery_epoch": target_epoch,
+                "target_generation": target_generation,
+                "project_scope": scope_value,
+                "protocol_version": PROTOCOL_VERSION,
+                "service_key_id": self.keys.current_key_id,
+                "authorized_client_sid": client_sid,
+                **state,
+                "state_digest": _canonical_digest(state),
+                "reconciled_at": _now(),
+            },
+        )
+        return {"reconciliation": receipt}
+
     def _query_state(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
@@ -1010,6 +1099,7 @@ class AuthorityServiceCore:
                 "provider-launch-claim",
                 "provider-start",
                 "provider-completion",
+                "executive-restore-reconciliation",
                 AUDIT_REPORT_PURPOSE,
             },
         )
@@ -1241,6 +1331,25 @@ def _object_id(result: dict[str, Any]) -> str | None:
         if isinstance(value, str):
             return value
     return None
+
+
+def _nonnegative_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"authority {label} is invalid")
+    return value
+
+
+def _sha256_text(value: object, label: str) -> str:
+    text = _text(value, label)
+    if len(text) != 64 or any(item not in "0123456789abcdef" for item in text):
+        raise ValueError(f"authority {label} is invalid")
+    return text
+
+
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _now() -> str:

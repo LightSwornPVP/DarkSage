@@ -8,10 +8,26 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
+
+from keeper.app.database_lock import DatabaseFileLock
+
+if TYPE_CHECKING:
+    from keeper.authority_service.client import (
+        ProductionAuthorityServiceClient,
+        TestAuthorityServiceClient,
+    )
+    from keeper.app.restore import (
+        ProductionRestoreAuthorization,
+        TestRestoreAuthorization,
+    )
+    from keeper.executive.founder_auth import (
+        ProductionFounderAuthenticator,
+        TestFounderAuthenticator,
+    )
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 LINEAGE_VERSION = 1
 LINEAGE_ZERO_HASH = "0" * 64
 ENTITY_TABLES = (
@@ -70,6 +86,17 @@ class KeeperStore:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        with DatabaseFileLock(self.path, "shared", timeout_seconds=0):
+            with self._connect_unlocked() as connection:
+                yield connection
+
+    @contextmanager
+    def _connect_unlocked(
+        self,
+        *,
+        allow_restore: bool = False,
+        track_generation: bool = True,
+    ) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
@@ -78,13 +105,39 @@ class KeeperStore:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         try:
+            if not allow_restore:
+                self._reject_active_restore(connection)
+            changes = connection.total_changes
             yield connection
+            if (
+                track_generation
+                and connection.total_changes != changes
+                and self._table_exists(connection, "executive_write_state")
+            ):
+                connection.execute(
+                    "UPDATE executive_write_state "
+                    "SET generation=generation+1,updated_at=? WHERE singleton=1",
+                    (_now(),),
+                )
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
         finally:
             connection.close()
+
+    def _reject_active_restore(self, connection: sqlite3.Connection) -> None:
+        if not self._table_exists(connection, "executive_restore_maintenance"):
+            return
+        row = connection.execute(
+            "SELECT operation_id,state FROM executive_restore_maintenance "
+            "WHERE singleton=1"
+        ).fetchone()
+        if row is not None and row["state"] == "ACTIVE":
+            raise RuntimeError(
+                "Executive database is paused by active restore operation "
+                f"{row['operation_id']}"
+            )
 
     def _canonical_database_path(self) -> str:
         return os.path.normcase(str(self.path.resolve()))
@@ -486,6 +539,62 @@ class KeeperStore:
                     (8, _now()),
                 )
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS executive_write_state ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                "generation INTEGER NOT NULL CHECK(generation>=0), "
+                "updated_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO executive_write_state VALUES(1,0,?)",
+                (_now(),),
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS executive_restore_maintenance ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                "operation_id TEXT NOT NULL, "
+                "state TEXT NOT NULL CHECK(state IN "
+                "('ACTIVE','FAILED','COMPLETED')), "
+                "source_backup_sha256 TEXT NOT NULL, "
+                "expected_generation INTEGER NOT NULL, "
+                "started_at TEXT NOT NULL, finished_at TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS executive_restore_authorizations ("
+                "operation_id TEXT PRIMARY KEY, "
+                "authorization_digest TEXT NOT NULL UNIQUE, "
+                "founder_identity TEXT NOT NULL, consumed_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS executive_restore_reconciliations ("
+                "operation_id TEXT PRIMARY KEY, "
+                "receipt_digest TEXT NOT NULL UNIQUE, "
+                "service_key_id TEXT NOT NULL, "
+                "service_key_version INTEGER NOT NULL, "
+                "reconciled_at TEXT NOT NULL, "
+                "payload TEXT NOT NULL, payload_hash TEXT NOT NULL)"
+            )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(executive_recovery_state)"
+                ).fetchall()
+            }
+            if "restore_operation_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE executive_recovery_state "
+                    "ADD COLUMN restore_operation_id TEXT"
+                )
+            if "authority_receipt_digest" not in columns:
+                connection.execute(
+                    "ALTER TABLE executive_recovery_state "
+                    "ADD COLUMN authority_receipt_digest TEXT"
+                )
+            if current < 9:
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (9, _now()),
+                )
+            connection.execute(
                 "CREATE TABLE IF NOT EXISTS executive_repository_lineage ("
                 "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
                 "database_id TEXT NOT NULL, "
@@ -859,107 +968,53 @@ class KeeperStore:
         backup: Path,
         *,
         reason: str,
-        confirm_founder_restore: Callable[[Path, Path, str], None],
-        reconcile_authority: Callable[[KeeperStore], None],
+        authorization: ProductionRestoreAuthorization,
+        founder_authenticator: ProductionFounderAuthenticator,
+        authority: ProductionAuthorityServiceClient,
     ) -> int:
-        """Explicitly restore a production backup after approval and reconciliation.
+        """Restore through exact production Founder and Authority boundaries."""
+        from keeper.app.restore_runtime import restore_production_backup
 
-        Normal startup never calls this method. The trusted application must stop
-        other Executive writers, authenticate the Founder in
-        ``confirm_founder_restore``, and reconcile the staged state with
-        KeeperAuthority in ``reconcile_authority``. The live database is replaced
-        only after both callbacks and SQLite integrity validation succeed.
-        """
-        backup = backup.resolve()
-        if backup == self.path:
-            raise ValueError("restore source must differ from live database")
-        if not backup.is_file():
-            raise FileNotFoundError(backup)
-        if not reason.strip():
-            raise ValueError("restore reason is required")
-
-        current = self.executive_repository_binding()
-        if current[1] != "PRODUCTION":
-            raise PermissionError(
-                "explicit restore requires a production Executive database"
-            )
-        confirm_founder_restore(backup, self.path, reason.strip())
-
-        staged_path = self.path.with_name(
-            f".{self.path.name}.{uuid.uuid4().hex}.restore"
+        return restore_production_backup(
+            self,
+            backup,
+            reason=reason,
+            authorization=authorization,
+            founder_authenticator=founder_authenticator,
+            authority=authority,
         )
-        staged = KeeperStore(staged_path)
-        restored_at = _now()
-        recovery_epoch = int(current[4]) + 1
-        try:
-            self._sqlite_backup(backup, staged_path)
-            staged.migrate()
-            with staged.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                mode = connection.execute(
-                    "SELECT mode FROM executive_repository_mode "
-                    "WHERE singleton=1"
-                ).fetchone()
-                if mode is None or mode["mode"] != "PRODUCTION":
-                    raise PermissionError(
-                        "restore source is not a production Executive backup"
-                    )
-                connection.execute(
-                    "INSERT INTO executive_recovery_state("
-                    "singleton,database_id,canonical_path,recovery_epoch,"
-                    "restored_at,restore_reason,authority_reconciled_at,updated_at"
-                    ") VALUES(1,?,?,?,?,?,NULL,?) "
-                    "ON CONFLICT(singleton) DO UPDATE SET "
-                    "database_id=excluded.database_id,"
-                    "canonical_path=excluded.canonical_path,"
-                    "recovery_epoch=excluded.recovery_epoch,"
-                    "restored_at=excluded.restored_at,"
-                    "restore_reason=excluded.restore_reason,"
-                    "authority_reconciled_at=NULL,"
-                    "updated_at=excluded.updated_at",
-                    (
-                        current[3],
-                        staged._canonical_database_path(),
-                        recovery_epoch,
-                        restored_at,
-                        reason.strip(),
-                        restored_at,
-                    ),
-                )
-                self._pause_projects_for_restore(connection, restored_at)
 
-            reconcile_authority(staged)
+    def restore_backup_for_test(
+        self,
+        backup: Path,
+        *,
+        reason: str,
+        authorization: TestRestoreAuthorization,
+        founder_authenticator: TestFounderAuthenticator,
+        authority: TestAuthorityServiceClient,
+        hooks: object | None = None,
+    ) -> int:
+        """Explicit test-only restore entry point; production rejects these types."""
+        from keeper.app.restore import TestRestoreHooks
+        from keeper.app.restore_runtime import restore_test_backup
 
-            reconciled_at = _now()
-            with staged.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                cursor = connection.execute(
-                    "UPDATE executive_recovery_state "
-                    "SET canonical_path=?, authority_reconciled_at=?, updated_at=? "
-                    "WHERE singleton=1 AND recovery_epoch=? "
-                    "AND authority_reconciled_at IS NULL",
-                    (
-                        self._canonical_database_path(),
-                        reconciled_at,
-                        reconciled_at,
-                        recovery_epoch,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise RuntimeError(
-                        "staged Executive restore reconciliation is invalid"
-                    )
-            staged.verify_integrity()
-            self._sqlite_backup(staged_path, self.path)
-            self.verify_integrity()
-        finally:
-            for candidate in (
-                staged_path,
-                Path(f"{staged_path}-wal"),
-                Path(f"{staged_path}-shm"),
-            ):
-                candidate.unlink(missing_ok=True)
-        return recovery_epoch
+        if hooks is not None and type(hooks) is not TestRestoreHooks:
+            raise TypeError("restore test hooks have an invalid type")
+        return restore_test_backup(
+            self,
+            backup,
+            reason=reason,
+            authorization=authorization,
+            founder_authenticator=founder_authenticator,
+            authority=authority,
+            hooks=hooks,
+        )
+
+    def recover_stale_restore(self, operation_id: str) -> None:
+        """Explicitly release an interrupted lease after integrity/generation checks."""
+        from keeper.app.restore_runtime import recover_stale_restore
+
+        recover_stale_restore(self, operation_id)
 
     @staticmethod
     def _pause_projects_for_restore(

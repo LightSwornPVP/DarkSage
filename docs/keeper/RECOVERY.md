@@ -13,29 +13,65 @@ path, runs SQLite and foreign-key integrity checks, and atomically replaces the
 requested backup artifact. Backups are outside the live business transaction
 path.
 
-`KeeperStore.restore_backup()` is an explicit trusted maintenance API, never a
-normal startup action. Its required sequence is:
+`KeeperStore.restore_backup()` is an explicit production maintenance API, never a
+normal startup action. It accepts only an exact
+`ProductionRestoreAuthorization`, an exact
+`ProductionFounderAuthenticator`, and an exact
+`ProductionAuthorityServiceClient`; arbitrary confirmation or reconciliation
+callbacks are not accepted. The authorization binds the authenticated Founder SID,
+restore operation ID, backup SHA-256 and recovery identity, target canonical path,
+database ID, recovery epoch and write generation, complete project scope, reason,
+issue time, expiry, and one-use consumption identity. Tests use a separate exact
+test-only entry point and proof types.
 
-1. Stop every Executive writer.
-2. Authenticate and record explicit Founder restore approval.
-3. Stage the backup without changing the live database.
-4. Migrate and integrity-check the staged database.
-5. Pause every nonterminal project with
-   `RESTORE_RECONCILIATION_REQUIRED`.
-6. Reconcile staged attempts, completions, cancellations, and revocations against
-   KeeperAuthority. Newer authenticated Authority truth wins.
-7. Record a new recovery epoch and reconciliation timestamp in SQLite.
-8. Replace the live database through the SQLite backup API.
-9. Restart Keeper and leave restored projects paused until explicitly reviewed.
+The enforced sequence is:
 
-If approval, staging, migration, integrity validation, or Authority reconciliation
-fails, the live database is unchanged. `UNCERTAIN` attempts remain non-retry-safe.
-Manual same-user replacement of the database outside this workflow is outside the
+1. Acquire the bounded OS-level exclusive database maintenance lock. Supported
+   connections hold a shared lock for their full transaction, so a writer that
+   already started must finish before restore can proceed and a new writer is
+   rejected before it can commit.
+2. Recheck the target database ID, recovery epoch, write generation, production
+   mode, and authorization replay tables, then record an `ACTIVE` maintenance
+   operation inside SQLite.
+3. Stage, migrate, and integrity-check the exact authorized backup without changing
+   live business state.
+4. Request a KeeperAuthority-signed, project-scoped reconciliation receipt bound to
+   the operation, backup, source and target recovery identities, generation, service
+   key, protocol, and client SID. The receipt contains the complete current attempt
+   and launch-authorization state, including completion, cancellation, and
+   revocation.
+5. Validate every Authority attempt against its restored Executive attempt and
+   preserve one-time approval consumption and any budget reservation. A crossed
+   launch boundary promotes a restored reservation to `CROSSED`; a newer terminal
+   result is recorded as `UNCERTAIN` pending normal authenticated import, so it is
+   represented but cannot cause a retry. Missing or conflicting Executive safety
+   state rejects the restore.
+6. Fetch and validate a second receipt immediately before replacement. Any changed
+   Authority state, live generation, recovery identity, or maintenance lease aborts.
+7. Pause every nonterminal project with
+   `RESTORE_RECONCILIATION_REQUIRED`, consume the authorization, persist the signed
+   receipt and Executive safety assessment, advance the recovery epoch and write
+   generation, and populate `authority_reconciled_at` in the staged transaction.
+8. Recheck the live boundary once more and replace the live database through the
+   SQLite backup API while still holding the exclusive maintenance lock.
+
+Validation, staging, integrity, Authority, or generation failure leaves the live
+business state and recovery epoch unchanged. A handled failure records a failed
+maintenance outcome and releases writers. Process termination after the durable
+`ACTIVE` record leaves the database conservatively blocked.
+`KeeperStore.recover_stale_restore(operation_id)` acquires the same exclusive lock,
+requires the exact operation ID and unchanged write generation, verifies SQLite
+integrity, and only then marks the interrupted lease failed; it never completes a
+restore or changes business state.
+
+The empty `.keeper-lock` file carries only an operating-system advisory byte lock;
+it contains no state and is not a second database-plus-file commit protocol. Manual
+same-user replacement of the database outside this workflow remains outside the
 Keeper 1.0 personal-use threat model.
 
-Pass A supports multiple normal Executive runtime writers through SQLite
-transactions, CAS, and uniqueness constraints. Restore is an exclusive maintenance
-operation and is not permitted while those writers are active.
+Pass A continues to support multiple normal Executive runtime writers through
+SQLite transactions, CAS, uniqueness constraints, and the shared lock. Restore is
+the enforced exclusive maintenance operation.
 
 ## Provider process recovery
 

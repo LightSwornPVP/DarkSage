@@ -119,6 +119,11 @@ class AuthorityServiceClient:
     def query_state(self, kind: str, identifier: str) -> dict[str, Any]:
         return self.request(Operation.QUERY_STATE, {"kind": kind, "id": identifier})
 
+    def reconcile_executive_restore(self, **identity: Any) -> dict[str, Any]:
+        return self.request(
+            Operation.RECONCILE_EXECUTIVE_RESTORE, dict(identity)
+        )
+
     def verify(self, purpose: str, record: object) -> bool:
         return bool(
             self.request(
@@ -182,6 +187,7 @@ class ProductionAuthorityServiceClient(AuthorityServiceClient):
 class TestAuthorityServiceClient(AuthorityServiceClient):
     """Explicit test-only injected Authority transport."""
 
+    __test__ = False
     __slots__ = ()
 
     def __init__(self, test_transport: Callable[[Request], dict[str, Any]]) -> None:

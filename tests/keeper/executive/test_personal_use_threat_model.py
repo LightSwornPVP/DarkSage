@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from keeper.app.restore import prepare_test_restore_authorization
 from keeper.app.storage import KeeperStore
+from keeper.authority_service.client import TestAuthorityServiceClient
+from keeper.authority_service.core import AuthorityServiceCore
+from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.executive.models import utc_now
 from tests.keeper.executive.fixture_store import insert_executive_fixture
 
@@ -20,6 +24,17 @@ def _production_store(tmp_path: Path, name: str) -> KeeperStore:
     store.migrate()
     store.bind_executive_repository_mode("PRODUCTION")
     return store
+
+
+def _test_trust_boundaries(
+    tmp_path: Path,
+) -> tuple[TestFounderAuthenticator, TestAuthorityServiceClient]:
+    founder = TestFounderAuthenticator()
+    core = AuthorityServiceCore(tmp_path / "authority-service")
+    authority = TestAuthorityServiceClient(
+        lambda request: core.dispatch(request, "S-1-5-21-KEEPER-TEST")
+    )
+    return founder, authority
 
 
 def _active_project(project_id: str) -> dict[str, object]:
@@ -71,40 +86,25 @@ def test_explicit_restore_pauses_projects_reconciles_and_advances_epoch(
     )
     backup = store.backup(tmp_path / "backup.db")
     store.upsert("settings", "post-backup", {"must_disappear": True})
-    calls: list[str] = []
-
-    def confirm(source: Path, target: Path, reason: str) -> None:
-        assert source == backup.resolve()
-        assert target == store.path
-        assert reason == "Founder requested recovery"
-        calls.append("FOUNDER_APPROVED")
-
-    def reconcile(staged: KeeperStore) -> None:
-        project = staged.get("executive_projects", "project-recovery")
-        assert project is not None
-        assert project["state"] == "PAUSED"
-        assert project["pause_reason"] == "RESTORE_RECONCILIATION_REQUIRED"
-        staged.upsert(
-            "settings",
-            "authority-reconciliation",
-            {"newer_authority_truth_applied": True},
-        )
-        calls.append("AUTHORITY_RECONCILED")
-
-    epoch = store.restore_backup(
+    founder, authority = _test_trust_boundaries(tmp_path)
+    authorization = prepare_test_restore_authorization(
+        store.path,
         backup,
         reason="Founder requested recovery",
-        confirm_founder_restore=confirm,
-        reconcile_authority=reconcile,
+        authenticator=founder,
+    )
+
+    epoch = store.restore_backup_for_test(
+        backup,
+        reason="Founder requested recovery",
+        authorization=authorization,
+        founder_authenticator=founder,
+        authority=authority,
     )
 
     assert epoch == 1
-    assert calls == ["FOUNDER_APPROVED", "AUTHORITY_RECONCILED"]
     assert store.executive_repository_binding()[4] == 1
     assert store.get("settings", "post-backup") is None
-    assert store.get("settings", "authority-reconciliation") == {
-        "newer_authority_truth_applied": True
-    }
     restored = store.get("executive_projects", "project-recovery")
     assert restored is not None
     assert restored["state"] == "PAUSED"
@@ -117,16 +117,19 @@ def test_failed_restore_reconciliation_leaves_live_state_unchanged(
     store.upsert("settings", "state", {"generation": 1})
     backup = store.backup(tmp_path / "failure-backup.db")
     store.upsert("settings", "state", {"generation": 2})
+    founder = TestFounderAuthenticator()
+    authorization = prepare_test_restore_authorization(
+        store.path, backup, reason="failure injection", authenticator=founder
+    )
+    no_op_authority = TestAuthorityServiceClient(lambda _request: {})
 
-    def reconcile_failure(_staged: KeeperStore) -> None:
-        raise RuntimeError("Authority unavailable")
-
-    with pytest.raises(RuntimeError, match="Authority unavailable"):
-        store.restore_backup(
+    with pytest.raises(PermissionError, match="Authority restore"):
+        store.restore_backup_for_test(
             backup,
             reason="failure injection",
-            confirm_founder_restore=lambda _source, _target, _reason: None,
-            reconcile_authority=reconcile_failure,
+            authorization=authorization,
+            founder_authenticator=founder,
+            authority=no_op_authority,
         )
 
     assert store.get("settings", "state") == {"generation": 2}
