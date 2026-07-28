@@ -342,6 +342,52 @@ class AuthorityStore:
                 (identifier,),
             ).fetchone()
             if row is None:
+                prior_rows = connection.execute(
+                    "SELECT id,state,generation,client_sid,payload,payload_hash "
+                    "FROM launch_authorizations"
+                ).fetchall()
+                prior: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+                for prior_row in prior_rows:
+                    prior_serialized = str(prior_row["payload"])
+                    if (
+                        hashlib.sha256(prior_serialized.encode("utf-8")).hexdigest()
+                        != prior_row["payload_hash"]
+                    ):
+                        raise RuntimeError(
+                            "stored launch authorization failed integrity validation"
+                        )
+                    prior_payload = json.loads(prior_serialized)
+                    if (
+                        isinstance(prior_payload, dict)
+                        and prior_payload.get("project_id")
+                        == payload.get("project_id")
+                    ):
+                        prior.append((prior_row, prior_payload))
+                if prior:
+                    latest_row, latest_payload = max(
+                        prior, key=lambda item: int(item[0]["generation"])
+                    )
+                    if (
+                        generation
+                        != int(latest_row["generation"]) + 1
+                        or latest_row["state"] != "REVOKED"
+                        or latest_row["client_sid"] != client_sid
+                        or payload.get("revocation_epoch")
+                        != int(latest_row["generation"])
+                        or payload.get("founder_approval_event_id")
+                        == latest_payload.get("founder_approval_event_id")
+                        or payload.get("founder_approval_event_digest")
+                        == latest_payload.get("founder_approval_event_digest")
+                        or payload.get("delegation_id")
+                        == latest_payload.get("delegation_id")
+                    ):
+                        raise PermissionError(
+                            "higher launch generation requires a new authenticated approval"
+                        )
+                elif generation != 1 or payload.get("revocation_epoch") != 0:
+                    raise PermissionError(
+                        "initial launch authorization generation must be one"
+                    )
                 connection.execute(
                     "INSERT INTO launch_authorizations VALUES(?,?,?,?,?,?,?,?)",
                     (
@@ -358,6 +404,25 @@ class AuthorityStore:
                 raise PermissionError(
                     "launch authorization generation is revoked or stale"
                 )
+            existing = json.loads(
+                str(
+                    connection.execute(
+                        "SELECT payload FROM launch_authorizations WHERE id=?",
+                        (identifier,),
+                    ).fetchone()["payload"]
+                )
+            )
+            for field in (
+                "project_id", "charter_id", "charter_revision",
+                "delegation_id", "founder_approval_event_id",
+                "founder_approval_event_digest",
+                "founder_authenticated_session_id",
+                "founder_principal_sid", "authorization_generation",
+            ):
+                if existing.get(field) != payload.get(field):
+                    raise PermissionError(
+                        "active launch authorization binding cannot change"
+                    )
             connection.execute(
                 "UPDATE launch_authorizations SET payload=?,payload_hash=?,"
                 "updated_at=? WHERE id=? AND payload_hash=?",

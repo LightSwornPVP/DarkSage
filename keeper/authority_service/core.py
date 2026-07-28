@@ -26,7 +26,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.1.0"
+SERVICE_VERSION = "1.2.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +267,10 @@ class AuthorityServiceCore:
             {
                 "project_id", "charter_id", "charter_revision",
                 "delegation_id", "authorization_generation", "expires_at",
+                "founder_approval_event_id",
+                "founder_approval_event_digest",
+                "founder_authenticated_session_id",
+                "founder_principal_sid",
             },
         )
         project_id = _text(payload["project_id"], "project ID")
@@ -278,7 +282,23 @@ class AuthorityServiceCore:
         )
         if expires_at <= datetime.now(UTC):
             raise PermissionError("launch authorization expiration is stale")
-        identifier = f"launch-authorization:{project_id}"
+        event_digest = _text(
+            payload["founder_approval_event_digest"],
+            "Founder approval event digest",
+        )
+        if (
+            len(event_digest) != 64
+            or any(character not in "0123456789abcdef" for character in event_digest)
+        ):
+            raise PermissionError("Founder approval event digest is not canonical")
+        principal_sid = _text(
+            payload["founder_principal_sid"], "Founder principal SID"
+        )
+        if not principal_sid.startswith("S-1-"):
+            raise PermissionError("Founder principal SID is invalid")
+        identifier = (
+            f"launch-authorization:{project_id}:generation:{generation}"
+        )
         record = self.keys.sign(
             "project-launch-authorization",
             {
@@ -293,6 +313,16 @@ class AuthorityServiceCore:
                 "delegation_id": _text(
                     payload["delegation_id"], "delegation ID"
                 ),
+                "founder_approval_event_id": _text(
+                    payload["founder_approval_event_id"],
+                    "Founder approval event ID",
+                ),
+                "founder_approval_event_digest": event_digest,
+                "founder_authenticated_session_id": _text(
+                    payload["founder_authenticated_session_id"],
+                    "Founder authenticated session ID",
+                ),
+                "founder_principal_sid": principal_sid,
                 "authorization_generation": generation,
                 "revocation_epoch": generation - 1,
                 "authorized_client_sid": client_sid,
@@ -313,7 +343,9 @@ class AuthorityServiceCore:
         generation = _positive_int(
             payload["authorization_generation"], "authorization generation"
         )
-        identifier = f"launch-authorization:{project_id}"
+        identifier = (
+            f"launch-authorization:{project_id}:generation:{generation}"
+        )
         prior = self.store.get("launch_authorizations", identifier)
         if (
             prior is None
@@ -520,6 +552,10 @@ class AuthorityServiceCore:
             "charter_id",
             "charter_revision",
             "task_revision",
+            "founder_approval_event_id",
+            "founder_approval_event_digest",
+            "founder_authenticated_session_id",
+            "founder_principal_sid",
         }
         _exact(payload, fields)
         registration_id = _text(payload["registration_id"], "registration ID")
@@ -540,6 +576,14 @@ class AuthorityServiceCore:
             or authorization.get("charter_revision")
             != payload["charter_revision"]
             or authorization.get("delegation_id") != payload["delegation_id"]
+            or authorization.get("founder_approval_event_id")
+            != payload["founder_approval_event_id"]
+            or authorization.get("founder_approval_event_digest")
+            != payload["founder_approval_event_digest"]
+            or authorization.get("founder_authenticated_session_id")
+            != payload["founder_authenticated_session_id"]
+            or authorization.get("founder_principal_sid")
+            != payload["founder_principal_sid"]
             or authorization.get("authorization_generation")
             != payload["authorization_generation"]
             or authorization.get("authorized_client_sid") != client_sid
@@ -603,6 +647,16 @@ class AuthorityServiceCore:
                 ],
                 "revocation_epoch": authorization["revocation_epoch"],
                 "delegation_id": payload["delegation_id"],
+                "founder_approval_event_id": payload[
+                    "founder_approval_event_id"
+                ],
+                "founder_approval_event_digest": payload[
+                    "founder_approval_event_digest"
+                ],
+                "founder_authenticated_session_id": payload[
+                    "founder_authenticated_session_id"
+                ],
+                "founder_principal_sid": payload["founder_principal_sid"],
                 "authorization_expires_at": payload[
                     "authorization_expires_at"
                 ],

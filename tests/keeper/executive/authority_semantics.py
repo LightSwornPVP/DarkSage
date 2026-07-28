@@ -159,7 +159,8 @@ class SemanticAuthorityTransport:
                 }
             if operation is Operation.AUTHORIZE_PROJECT_LAUNCH:
                 identifier = (
-                    f"launch-authorization:{payload['project_id']}"
+                    f"launch-authorization:{payload['project_id']}:"
+                    f"generation:{payload['authorization_generation']}"
                 )
                 existing = self.launch_authorizations.get(identifier)
                 if existing is not None and (
@@ -168,6 +169,31 @@ class SemanticAuthorityTransport:
                     != payload["authorization_generation"]
                 ):
                     raise PermissionError("launch generation is revoked")
+                prior = [
+                    item
+                    for item in self.launch_authorizations.values()
+                    if item.get("project_id") == payload["project_id"]
+                ]
+                if existing is None and prior:
+                    latest = max(
+                        prior,
+                        key=lambda item: int(
+                            item["authorization_generation"]
+                        ),
+                    )
+                    if (
+                        latest["service_state"] != "REVOKED"
+                        or payload["authorization_generation"]
+                        != latest["authorization_generation"] + 1
+                        or payload["founder_approval_event_id"]
+                        == latest["founder_approval_event_id"]
+                        or payload["founder_approval_event_digest"]
+                        == latest["founder_approval_event_digest"]
+                        or payload["delegation_id"] == latest["delegation_id"]
+                    ):
+                        raise PermissionError(
+                            "higher generation requires new Founder approval"
+                        )
                 authorization = self._sign(
                     "project-launch-authorization",
                     {
@@ -189,7 +215,8 @@ class SemanticAuthorityTransport:
                 return {"authorization": authorization}
             if operation is Operation.REVOKE_PROJECT_LAUNCH:
                 identifier = (
-                    f"launch-authorization:{payload['project_id']}"
+                    f"launch-authorization:{payload['project_id']}:"
+                    f"generation:{payload['authorization_generation']}"
                 )
                 authorization = self.launch_authorizations[identifier]
                 if (

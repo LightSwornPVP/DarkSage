@@ -289,6 +289,12 @@ class TestAuthorityClient(AuthorityServiceClient):
                 charter_id="test-charter",
                 charter_revision=1,
                 delegation_id="test-delegation",
+                founder_approval_event_id=f"test-event:{project_id}",
+                founder_approval_event_digest=hashlib.sha256(
+                    f"test-event:{project_id}".encode()
+                ).hexdigest(),
+                founder_authenticated_session_id="test-session",
+                founder_principal_sid="S-1-5-21-KEEPER-TEST",
                 authorization_generation=1,
                 expires_at=expires_at,
             )["authorization"]
@@ -297,6 +303,18 @@ class TestAuthorityClient(AuthorityServiceClient):
                     "launch_authorization_id": authorized["id"],
                     "authorization_generation": 1,
                     "delegation_id": "test-delegation",
+                    "founder_approval_event_id": authorized[
+                        "founder_approval_event_id"
+                    ],
+                    "founder_approval_event_digest": authorized[
+                        "founder_approval_event_digest"
+                    ],
+                    "founder_authenticated_session_id": authorized[
+                        "founder_authenticated_session_id"
+                    ],
+                    "founder_principal_sid": authorized[
+                        "founder_principal_sid"
+                    ],
                     "authorization_expires_at": authorized["expires_at"],
                     "project_id": project_id,
                     "charter_id": "test-charter",

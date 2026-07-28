@@ -6,6 +6,7 @@ import pytest
 
 from keeper.executive.authority_gateway import AuthorityProviderBinding
 from keeper.executive.authority_gateway import AuthorityBackedSpecialistGateway
+from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.models import ExecutiveTask, ProjectCharter, SpecialistProfile
 from keeper.executive.planning import WorkflowPlanner
 from keeper.executive.runtime import ExecutiveRuntime
@@ -31,6 +32,62 @@ def _task_and_gateway(
     gateway, authority = semantic_gateway(tmp_path)
     specialists = gateway.specialists(charter)
     return charter, tasks[0], gateway, authority, specialists
+
+
+def test_injected_semantic_reauthorization_uses_new_authenticated_generation(
+    tmp_path: Path,
+) -> None:
+    service, project, charter_one = approved_project(tmp_path)
+    _, tasks_one = WorkflowPlanner(service.repository).generate(
+        project, charter_one
+    )
+    gateway, authority = semantic_gateway(tmp_path)
+    specialist_one = gateway.specialists(charter_one)[0]
+    plan_one = gateway.prepare(tasks_one[0], charter_one, specialist_one)
+    gateway.reserve(plan_one)
+
+    service.repository.revoke_project_launch_authority(project.project_id)
+    canceled = gateway.revoke_project_launch(project.project_id, 1)
+    assert plan_one.authority_attempt_id in canceled
+    assert authority.attempts[plan_one.authority_attempt_id][
+        "service_state"
+    ] == "CANCELLED"
+
+    draft_two = service.revise(
+        charter_one,
+        {"purpose": f"{charter_one.purpose} reauthorized"},
+        reason="Founder approved a new authorization generation",
+        authority_basis="new authenticated Founder event",
+    )
+    proposed_two = service.propose(draft_two)
+    challenge_two = service.request_approval(proposed_two)
+    confirmation_two = service.authenticate(challenge_two)
+    approved_two, _, _ = service.confirm_approval(
+        challenge_two.challenge_id,
+        confirmation=confirmation_two,
+        intent=FounderApprovalIntent.APPROVE_CHARTER,
+    )
+    project_two = service.activate(approved_two)
+    charter_two = service.repository.charter(approved_two.charter_id)
+    _, tasks_two = WorkflowPlanner(service.repository).generate(
+        project_two, charter_two
+    )
+    specialist_two = gateway.specialists(charter_two)[0]
+    plan_two = gateway.prepare(tasks_two[0], charter_two, specialist_two)
+    gateway.reserve(plan_two)
+
+    first_id = (
+        f"launch-authorization:{project.project_id}:generation:1"
+    )
+    second_id = (
+        f"launch-authorization:{project.project_id}:generation:2"
+    )
+    assert authority.launch_authorizations[first_id]["service_state"] == "REVOKED"
+    assert authority.launch_authorizations[second_id]["service_state"] == "ACTIVE"
+    assert plan_one.founder_approval_event_id != plan_two.founder_approval_event_id
+    assert authority.attempts[plan_one.authority_attempt_id][
+        "service_state"
+    ] == "CANCELLED"
 
 
 def test_caller_created_profile_cannot_establish_qualification(

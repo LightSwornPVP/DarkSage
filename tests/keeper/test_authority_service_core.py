@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -139,6 +140,12 @@ def _launch_authority(
         charter_id="charter-1",
         charter_revision=1,
         delegation_id="approval-1",
+        founder_approval_event_id=f"event:{project_id}:1",
+        founder_approval_event_digest=hashlib.sha256(
+            f"event:{project_id}:1".encode()
+        ).hexdigest(),
+        founder_authenticated_session_id=f"session:{project_id}:1",
+        founder_principal_sid="S-1-5-21-1000",
         authorization_generation=1,
         expires_at="2099-01-01T00:00:00+00:00",
     )["authorization"]
@@ -146,12 +153,45 @@ def _launch_authority(
         "launch_authorization_id": authorization["id"],
         "authorization_generation": 1,
         "delegation_id": "approval-1",
+        "founder_approval_event_id": authorization[
+            "founder_approval_event_id"
+        ],
+        "founder_approval_event_digest": authorization[
+            "founder_approval_event_digest"
+        ],
+        "founder_authenticated_session_id": authorization[
+            "founder_authenticated_session_id"
+        ],
+        "founder_principal_sid": authorization["founder_principal_sid"],
         "authorization_expires_at": authorization["expires_at"],
         "project_id": project_id,
         "charter_id": "charter-1",
         "charter_revision": 1,
         "task_revision": 1,
     }
+
+
+def _authorize_generation(
+    client: AuthorityServiceClient,
+    project_id: str,
+    generation: int,
+    approval_suffix: str,
+) -> dict[str, Any]:
+    event_id = f"event:{project_id}:{approval_suffix}"
+    return client.authorize_project_launch(
+        project_id=project_id,
+        charter_id=f"charter-{generation}",
+        charter_revision=generation,
+        delegation_id=f"approval-{approval_suffix}",
+        founder_approval_event_id=event_id,
+        founder_approval_event_digest=hashlib.sha256(
+            event_id.encode()
+        ).hexdigest(),
+        founder_authenticated_session_id=f"session-{approval_suffix}",
+        founder_principal_sid="S-1-5-21-1000",
+        authorization_generation=generation,
+        expires_at="2099-01-01T00:00:00+00:00",
+    )["authorization"]
 
 
 def test_service_constructs_qualification_and_completion_records(
@@ -276,6 +316,86 @@ def test_revoked_launch_generation_invalidates_reserved_attempt(
     attempt = core.store.get("attempts", attempt_id)
     assert attempt is not None
     assert attempt["service_state"] == "CANCELLED"
+    generation_two = _authorize_generation(
+        client, "revoked-project", 2, "new-authenticated-event"
+    )
+    assert generation_two["authorization_generation"] == 2
+    first = core.store.get(
+        "launch_authorizations",
+        "launch-authorization:revoked-project:generation:1",
+    )
+    second = core.store.get(
+        "launch_authorizations",
+        "launch-authorization:revoked-project:generation:2",
+    )
+    assert first is not None and first["service_state"] == "REVOKED"
+    assert second is not None and second["service_state"] == "ACTIVE"
+    assert core.store.get("attempts", attempt_id)["service_state"] == "CANCELLED"  # type: ignore[index]
+
+
+def test_higher_generation_requires_new_authenticated_approval_and_restarts(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    first = _authorize_generation(client, "generation-project", 1, "one")
+    client.revoke_project_launch("generation-project", 1)
+    with pytest.raises(PermissionError, match="revoked|stale"):
+        _authorize_generation(client, "generation-project", 1, "one")
+    with pytest.raises(PermissionError, match="new authenticated"):
+        client.authorize_project_launch(
+            project_id="generation-project",
+            charter_id="charter-2",
+            charter_revision=2,
+            delegation_id=first["delegation_id"],
+            founder_approval_event_id=first["founder_approval_event_id"],
+            founder_approval_event_digest=first[
+                "founder_approval_event_digest"
+            ],
+            founder_authenticated_session_id=first[
+                "founder_authenticated_session_id"
+            ],
+            founder_principal_sid=first["founder_principal_sid"],
+            authorization_generation=2,
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+    second = _authorize_generation(client, "generation-project", 2, "two")
+    assert second["revocation_epoch"] == 1
+
+    restarted = AuthorityServiceCore(
+        core.root,
+        observer=core.observer,
+    )
+    first_after_restart = restarted.store.get(
+        "launch_authorizations",
+        "launch-authorization:generation-project:generation:1",
+    )
+    second_after_restart = restarted.store.get(
+        "launch_authorizations",
+        "launch-authorization:generation-project:generation:2",
+    )
+    assert first_after_restart is not None
+    assert first_after_restart["service_state"] == "REVOKED"
+    assert second_after_restart is not None
+    assert second_after_restart["service_state"] == "ACTIVE"
+
+
+def test_concurrent_higher_generation_has_one_canonical_winner(
+    tmp_path: Path,
+) -> None:
+    _core, client = _service(tmp_path)
+    _authorize_generation(client, "race-project", 1, "one")
+    client.revoke_project_launch("race-project", 1)
+
+    def create(suffix: str) -> str:
+        try:
+            _authorize_generation(client, "race-project", 2, suffix)
+        except PermissionError:
+            return "rejected"
+        return "created"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = sorted(pool.map(create, ("candidate-a", "candidate-b")))
+    assert outcomes == ["created", "rejected"]
 
 
 def test_request_replay_and_stale_timestamp_fail_closed(tmp_path: Path) -> None:

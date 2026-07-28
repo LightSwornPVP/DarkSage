@@ -71,6 +71,10 @@ class AuthorityExecutionPlan:
     authorization_generation: int
     authorization_expires_at: str
     delegation_id: str
+    founder_approval_event_id: str
+    founder_approval_event_digest: str
+    founder_authenticated_session_id: str
+    founder_principal_sid: str
     reservation_payload: dict[str, Any]
 
     def binding(self) -> dict[str, Any]:
@@ -256,7 +260,13 @@ class AuthorityBackedSpecialistGateway:
         binding, registration = resolved
         launch_task_id = task_id or task.task_id
         launch_role = role or task.role
-        if not charter.founder_approval_record_id:
+        if (
+            not charter.founder_approval_record_id
+            or not charter.founder_approval_event_id
+            or not charter.founder_approval_event_digest
+            or not charter.founder_authenticated_session_id
+            or not charter.founder_approval_identity
+        ):
             raise PermissionError("launch delegation identity is unavailable")
         authorization_generation = charter.revision
         authorization_expires_at = (
@@ -267,6 +277,14 @@ class AuthorityBackedSpecialistGateway:
             charter_id=task.charter_id,
             charter_revision=task.charter_revision,
             delegation_id=charter.founder_approval_record_id,
+            founder_approval_event_id=charter.founder_approval_event_id,
+            founder_approval_event_digest=(
+                charter.founder_approval_event_digest
+            ),
+            founder_authenticated_session_id=(
+                charter.founder_authenticated_session_id
+            ),
+            founder_principal_sid=charter.founder_approval_identity,
             authorization_generation=authorization_generation,
             expires_at=authorization_expires_at,
         )
@@ -282,6 +300,14 @@ class AuthorityBackedSpecialistGateway:
             != task.charter_revision
             or launch_authorization.get("delegation_id")
             != charter.founder_approval_record_id
+            or launch_authorization.get("founder_approval_event_id")
+            != charter.founder_approval_event_id
+            or launch_authorization.get("founder_approval_event_digest")
+            != charter.founder_approval_event_digest
+            or launch_authorization.get("founder_authenticated_session_id")
+            != charter.founder_authenticated_session_id
+            or launch_authorization.get("founder_principal_sid")
+            != charter.founder_approval_identity
             or launch_authorization.get("authorization_generation")
             != authorization_generation
         ):
@@ -368,6 +394,12 @@ class AuthorityBackedSpecialistGateway:
             "launch_authorization_id": str(launch_authorization["id"]),
             "authorization_generation": authorization_generation,
             "delegation_id": charter.founder_approval_record_id,
+            "founder_approval_event_id": charter.founder_approval_event_id,
+            "founder_approval_event_digest": charter.founder_approval_event_digest,
+            "founder_authenticated_session_id": (
+                charter.founder_authenticated_session_id
+            ),
+            "founder_principal_sid": charter.founder_approval_identity,
             "authorization_expires_at": str(
                 launch_authorization["expires_at"]
             ),
@@ -405,6 +437,10 @@ class AuthorityBackedSpecialistGateway:
             authorization_generation,
             str(launch_authorization["expires_at"]),
             charter.founder_approval_record_id,
+            charter.founder_approval_event_id,
+            charter.founder_approval_event_digest,
+            charter.founder_authenticated_session_id,
+            charter.founder_approval_identity,
             reservation_payload,
         )
 
@@ -429,6 +465,14 @@ class AuthorityBackedSpecialistGateway:
             or attempt.get("authorization_generation")
             != plan.authorization_generation
             or attempt.get("delegation_id") != plan.delegation_id
+            or attempt.get("founder_approval_event_id")
+            != plan.founder_approval_event_id
+            or attempt.get("founder_approval_event_digest")
+            != plan.founder_approval_event_digest
+            or attempt.get("founder_authenticated_session_id")
+            != plan.founder_authenticated_session_id
+            or attempt.get("founder_principal_sid")
+            != plan.founder_principal_sid
             or attempt.get("authorization_expires_at")
             != plan.authorization_expires_at
         ):
@@ -488,7 +532,10 @@ class AuthorityBackedSpecialistGateway:
         canceled = result.get("canceled_attempt_ids")
         if (
             result.get("authorization_id")
-            != f"launch-authorization:{project_id}"
+            != (
+                f"launch-authorization:{project_id}:"
+                f"generation:{authorization_generation}"
+            )
             or result.get("revocation_epoch") != authorization_generation
             or not isinstance(canceled, list)
             or not all(isinstance(item, str) for item in canceled)
