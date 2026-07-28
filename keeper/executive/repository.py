@@ -1735,6 +1735,21 @@ class ExecutiveRepository:
             if charter_revision is None or item.charter_revision == charter_revision
         ]
 
+    def pending_founder_approval_challenges(
+        self, project_id: str
+    ) -> list[FounderApprovalChallenge]:
+        return [
+            FounderApprovalChallenge.from_dict(item)
+            for item in self.store.list(
+                "executive_founder_approval_challenges"
+            )
+            if item.get("project_id") == project_id
+            and item.get("state") == "PENDING"
+            and isinstance(item.get("expires_at"), str)
+            and datetime.fromisoformat(str(item["expires_at"]))
+            > datetime.now(UTC)
+        ]
+
     def revoke_approval(self, approval_id: str, revoked_at: str) -> ApprovalRecord:
         approval = ApprovalRecord.from_dict(self._required("executive_approvals", approval_id))
         if approval.revoked_at is not None:

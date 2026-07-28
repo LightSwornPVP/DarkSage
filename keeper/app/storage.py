@@ -44,6 +44,17 @@ ENTITY_TABLES = (
     "executive_founder_approval_challenges",
     "executive_founder_approval_events",
 )
+EXECUTIVE_LIFECYCLE_TABLES = frozenset(
+    {
+        "executive_projects", "project_charters", "executive_workflows",
+        "executive_tasks", "executive_approvals", "project_memories",
+        "project_decisions", "project_assumptions", "project_conversations",
+        "specialist_assignments", "executive_execution_attempts",
+        "executive_reviews", "executive_late_results",
+        "executive_founder_approval_challenges",
+        "executive_founder_approval_events",
+    }
+)
 
 
 class KeeperStore:
@@ -293,6 +304,10 @@ class KeeperStore:
 
     def upsert(self, table: str, identifier: str, payload: dict[str, Any]) -> None:
         _require_table(table)
+        if table in EXECUTIVE_LIFECYCLE_TABLES:
+            raise PermissionError(
+                "Executive lifecycle tables require specialized repository operations"
+            )
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         digest = _sha256(serialized.encode("utf-8"))
         timestamp = _now()
@@ -362,6 +377,10 @@ class KeeperStore:
 
     def delete(self, table: str, identifier: str) -> None:
         _require_table(table)
+        if table in EXECUTIVE_LIFECYCLE_TABLES:
+            raise PermissionError(
+                "Executive lifecycle tables require specialized repository operations"
+            )
         with self.connect() as connection:
             connection.execute(f'DELETE FROM "{table}" WHERE id=?', (identifier,))
 

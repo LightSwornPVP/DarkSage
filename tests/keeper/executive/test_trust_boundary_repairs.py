@@ -28,6 +28,10 @@ from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
     semantic_gateway,
 )
+from tests.keeper.executive.fixture_store import (
+    delete_executive_fixture,
+    replace_executive_fixture,
+)
 
 
 def _proposed(
@@ -191,7 +195,8 @@ def test_copied_or_misbound_durable_approval_is_rejected(
     approved, approval = _approve(service, proposed)
     tampered = approval.to_dict()
     tampered[field] = value
-    service.repository.store.upsert(
+    replace_executive_fixture(
+        service.repository.store,
         "executive_approvals",
         approval.approval_id,
         tampered,
@@ -215,8 +220,10 @@ def test_missing_approval_and_same_content_different_id_are_rejected(
             source_interaction_id="founder-approval",
         )
     approved, approval = _approve(service, proposed)
-    service.repository.store.delete(
-        "executive_approvals", approval.approval_id
+    delete_executive_fixture(
+        service.repository.store,
+        "executive_approvals",
+        approval.approval_id,
     )
     with pytest.raises(PermissionError, match="unavailable"):
         service.activate(approved)
@@ -262,7 +269,8 @@ def test_tampered_stale_or_cross_bound_challenge_is_rejected(
     challenge = service.request_approval(proposed)
     tampered = challenge.to_dict()
     tampered[field] = value
-    service.repository.store.upsert(
+    replace_executive_fixture(
+        service.repository.store,
         "executive_founder_approval_challenges",
         challenge.challenge_id,
         tampered,
@@ -285,7 +293,8 @@ def test_copied_or_modified_approval_event_cannot_activate(
     )
     assert event is not None
     event["project_id"] = "copied-project"
-    service.repository.store.upsert(
+    replace_executive_fixture(
+        service.repository.store,
         "executive_founder_approval_events",
         approval.source_interaction_id,
         event,
@@ -821,6 +830,21 @@ def test_prelaunch_reservation_failure_releases_approval_and_budget(
     assert restored.consumed_at is None
     assert budget_states == ["RELEASED"]
     assert consumptions == 0
+
+
+def test_generic_store_cannot_mutate_executive_lifecycle_tables(
+    tmp_path: Path,
+) -> None:
+    store = KeeperStore(tmp_path / "keeper.db")
+    store.migrate()
+    with pytest.raises(PermissionError, match="specialized repository"):
+        store.upsert(
+            "executive_tasks",
+            "forged-task",
+            {"task_id": "forged-task"},
+        )
+    with pytest.raises(PermissionError, match="specialized repository"):
+        store.delete("executive_approvals", "approval")
 
 
 def test_stale_project_write_and_cross_project_task_are_rejected(

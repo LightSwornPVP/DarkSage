@@ -109,7 +109,12 @@ class StatusSurface:
                 item.to_dict()
                 for item in self.repository.assumptions(project_id)
             ),
-            pending_approvals=(),
+            pending_approvals=tuple(
+                item.to_dict()
+                for item in self.repository.pending_founder_approval_challenges(
+                    project_id
+                )
+            ),
             review_attempts=tuple(self.repository.reviews(project_id)),
             blockers=blockers,
             evidence_history=tuple(

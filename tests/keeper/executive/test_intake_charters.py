@@ -11,6 +11,7 @@ from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import ProjectCharter, ProjectRecord
 from keeper.executive.models import utc_now
 from keeper.executive.repository import ExecutiveRepository
+from keeper.executive.surfaces import StatusSurface
 
 
 def service(tmp_path: Path) -> CharterService:
@@ -100,6 +101,35 @@ def test_charter_approval_and_activation_are_bound(tmp_path: Path) -> None:
     assert charter.founder_approval_record_id
     stored = charter_service.repository.charter(charter.charter_id)
     assert stored.status == "ACTIVE"
+
+
+def test_waiting_status_exposes_exact_pending_founder_challenge(
+    tmp_path: Path,
+) -> None:
+    charter_service = service(tmp_path)
+    intake = ConversationIntake.revise(
+        ConversationIntake().extract("Create a small research report."),
+        replacements={
+            "success_criteria": ("report exists",),
+            "target_audience": "Founder",
+        },
+    )
+    project = charter_service.create_project(intake)
+    proposed = charter_service.propose(
+        charter_service.draft(project, intake)
+    )
+    challenge = charter_service.request_approval(proposed)
+    view = StatusSurface(charter_service.repository).project(
+        project.project_id
+    )
+    assert len(view.pending_approvals) == 1
+    assert (
+        view.pending_approvals[0]["challenge_id"]
+        == challenge.challenge_id
+    )
+    assert view.pending_approvals[0]["charter_digest"] == (
+        challenge.charter_digest
+    )
 
 
 def test_non_founder_or_blank_identity_cannot_approve(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ class PilotAuthorityTransport:
         self.registrations: dict[str, dict[str, Any]] = {}
         self.qualifications: dict[str, dict[str, Any]] = {}
         self.attempts: dict[str, dict[str, Any]] = {}
+        self.launch_authorizations: dict[str, dict[str, Any]] = {}
         self.execution_count = 0
         for provider_id in ("codex", "reviewer-provider"):
             registration_id = f"pilot-registration-{provider_id}"
@@ -96,6 +98,7 @@ class PilotAuthorityTransport:
             "registrations": self.registrations,
             "qualifications": self.qualifications,
             "attempts": self.attempts,
+            "launch_authorizations": self.launch_authorizations,
         }[kind]
         record = values.get(identifier)
         return {
@@ -103,7 +106,50 @@ class PilotAuthorityTransport:
             "record": dict(record) if record is not None else None,
         }
 
+    def authorize_project_launch(self, **identity: Any) -> dict[str, Any]:
+        identifier = f"launch-authorization:{identity['project_id']}"
+        authorization = self._sign(
+            "project-launch-authorization",
+            {
+                "id": identifier,
+                "schema_version": 1,
+                **identity,
+                "revocation_epoch": identity["authorization_generation"] - 1,
+            },
+        )
+        self.launch_authorizations[identifier] = {
+            **authorization,
+            "service_state": "ACTIVE",
+        }
+        return {"authorization": authorization}
+
+    def revoke_project_launch(
+        self, project_id: str, authorization_generation: int
+    ) -> dict[str, Any]:
+        identifier = f"launch-authorization:{project_id}"
+        self.launch_authorizations[identifier]["service_state"] = "REVOKED"
+        canceled = []
+        for attempt_id, attempt in self.attempts.items():
+            if (
+                attempt.get("launch_authorization_id") == identifier
+                and attempt.get("authorization_generation")
+                == authorization_generation
+                and attempt.get("service_state") == "RESERVED"
+            ):
+                attempt["service_state"] = "CANCELLED"
+                canceled.append(attempt_id)
+        return {
+            "authorization_id": identifier,
+            "revocation_epoch": authorization_generation,
+            "canceled_attempt_ids": canceled,
+        }
+
     def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
+        authorization = self.launch_authorizations[
+            str(identity["launch_authorization_id"])
+        ]
+        if authorization["service_state"] != "ACTIVE":
+            raise PermissionError("pilot launch generation is revoked")
         attempt_id = (
             f"provider-attempt:{identity['keeper_run_id']}:"
             f"{identity['provider_run_id']}"
@@ -134,9 +180,84 @@ class PilotAuthorityTransport:
 
     def execute_provider(self, attempt_id: str) -> dict[str, Any]:
         attempt = self.attempts[attempt_id]
+        authorization = self.launch_authorizations[
+            str(attempt["launch_authorization_id"])
+        ]
+        if authorization["service_state"] != "ACTIVE":
+            raise PermissionError("pilot launch generation is revoked")
         if attempt["service_state"] != "RESERVED":
             raise PermissionError("pilot Authority attempt is not reserved")
         self.execution_count += 1
+        prompt = json.loads(
+            Path(str(attempt["prompt_path"])).read_text(encoding="utf-8")
+        )
+        stdout_path = Path(str(attempt["stdout_path"]))
+        stderr_path = Path(str(attempt["stderr_path"]))
+        stderr_path.write_text("", encoding="utf-8")
+        if attempt["role"] == "reviewer":
+            output = {
+                "schema_version": 1,
+                "review_id": f"pilot-review:{attempt_id}",
+                "review_attempt_id": attempt_id,
+                "reviewer_registration": attempt["registration_id"],
+                "reviewer_qualification": prompt[
+                    "provider_qualification_id"
+                ],
+                "reviewer_independence_identity": attempt[
+                    "provider_instance_id"
+                ],
+                "project_id": prompt["global_brief"]["project_id"],
+                "charter_revision": prompt["global_brief"][
+                    "charter_revision"
+                ],
+                "workflow_id": attempt["keeper_run_id"].split(":")[-1],
+                "task_id": prompt["task_guidance"]["task_id"],
+                "author_attempt_id": prompt["author_attempt_id"],
+                "artifact_identity": (
+                    f"file-set:{prompt['task_guidance']['task_id']}"
+                ),
+                "artifact_digest": prompt["artifact_revision_digest"],
+                "evidence_digest": self._digest(f"review:{attempt_id}"),
+                "review_criteria_version": "keeper-review-v1",
+                "review_criteria_digest": prompt["review_criteria_digest"],
+                "review_disposition": "ACCEPTED",
+                "findings": [],
+                "failed_criteria": [],
+                "required_repairs": [],
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        else:
+            relative = (
+                Path(".keeper-artifacts")
+                / f"{self._digest(attempt_id)}.json"
+            )
+            artifact = Path(str(attempt["workspace"])) / relative
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(
+                json.dumps(
+                    {"attempt_id": attempt_id, "task_id": attempt["task_id"]},
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            output = {
+                "status": "completed",
+                "files_changed": [relative.as_posix()],
+            }
+        stdout_path.write_text(json.dumps(output), encoding="utf-8")
+        evidence = {
+            "stdout_sha256": hashlib.sha256(
+                stdout_path.read_bytes()
+            ).hexdigest(),
+            "stderr_sha256": hashlib.sha256(
+                stderr_path.read_bytes()
+            ).hexdigest(),
+        }
+        evidence_digest = hashlib.sha256(
+            json.dumps(
+                evidence, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
         completion = self._sign(
             "provider-completion",
             {
@@ -148,9 +269,7 @@ class PilotAuthorityTransport:
                 "registration_id": attempt["registration_id"],
                 "provider_instance_id": attempt["provider_instance_id"],
                 "normalized_result": "completed",
-                "provider_evidence_digest": self._digest(
-                    f"pilot-evidence:{attempt_id}"
-                ),
+                "provider_evidence_digest": evidence_digest,
             },
         )
         self.attempts[attempt_id] = {
