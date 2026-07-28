@@ -34,6 +34,8 @@ class Operation(StrEnum):
     BEGIN_QUALIFICATION = "begin_qualification"
     FINALIZE_QUALIFICATION = "finalize_qualification"
     RESERVE_ATTEMPT = "reserve_attempt"
+    AUTHORIZE_PROJECT_LAUNCH = "authorize_project_launch"
+    REVOKE_PROJECT_LAUNCH = "revoke_project_launch"
     EXECUTE_PROVIDER = "execute_provider"
     RECORD_PROVIDER_START = "record_provider_start"
     FINALIZE_COMPLETION = "finalize_completion"

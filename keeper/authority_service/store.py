@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SERVICE_SCHEMA_VERSION = 2
+SERVICE_SCHEMA_VERSION = 3
 _EXPECTED_TABLES = {
     "attempts",
     "audit_log",
@@ -17,6 +17,7 @@ _EXPECTED_TABLES = {
     "registrations",
     "replay_guard",
     "service_meta",
+    "launch_authorizations",
 }
 
 
@@ -88,6 +89,16 @@ class AuthorityStore:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(registration_id) REFERENCES registrations(id)
                 );
+                CREATE TABLE IF NOT EXISTS launch_authorizations(
+                    id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    client_sid TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS audit_log(
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id TEXT NOT NULL UNIQUE,
@@ -126,7 +137,33 @@ class AuthorityStore:
                     );
                     INSERT INTO attempts SELECT * FROM attempts_v1;
                     DROP TABLE attempts_v1;
-                    UPDATE service_meta SET value='2' WHERE key='schema_version';
+                    CREATE TABLE launch_authorizations(
+                        id TEXT PRIMARY KEY,
+                        state TEXT NOT NULL,
+                        generation INTEGER NOT NULL,
+                        client_sid TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    UPDATE service_meta SET value='3' WHERE key='schema_version';
+                    """
+                )
+            elif int(row["value"]) == 2:
+                connection.executescript(
+                    """
+                    CREATE TABLE launch_authorizations(
+                        id TEXT PRIMARY KEY,
+                        state TEXT NOT NULL,
+                        generation INTEGER NOT NULL,
+                        client_sid TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    UPDATE service_meta SET value='3' WHERE key='schema_version';
                     """
                 )
             elif int(row["value"]) != SERVICE_SCHEMA_VERSION:
@@ -201,6 +238,20 @@ class AuthorityStore:
                             timestamp,
                         ),
                     )
+                elif table == "launch_authorizations":
+                    connection.execute(
+                        "INSERT INTO launch_authorizations VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            identifier,
+                            state,
+                            attempt_number,
+                            run_id,
+                            serialized,
+                            digest,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
                 else:
                     raise ValueError("unsupported authority table")
         except sqlite3.IntegrityError as error:
@@ -209,7 +260,10 @@ class AuthorityStore:
             ) from error
 
     def get(self, table: str, identifier: str) -> dict[str, Any] | None:
-        if table not in {"registrations", "qualifications", "attempts"}:
+        if table not in {
+            "registrations", "qualifications", "attempts",
+            "launch_authorizations",
+        }:
             raise ValueError("unsupported authority table")
         with self.connect() as connection:
             row = connection.execute(
@@ -234,7 +288,10 @@ class AuthorityStore:
         state: str,
         payload: dict[str, Any],
     ) -> None:
-        if table not in {"registrations", "qualifications", "attempts"}:
+        if table not in {
+            "registrations", "qualifications", "attempts",
+            "launch_authorizations",
+        }:
             raise ValueError("unsupported authority table")
         serialized, digest = _serialize(payload)
         with self.connect() as connection:
@@ -250,7 +307,10 @@ class AuthorityStore:
                 )
 
     def list_records(self, table: str) -> list[dict[str, Any]]:
-        if table not in {"registrations", "qualifications", "attempts"}:
+        if table not in {
+            "registrations", "qualifications", "attempts",
+            "launch_authorizations",
+        }:
             raise ValueError("unsupported authority table")
         with self.connect() as connection:
             identifiers = [
@@ -264,6 +324,125 @@ class AuthorityStore:
             for identifier in identifiers
             if (value := self.get(table, identifier)) is not None
         ]
+
+    def refresh_launch_authorization(
+        self,
+        identifier: str,
+        generation: int,
+        client_sid: str,
+        payload: dict[str, Any],
+    ) -> None:
+        serialized, digest = _serialize(payload)
+        timestamp = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state,generation,client_sid,payload_hash "
+                "FROM launch_authorizations WHERE id=?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO launch_authorizations VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        identifier, "ACTIVE", generation, client_sid,
+                        serialized, digest, timestamp, timestamp,
+                    ),
+                )
+                return
+            if (
+                row["state"] != "ACTIVE"
+                or int(row["generation"]) != generation
+                or row["client_sid"] != client_sid
+            ):
+                raise PermissionError(
+                    "launch authorization generation is revoked or stale"
+                )
+            connection.execute(
+                "UPDATE launch_authorizations SET payload=?,payload_hash=?,"
+                "updated_at=? WHERE id=? AND payload_hash=?",
+                (serialized, digest, timestamp, identifier, row["payload_hash"]),
+            )
+
+    def revoke_launch_authorization(
+        self,
+        identifier: str,
+        generation: int,
+        client_sid: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, ...]:
+        serialized, digest = _serialize(payload)
+        timestamp = _now()
+        canceled: list[str] = []
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE launch_authorizations SET state='REVOKED',payload=?,"
+                "payload_hash=?,updated_at=? WHERE id=? AND state='ACTIVE' "
+                "AND generation=? AND client_sid=?",
+                (
+                    serialized, digest, timestamp, identifier, generation,
+                    client_sid,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("launch authorization revocation is stale")
+            rows = connection.execute(
+                "SELECT id,payload,payload_hash FROM attempts "
+                "WHERE state IN ('RESERVED','LAUNCH_CLAIMED')"
+            ).fetchall()
+            for row in rows:
+                attempt = json.loads(str(row["payload"]))
+                if (
+                    isinstance(attempt, dict)
+                    and attempt.get("launch_authorization_id") == identifier
+                    and attempt.get("authorization_generation") == generation
+                ):
+                    connection.execute(
+                        "UPDATE attempts SET state='CANCELLED',updated_at=? "
+                        "WHERE id=? AND payload_hash=?",
+                        (timestamp, row["id"], row["payload_hash"]),
+                    )
+                    canceled.append(str(row["id"]))
+        return tuple(canceled)
+
+    def claim_attempt_with_launch_authority(
+        self,
+        attempt_id: str,
+        authorization_id: str,
+        generation: int,
+        client_sid: str,
+        claim: dict[str, Any],
+    ) -> None:
+        serialized, digest = _serialize(claim)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            authorization = connection.execute(
+                "SELECT state,generation,client_sid,payload FROM "
+                "launch_authorizations WHERE id=?",
+                (authorization_id,),
+            ).fetchone()
+            if (
+                authorization is None
+                or authorization["state"] != "ACTIVE"
+                or int(authorization["generation"]) != generation
+                or authorization["client_sid"] != client_sid
+            ):
+                raise PermissionError(
+                    "authoritative launch generation is revoked or stale"
+                )
+            authorization_payload = json.loads(str(authorization["payload"]))
+            if datetime.fromisoformat(
+                str(authorization_payload["expires_at"])
+            ) <= datetime.now(UTC):
+                raise PermissionError("authoritative launch lease expired")
+            cursor = connection.execute(
+                "UPDATE attempts SET state='LAUNCH_CLAIMED',payload=?,"
+                "payload_hash=?,updated_at=? WHERE id=? AND state='RESERVED'",
+                (serialized, digest, _now(), attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("provider launch is not reserved")
 
     def audit(
         self,

@@ -88,6 +88,29 @@ def _service(tmp_path: Path) -> tuple[AuthorityServiceCore, AuthorityServiceClie
     return core, client
 
 
+def _launch_authority(
+    client: AuthorityServiceClient, project_id: str
+) -> dict[str, object]:
+    authorization = client.authorize_project_launch(
+        project_id=project_id,
+        charter_id="charter-1",
+        charter_revision=1,
+        delegation_id="approval-1",
+        authorization_generation=1,
+        expires_at="2099-01-01T00:00:00+00:00",
+    )["authorization"]
+    return {
+        "launch_authorization_id": authorization["id"],
+        "authorization_generation": 1,
+        "delegation_id": "approval-1",
+        "authorization_expires_at": authorization["expires_at"],
+        "project_id": project_id,
+        "charter_id": "charter-1",
+        "charter_revision": 1,
+        "task_revision": 1,
+    }
+
+
 def test_service_constructs_qualification_and_completion_records(
     tmp_path: Path,
 ) -> None:
@@ -103,6 +126,7 @@ def test_service_constructs_qualification_and_completion_records(
     assert core.keys.verify("provider-qualification", qualification)
 
     reserved = client.reserve_attempt(
+        **_launch_authority(client, "project-1"),
         registration_id=registration_id,
         keeper_run_id="keeper-run-1",
         task_id="task-1",
@@ -140,6 +164,7 @@ def test_service_rejects_arbitrary_signing_and_duplicate_launch(
     registration_id = str(registered["registration_id"])
     client.qualify_provider(registration_id)
     reserved = client.reserve_attempt(
+        **_launch_authority(client, "project-2"),
         registration_id=registration_id,
         keeper_run_id="keeper-run-2",
         task_id="task-2",
@@ -169,6 +194,43 @@ def test_service_rejects_arbitrary_signing_and_duplicate_launch(
             ),
             "S-1-5-21-1000",
         )
+
+
+def test_revoked_launch_generation_invalidates_reserved_attempt(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    executable = tmp_path / "controlled-provider.exe"
+    registration_id = str(
+        client.register_provider("codex", executable)["registration_id"]
+    )
+    client.qualify_provider(registration_id)
+    launch = _launch_authority(client, "revoked-project")
+    reserved = client.reserve_attempt(
+        **launch,
+        registration_id=registration_id,
+        keeper_run_id="revoked-run",
+        task_id="revoked-task",
+        stage_id="author_execution",
+        role="builder",
+        attempt_number=1,
+        provider_run_id="revoked-provider-run",
+        provider_instance_id="instance",
+        evidence_path=str((tmp_path / "evidence" / "run.json").resolve()),
+        prompt_path=str((tmp_path / "evidence" / "prompt.md").resolve()),
+        stdout_path=str((tmp_path / "evidence" / "stdout.log").resolve()),
+        stderr_path=str((tmp_path / "evidence" / "stderr.log").resolve()),
+        workspace=str((tmp_path / "workspace").resolve()),
+        timeout_seconds=30,
+        reasoning_level="medium",
+        environment={},
+    )
+    attempt_id = str(reserved["attempt_id"])
+    revoked = client.revoke_project_launch("revoked-project", 1)
+    assert attempt_id in revoked["canceled_attempt_ids"]
+    with pytest.raises(PermissionError, match="not reserved"):
+        client.execute_provider(attempt_id)
+    assert core.store.get("attempts", attempt_id)["service_state"] == "CANCELLED"
 
 
 def test_request_replay_and_stale_timestamp_fail_closed(tmp_path: Path) -> None:

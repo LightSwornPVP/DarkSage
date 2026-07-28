@@ -149,6 +149,8 @@ class AuthorityServiceCore:
             Operation.BEGIN_QUALIFICATION: self._qualify_provider,
             Operation.FINALIZE_QUALIFICATION: self._internal_only,
             Operation.RESERVE_ATTEMPT: self._reserve_attempt,
+            Operation.AUTHORIZE_PROJECT_LAUNCH: self._authorize_project_launch,
+            Operation.REVOKE_PROJECT_LAUNCH: self._revoke_project_launch,
             Operation.EXECUTE_PROVIDER: self._execute_provider,
             Operation.RECORD_PROVIDER_START: self._record_provider_start,
             Operation.FINALIZE_COMPLETION: self._finalize_completion,
@@ -251,6 +253,86 @@ class AuthorityServiceCore:
                 if isinstance(allowed_evidence_root, Path)
                 else None
             ),
+        }
+
+    def _authorize_project_launch(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(
+            payload,
+            {
+                "project_id", "charter_id", "charter_revision",
+                "delegation_id", "authorization_generation", "expires_at",
+            },
+        )
+        project_id = _text(payload["project_id"], "project ID")
+        generation = _positive_int(
+            payload["authorization_generation"], "authorization generation"
+        )
+        expires_at = datetime.fromisoformat(
+            _text(payload["expires_at"], "authorization expiration")
+        )
+        if expires_at <= datetime.now(UTC):
+            raise PermissionError("launch authorization expiration is stale")
+        identifier = f"launch-authorization:{project_id}"
+        record = self.keys.sign(
+            "project-launch-authorization",
+            {
+                "id": identifier,
+                "kind": "project_launch_authorization",
+                "schema_version": 1,
+                "project_id": project_id,
+                "charter_id": _text(payload["charter_id"], "charter ID"),
+                "charter_revision": _positive_int(
+                    payload["charter_revision"], "charter revision"
+                ),
+                "delegation_id": _text(
+                    payload["delegation_id"], "delegation ID"
+                ),
+                "authorization_generation": generation,
+                "revocation_epoch": generation - 1,
+                "authorized_client_sid": client_sid,
+                "expires_at": expires_at.isoformat(),
+                "authorized_at": _now(),
+            },
+        )
+        self.store.refresh_launch_authorization(
+            identifier, generation, client_sid, record
+        )
+        return {"authorization": record}
+
+    def _revoke_project_launch(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(payload, {"project_id", "authorization_generation"})
+        project_id = _text(payload["project_id"], "project ID")
+        generation = _positive_int(
+            payload["authorization_generation"], "authorization generation"
+        )
+        identifier = f"launch-authorization:{project_id}"
+        prior = self.store.get("launch_authorizations", identifier)
+        if (
+            prior is None
+            or prior.get("authorized_client_sid") != client_sid
+            or prior.get("authorization_generation") != generation
+        ):
+            raise PermissionError("launch authorization revocation is misbound")
+        record = self.keys.sign(
+            "project-launch-revocation",
+            {
+                **{key: value for key, value in prior.items() if key != "service_state"},
+                "kind": "project_launch_revocation",
+                "revocation_epoch": generation,
+                "revoked_at": _now(),
+            },
+        )
+        canceled = self.store.revoke_launch_authorization(
+            identifier, generation, client_sid, record
+        )
+        return {
+            "authorization_id": identifier,
+            "revocation_epoch": generation,
+            "canceled_attempt_ids": list(canceled),
         }
 
     def _register_provider(
@@ -426,12 +508,43 @@ class AuthorityServiceCore:
             "timeout_seconds",
             "reasoning_level",
             "environment",
+            "launch_authorization_id",
+            "authorization_generation",
+            "delegation_id",
+            "authorization_expires_at",
+            "project_id",
+            "charter_id",
+            "charter_revision",
+            "task_revision",
         }
         _exact(payload, fields)
         registration_id = _text(payload["registration_id"], "registration ID")
         registration = self.store.get("registrations", registration_id)
         if registration is None or registration.pop("service_state", None) != "QUALIFIED":
             raise PermissionError("provider registration is not service-qualified")
+        authorization_id = _text(
+            payload["launch_authorization_id"], "launch authorization ID"
+        )
+        authorization = self.store.get(
+            "launch_authorizations", authorization_id
+        )
+        if (
+            authorization is None
+            or authorization.pop("service_state", None) != "ACTIVE"
+            or authorization.get("project_id") != payload["project_id"]
+            or authorization.get("charter_id") != payload["charter_id"]
+            or authorization.get("charter_revision")
+            != payload["charter_revision"]
+            or authorization.get("delegation_id") != payload["delegation_id"]
+            or authorization.get("authorization_generation")
+            != payload["authorization_generation"]
+            or authorization.get("authorized_client_sid") != client_sid
+            or authorization.get("expires_at")
+            != payload["authorization_expires_at"]
+        ):
+            raise PermissionError(
+                "attempt launch authorization generation is invalid"
+            )
         attempt_id = (
             f"provider-attempt:{_text(payload['keeper_run_id'], 'run ID')}:"
             f"{_text(payload['provider_run_id'], 'provider run ID')}"
@@ -480,6 +593,19 @@ class AuthorityServiceCore:
                 "launch_challenge": challenge,
                 "authorized_client_sid": client_sid,
                 "reserved_at": _now(),
+                "launch_authorization_id": authorization_id,
+                "authorization_generation": payload[
+                    "authorization_generation"
+                ],
+                "revocation_epoch": authorization["revocation_epoch"],
+                "delegation_id": payload["delegation_id"],
+                "authorization_expires_at": payload[
+                    "authorization_expires_at"
+                ],
+                "project_id": payload["project_id"],
+                "charter_id": payload["charter_id"],
+                "charter_revision": payload["charter_revision"],
+                "task_revision": payload["task_revision"],
             },
         )
         self.store.insert(
@@ -520,8 +646,12 @@ class AuthorityServiceCore:
                 "claim_transaction_id": uuid.uuid4().hex,
             },
         )
-        self.store.transition(
-            "attempts", attempt_id, "RESERVED", "LAUNCH_CLAIMED", claim
+        self.store.claim_attempt_with_launch_authority(
+            attempt_id,
+            str(attempt["launch_authorization_id"]),
+            int(attempt["authorization_generation"]),
+            client_sid,
+            claim,
         )
         started_result: dict[str, Any] = {}
 
@@ -752,7 +882,13 @@ class AuthorityServiceCore:
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
         _exact(payload, {"kind", "id"})
-        table = _choice(payload["kind"], {"registrations", "qualifications", "attempts"})
+        table = _choice(
+            payload["kind"],
+            {
+                "registrations", "qualifications", "attempts",
+                "launch_authorizations",
+            },
+        )
         identifier = _text(payload["id"], "state ID")
         value = self.store.get(table, identifier)
         return {"found": value is not None, "record": value}

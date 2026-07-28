@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -24,6 +25,10 @@ class AuthorityOperations(Protocol):
     def diagnostics(self) -> dict[str, Any]: ...
     def query_state(self, kind: str, identifier: str) -> dict[str, Any]: ...
     def reserve_attempt(self, **identity: Any) -> dict[str, Any]: ...
+    def authorize_project_launch(self, **identity: Any) -> dict[str, Any]: ...
+    def revoke_project_launch(
+        self, project_id: str, authorization_generation: int
+    ) -> dict[str, Any]: ...
     def execute_provider(self, attempt_id: str) -> dict[str, Any]: ...
     def finalize_completion(self, attempt_id: str) -> dict[str, Any]: ...
     def cancel_attempt(self, attempt_id: str) -> dict[str, Any]: ...
@@ -62,6 +67,10 @@ class AuthorityExecutionPlan:
     artifact_revision_digest: str | None
     author_attempt_id: str | None
     review_criteria_digest: str | None
+    launch_authorization_id: str
+    authorization_generation: int
+    authorization_expires_at: str
+    delegation_id: str
     reservation_payload: dict[str, Any]
 
     def binding(self) -> dict[str, Any]:
@@ -247,6 +256,38 @@ class AuthorityBackedSpecialistGateway:
         binding, registration = resolved
         launch_task_id = task_id or task.task_id
         launch_role = role or task.role
+        if not charter.founder_approval_record_id:
+            raise PermissionError("launch delegation identity is unavailable")
+        authorization_generation = charter.revision
+        authorization_expires_at = (
+            datetime.now(UTC) + timedelta(minutes=15)
+        ).isoformat()
+        authorization_result = self._authority.authorize_project_launch(
+            project_id=task.project_id,
+            charter_id=task.charter_id,
+            charter_revision=task.charter_revision,
+            delegation_id=charter.founder_approval_record_id,
+            authorization_generation=authorization_generation,
+            expires_at=authorization_expires_at,
+        )
+        launch_authorization = authorization_result.get("authorization")
+        if (
+            not isinstance(launch_authorization, dict)
+            or not self._authority.verify(
+                "project-launch-authorization", launch_authorization
+            )
+            or launch_authorization.get("project_id") != task.project_id
+            or launch_authorization.get("charter_id") != task.charter_id
+            or launch_authorization.get("charter_revision")
+            != task.charter_revision
+            or launch_authorization.get("delegation_id")
+            != charter.founder_approval_record_id
+            or launch_authorization.get("authorization_generation")
+            != authorization_generation
+        ):
+            raise PermissionError(
+                "Authority project launch authorization is invalid"
+            )
         prompt = {
             "global_brief": GuidanceBuilder.global_brief(charter).to_dict(),
             "task_guidance": GuidanceBuilder.task_guidance(
@@ -324,6 +365,16 @@ class AuthorityBackedSpecialistGateway:
             "environment": {
                 "KEEPER_EXECUTIVE_BINDING_DIGEST": _digest(binding_material)
             },
+            "launch_authorization_id": str(launch_authorization["id"]),
+            "authorization_generation": authorization_generation,
+            "delegation_id": charter.founder_approval_record_id,
+            "authorization_expires_at": str(
+                launch_authorization["expires_at"]
+            ),
+            "project_id": task.project_id,
+            "charter_id": task.charter_id,
+            "charter_revision": task.charter_revision,
+            "task_revision": task.revision,
         }
         return AuthorityExecutionPlan(
             attempt_id,
@@ -350,6 +401,10 @@ class AuthorityBackedSpecialistGateway:
             artifact_revision_digest,
             task.authority_attempt_id,
             _digest(review_instructions) if review_instructions else None,
+            str(launch_authorization["id"]),
+            authorization_generation,
+            str(launch_authorization["expires_at"]),
+            charter.founder_approval_record_id,
             reservation_payload,
         )
 
@@ -369,6 +424,13 @@ class AuthorityBackedSpecialistGateway:
             or attempt.get("stage_id") != plan.stage_id
             or attempt.get("role") != plan.role
             or attempt.get("workspace") != str(Path(plan.workspace).resolve())
+            or attempt.get("launch_authorization_id")
+            != plan.launch_authorization_id
+            or attempt.get("authorization_generation")
+            != plan.authorization_generation
+            or attempt.get("delegation_id") != plan.delegation_id
+            or attempt.get("authorization_expires_at")
+            != plan.authorization_expires_at
         ):
             raise PermissionError(
                 "Authority attempt reservation binding is invalid"
@@ -416,6 +478,25 @@ class AuthorityBackedSpecialistGateway:
 
     def cancel(self, attempt_id: str) -> None:
         self._authority.cancel_attempt(attempt_id)
+
+    def revoke_project_launch(
+        self, project_id: str, authorization_generation: int
+    ) -> tuple[str, ...]:
+        result = self._authority.revoke_project_launch(
+            project_id, authorization_generation
+        )
+        canceled = result.get("canceled_attempt_ids")
+        if (
+            result.get("authorization_id")
+            != f"launch-authorization:{project_id}"
+            or result.get("revocation_epoch") != authorization_generation
+            or not isinstance(canceled, list)
+            or not all(isinstance(item, str) for item in canceled)
+        ):
+            raise PermissionError(
+                "Authority launch revocation response is invalid"
+            )
+        return tuple(canceled)
 
     @staticmethod
     def plan_from_record(record: dict[str, Any]) -> AuthorityExecutionPlan:

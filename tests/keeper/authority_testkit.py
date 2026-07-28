@@ -280,6 +280,32 @@ class TestAuthorityClient(AuthorityServiceClient):
     def sign(self, purpose: str, record: dict[str, Any]) -> dict[str, Any]:
         return self.core.keys.sign(purpose, record)
 
+    def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
+        if "launch_authorization_id" not in identity:
+            project_id = f"test-project:{identity['keeper_run_id']}"
+            expires_at = "2099-01-01T00:00:00+00:00"
+            authorized = self.authorize_project_launch(
+                project_id=project_id,
+                charter_id="test-charter",
+                charter_revision=1,
+                delegation_id="test-delegation",
+                authorization_generation=1,
+                expires_at=expires_at,
+            )["authorization"]
+            identity.update(
+                {
+                    "launch_authorization_id": authorized["id"],
+                    "authorization_generation": 1,
+                    "delegation_id": "test-delegation",
+                    "authorization_expires_at": authorized["expires_at"],
+                    "project_id": project_id,
+                    "charter_id": "test-charter",
+                    "charter_revision": 1,
+                    "task_revision": 1,
+                }
+            )
+        return super().reserve_attempt(**identity)
+
 
 def _qualification_command(
     registration: dict[str, Any],

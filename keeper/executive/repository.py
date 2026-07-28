@@ -1371,6 +1371,91 @@ class ExecutiveRepository:
                     attempt_ids.append(task.review_attempt_id)
         return canceled_project, tuple(attempt_ids)
 
+    def revoke_project_launch_authority(
+        self, project_id: str
+    ) -> tuple[ProjectRecord, tuple[str, ...]]:
+        """Persist revocation and invalidate every launch-capable local claim."""
+        timestamp = utc_now()
+        attempt_ids: list[str] = []
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            project_payload, project_hash = self._entity_in_transaction(
+                connection, "executive_projects", project_id
+            )
+            project = ProjectRecord.from_dict(project_payload)
+            if ExecutiveState(project.state) in {
+                ExecutiveState.CANCELED,
+                ExecutiveState.COMPLETED,
+                ExecutiveState.FAILED,
+            }:
+                raise PermissionError("terminal project authority cannot be revoked")
+            revoked_project = replace(
+                project,
+                state=ExecutiveState.PAUSED.value,
+                pause_reason="Founder revoked delegation.",
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_projects",
+                project_id,
+                project_hash,
+                revoked_project.to_dict(),
+            )
+            approval_rows = connection.execute(
+                'SELECT id, payload, payload_hash FROM "executive_approvals"'
+            ).fetchall()
+            for row in approval_rows:
+                payload = json.loads(str(row["payload"]))
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("project_id") == project_id
+                    and payload.get("revoked_at") is None
+                ):
+                    approval = ApprovalRecord.from_dict(payload)
+                    self._update_entity_cas(
+                        connection,
+                        "executive_approvals",
+                        approval.approval_id,
+                        str(row["payload_hash"]),
+                        replace(approval, revoked_at=timestamp).to_dict(),
+                    )
+            task_rows = connection.execute(
+                'SELECT id, payload, payload_hash FROM "executive_tasks"'
+            ).fetchall()
+            for row in task_rows:
+                payload = json.loads(str(row["payload"]))
+                if not isinstance(payload, dict) or payload.get(
+                    "project_id"
+                ) != project_id:
+                    continue
+                task = ExecutiveTask.from_dict(payload)
+                if task.authority_attempt_id and task.status in {
+                    TaskStatus.LAUNCH_CLAIMED,
+                    TaskStatus.EXECUTION_STARTED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.COMPLETION_PENDING,
+                    TaskStatus.UNCERTAIN,
+                }:
+                    attempt_ids.append(task.authority_attempt_id)
+                    revoked_task = replace(
+                        task,
+                        status=TaskStatus.CANCELED.value,
+                        result_disposition="DELEGATION_REVOKED",
+                        revision=task.revision + 1,
+                        updated_at=timestamp,
+                    )
+                    self._update_entity_cas(
+                        connection,
+                        "executive_tasks",
+                        task.task_id,
+                        str(row["payload_hash"]),
+                        revoked_task.to_dict(),
+                    )
+                if task.review_attempt_id:
+                    attempt_ids.append(task.review_attempt_id)
+        return revoked_project, tuple(dict.fromkeys(attempt_ids))
+
     def task(self, task_id: str) -> ExecutiveTask:
         return ExecutiveTask.from_dict(self._required("executive_tasks", task_id))
 

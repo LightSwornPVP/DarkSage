@@ -80,6 +80,20 @@ class AuthorityServiceClient:
     def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
         return self.request(Operation.RESERVE_ATTEMPT, dict(identity))
 
+    def authorize_project_launch(self, **identity: Any) -> dict[str, Any]:
+        return self.request(Operation.AUTHORIZE_PROJECT_LAUNCH, dict(identity))
+
+    def revoke_project_launch(
+        self, project_id: str, authorization_generation: int
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.REVOKE_PROJECT_LAUNCH,
+            {
+                "project_id": project_id,
+                "authorization_generation": authorization_generation,
+            },
+        )
+
     def record_provider_start(self, attempt_id: str, pid: int) -> dict[str, Any]:
         return self.request(
             Operation.RECORD_PROVIDER_START,

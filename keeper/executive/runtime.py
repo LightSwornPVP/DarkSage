@@ -350,15 +350,42 @@ class ExecutiveRuntime:
         return resumed
 
     def revoke_delegation(self, project_id: str) -> ProjectRecord:
-        project = self.repository.project(project_id)
-        for approval in self.repository.approvals(
-            project_id, project.active_charter_revision
-        ):
-            if approval.revoked_at is None:
-                self.repository.revoke_approval(
-                    approval.approval_id, utc_now()
-                )
-        return self.pause(project_id, "Founder revoked delegation.")
+        project, attempt_ids = (
+            self.repository.revoke_project_launch_authority(project_id)
+        )
+        failures: list[str] = []
+        try:
+            authoritative_canceled = self.gateway.revoke_project_launch(
+                project_id, int(project.active_charter_revision or 0)
+            )
+        except (KeyError, PermissionError, RuntimeError, ValueError):
+            authoritative_canceled = ()
+            failures.append("project-launch-authorization")
+        attempt_ids = tuple(
+            dict.fromkeys((*attempt_ids, *authoritative_canceled))
+        )
+        for attempt_id in attempt_ids:
+            try:
+                self.gateway.cancel(attempt_id)
+            except (KeyError, PermissionError, RuntimeError):
+                state = self.gateway.attempt_state(attempt_id)
+                if state not in {
+                    "CANCELLED", "CANCELED", "COMPLETED", "FAILED"
+                }:
+                    failures.append(attempt_id)
+        if failures:
+            current = self.repository.project(project_id)
+            blocked = replace(
+                current,
+                pause_reason=(
+                    "Founder revoked delegation; Authority cancellation "
+                    "requires reconciliation."
+                ),
+                updated_at=utc_now(),
+            )
+            self.repository.save_project(blocked, expected=current)
+            return blocked
+        return project
 
     def cancel(self, project_id: str) -> ProjectRecord:
         canceled, attempt_ids = self.repository.cancel_project_execution(

@@ -152,6 +152,50 @@ def test_cancellation_before_launch_prevents_authority_execution(
     assert authority.execution_calls == []
 
 
+def test_revocation_between_local_recheck_and_authority_launch_prevents_side_effects(
+    tmp_path: Path,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    authority.before_launch_started = threading.Event()
+    authority.before_launch_release = threading.Event()
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            runtime.progress(project.project_id)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert authority.before_launch_started.wait(timeout=10)
+    revoked = runtime.revoke_delegation(project.project_id)
+    authority.before_launch_release.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert revoked.state == "PAUSED"
+    assert authority.execution_calls == []
+    assert authority.side_effect_count == 0
+    task = service.repository.tasks(project.project_id)[0]
+    assert task.status == "CANCELED"
+    assert task.authority_attempt_id is not None
+    assert (
+        authority.attempts[task.authority_attempt_id]["service_state"]
+        == "CANCELLED"
+    )
+    approval = service.repository.approvals(
+        project.project_id, project.active_charter_revision
+    )[0]
+    assert approval.revoked_at is not None
+
+
 def test_stale_task_write_is_rejected(tmp_path: Path) -> None:
     service, project, _ = approved_project(tmp_path)
     gateway, _ = semantic_gateway(tmp_path)

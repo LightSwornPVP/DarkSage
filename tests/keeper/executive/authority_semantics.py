@@ -44,6 +44,7 @@ class SemanticAuthorityTransport:
         self.registrations: dict[str, dict[str, Any]] = {}
         self.qualifications: dict[str, dict[str, Any]] = {}
         self.attempts: dict[str, dict[str, Any]] = {}
+        self.launch_authorizations: dict[str, dict[str, Any]] = {}
         self.execution_calls: list[str] = []
         self.side_effect_count = 0
         self.raise_after_side_effect = False
@@ -61,6 +62,8 @@ class SemanticAuthorityTransport:
         self.mutate_artifact_during_review = False
         self.started: threading.Event | None = None
         self.release: threading.Event | None = None
+        self.before_launch_started: threading.Event | None = None
+        self.before_launch_release: threading.Event | None = None
         self._lock = threading.RLock()
         self._install_provider("registration-codex", "qualification-codex", "codex")
         self._install_provider(
@@ -125,12 +128,20 @@ class SemanticAuthorityTransport:
     def __call__(self, request: Request) -> dict[str, Any]:
         operation = request.operation
         payload = request.payload
+        if operation is Operation.EXECUTE_PROVIDER:
+            gate_started = self.before_launch_started
+            gate_release = self.before_launch_release
+            if gate_started is not None:
+                gate_started.set()
+            if gate_release is not None:
+                gate_release.wait(timeout=10)
         with self._lock:
             if operation is Operation.QUERY_STATE:
                 table = {
                     "registrations": self.registrations,
                     "qualifications": self.qualifications,
                     "attempts": self.attempts,
+                    "launch_authorizations": self.launch_authorizations,
                 }[str(payload["kind"])]
                 record = table.get(str(payload["id"]))
                 return {
@@ -144,7 +155,79 @@ class SemanticAuthorityTransport:
                     and record.get("_purpose") == payload.get("purpose")
                     and record.get("_signature") == "authority-test-signature"
                 }
+            if operation is Operation.AUTHORIZE_PROJECT_LAUNCH:
+                identifier = (
+                    f"launch-authorization:{payload['project_id']}"
+                )
+                existing = self.launch_authorizations.get(identifier)
+                if existing is not None and (
+                    existing["service_state"] != "ACTIVE"
+                    or existing["authorization_generation"]
+                    != payload["authorization_generation"]
+                ):
+                    raise PermissionError("launch generation is revoked")
+                authorization = self._sign(
+                    "project-launch-authorization",
+                    {
+                        "id": identifier,
+                        "kind": "project_launch_authorization",
+                        "schema_version": 1,
+                        **payload,
+                        "revocation_epoch": (
+                            int(payload["authorization_generation"]) - 1
+                        ),
+                        "authorized_client_sid": "semantic-test-client",
+                        "authorized_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                self.launch_authorizations[identifier] = {
+                    **authorization,
+                    "service_state": "ACTIVE",
+                }
+                return {"authorization": authorization}
+            if operation is Operation.REVOKE_PROJECT_LAUNCH:
+                identifier = (
+                    f"launch-authorization:{payload['project_id']}"
+                )
+                authorization = self.launch_authorizations[identifier]
+                if (
+                    authorization["service_state"] != "ACTIVE"
+                    or authorization["authorization_generation"]
+                    != payload["authorization_generation"]
+                ):
+                    raise PermissionError("launch revocation is stale")
+                authorization["service_state"] = "REVOKED"
+                canceled: list[str] = []
+                for attempt_id, attempt in self.attempts.items():
+                    if (
+                        attempt.get("launch_authorization_id") == identifier
+                        and attempt.get("authorization_generation")
+                        == payload["authorization_generation"]
+                        and attempt.get("service_state")
+                        in {"RESERVED", "LAUNCH_CLAIMED"}
+                    ):
+                        attempt["service_state"] = "CANCELLED"
+                        canceled.append(attempt_id)
+                return {
+                    "authorization_id": identifier,
+                    "revocation_epoch": payload[
+                        "authorization_generation"
+                    ],
+                    "canceled_attempt_ids": canceled,
+                }
             if operation is Operation.RESERVE_ATTEMPT:
+                authorization = self.launch_authorizations.get(
+                    str(payload["launch_authorization_id"])
+                )
+                if (
+                    authorization is None
+                    or authorization["service_state"] != "ACTIVE"
+                    or authorization["authorization_generation"]
+                    != payload["authorization_generation"]
+                ):
+                    raise PermissionError(
+                        "attempt launch generation is revoked"
+                    )
                 attempt_id = (
                     f"provider-attempt:{payload['keeper_run_id']}:"
                     f"{payload['provider_run_id']}"
@@ -186,6 +269,17 @@ class SemanticAuthorityTransport:
             if operation is Operation.EXECUTE_PROVIDER:
                 attempt_id = str(payload["attempt_id"])
                 attempt = self.attempts[attempt_id]
+                authorization = self.launch_authorizations[
+                    str(attempt["launch_authorization_id"])
+                ]
+                if (
+                    authorization["service_state"] != "ACTIVE"
+                    or authorization["authorization_generation"]
+                    != attempt["authorization_generation"]
+                ):
+                    raise PermissionError(
+                        "authoritative launch generation is revoked"
+                    )
                 if attempt["service_state"] != "RESERVED":
                     raise PermissionError("attempt is not reserved")
                 attempt["service_state"] = "EXECUTION_STARTED"
