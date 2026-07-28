@@ -5,11 +5,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from keeper.authority_service.client import AuthorityServiceClient
+from keeper.authority_service.client import TestAuthorityServiceClient
 from keeper.authority_service.protocol import Operation, Request
 from keeper.executive.authority_gateway import (
     AuthorityBackedSpecialistGateway,
     AuthorityProviderBinding,
+    SemanticAuthorityTestGateway,
     authority_operations,
 )
 
@@ -267,9 +268,9 @@ def semantic_gateway(
     *,
     transport: SemanticAuthorityTransport | None = None,
     bindings: tuple[AuthorityProviderBinding, ...] | None = None,
-) -> tuple[AuthorityBackedSpecialistGateway, SemanticAuthorityTransport]:
+) -> tuple[SemanticAuthorityTestGateway, SemanticAuthorityTransport]:
     semantic = transport or SemanticAuthorityTransport()
-    client = AuthorityServiceClient(test_transport=semantic)
+    client = TestAuthorityServiceClient(semantic)
     configured = bindings or (
         AuthorityProviderBinding(
             "registration-codex",
@@ -281,7 +282,7 @@ def semantic_gateway(
         ),
     )
     return (
-        AuthorityBackedSpecialistGateway(
+        SemanticAuthorityTestGateway(
             authority_operations(client),
             configured,
             tmp_path / "authority-exchange",

@@ -9,6 +9,8 @@ from keeper.executive.authority import (
 from keeper.executive.authority_gateway import (
     AuthorityBackedSpecialistGateway,
     AuthorityExecutionPlan,
+    ProductionAuthorityBackedSpecialistGateway,
+    SemanticAuthorityTestGateway,
 )
 from keeper.executive.enums import ExecutiveState, TaskStatus
 from keeper.executive.models import (
@@ -40,21 +42,52 @@ IN_FLIGHT = frozenset(
 class ExecutiveRuntime:
     """Production runtime: every provider boundary is KeeperAuthority-owned."""
 
+    __slots__ = (
+        "_repository", "_gateway", "evaluator", "selector",
+        "_production_composition",
+    )
+
     def __init__(
         self,
         repository: ExecutiveRepository,
-        gateway: AuthorityBackedSpecialistGateway,
+        gateway: SemanticAuthorityTestGateway,
     ) -> None:
-        if type(gateway) is not AuthorityBackedSpecialistGateway:
+        if type(gateway) is not SemanticAuthorityTestGateway:
             raise RuntimeError(
-                "production Executive requires the concrete Authority-backed gateway"
+                "test runtime requires the explicit semantic Authority test gateway"
             )
-        self.repository = repository
-        self.gateway = gateway
+        self._repository = repository
+        self._gateway = gateway
         self.evaluator = AuthorityEvaluator()
         self.selector = SpecialistSelector()
+        self._production_composition = False
+
+    @classmethod
+    def production(
+        cls,
+        repository: ExecutiveRepository,
+        gateway: ProductionAuthorityBackedSpecialistGateway,
+    ) -> ExecutiveRuntime:
+        if type(gateway) is not ProductionAuthorityBackedSpecialistGateway:
+            raise RuntimeError("production runtime requires the sealed production gateway")
+        runtime = object.__new__(cls)
+        runtime._repository = repository
+        runtime._gateway = gateway
+        runtime.evaluator = AuthorityEvaluator()
+        runtime.selector = SpecialistSelector()
+        runtime._production_composition = True
+        return runtime
+
+    @property
+    def repository(self) -> ExecutiveRepository:
+        return self._repository
+
+    @property
+    def gateway(self) -> AuthorityBackedSpecialistGateway:
+        return self._gateway
 
     def progress(self, project_id: str) -> ProjectRecord:
+        self._validate_composition()
         project = self.repository.project(project_id)
         if project.state in {
             ExecutiveState.PAUSED,
@@ -266,6 +299,15 @@ class ExecutiveRuntime:
         if imported.status == TaskStatus.CANCELED:
             return self.repository.project(project_id)
         return self._review(project, charter, imported, author)
+
+    def _validate_composition(self) -> None:
+        expected = (
+            ProductionAuthorityBackedSpecialistGateway
+            if self._production_composition
+            else SemanticAuthorityTestGateway
+        )
+        if type(self._gateway) is not expected:
+            raise RuntimeError("Executive Authority composition was replaced")
 
     def pause(self, project_id: str, reason: str) -> ProjectRecord:
         project = self.repository.project(project_id)

@@ -6,7 +6,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from keeper.authority_service.client import AuthorityServiceClient
+from keeper.authority_service.client import (
+    AuthorityServiceClient,
+    ProductionAuthorityServiceClient,
+)
 from keeper.executive.models import (
     ExecutiveTask,
     ProjectCharter,
@@ -82,7 +85,9 @@ class AuthenticatedExecutionResult:
     authenticated: bool
 
 
-def authority_operations(client: AuthorityServiceClient) -> AuthorityOperations:
+def authority_operations(
+    client: AuthorityServiceClient | ProductionAuthorityServiceClient,
+) -> AuthorityOperations:
     """Dependency-inversion seam; no signing or protected state enters Executive."""
     return client
 
@@ -466,6 +471,37 @@ class AuthorityBackedSpecialistGateway:
             raise PermissionError(
                 "Authority provider registration changed before launch"
             )
+
+
+class SemanticAuthorityTestGateway(AuthorityBackedSpecialistGateway):
+    """Test-only gateway for deterministic Authority semantic transports."""
+
+    __slots__ = ()
+
+
+class ProductionAuthorityBackedSpecialistGateway(
+    AuthorityBackedSpecialistGateway
+):
+    """Sealed production gateway accepting only the real IPC client type."""
+
+    __slots__ = ("_production_client",)
+
+    def __init__(
+        self,
+        authority_client: ProductionAuthorityServiceClient,
+        bindings: tuple[AuthorityProviderBinding, ...],
+        exchange_root: Path,
+    ) -> None:
+        if type(authority_client) is not ProductionAuthorityServiceClient:
+            raise RuntimeError(
+                "production gateway requires the production Authority IPC client"
+            )
+        self._production_client = authority_client
+        super().__init__(
+            authority_operations(authority_client),
+            bindings,
+            exchange_root,
+        )
 
 
 def _record(state: dict[str, Any], name: str) -> dict[str, Any]:

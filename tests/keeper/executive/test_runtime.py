@@ -5,11 +5,19 @@ from pathlib import Path
 import pytest
 
 from keeper.app.storage import KeeperStore
+from keeper.authority_service.client import (
+    ProductionAuthorityServiceClient,
+    TestAuthorityServiceClient as InjectedAuthorityClient,
+)
 from keeper.executive.authority_gateway import (
     AuthorityBackedSpecialistGateway,
+    AuthorityProviderBinding,
+    SemanticAuthorityTestGateway,
+    authority_operations,
 )
 from keeper.executive.repository import ExecutiveRepository
 from keeper.executive.runtime import ExecutiveRuntime
+from keeper.executive.service import KeeperExecutive
 from keeper.executive.surfaces import StatusSurface
 from tests.keeper.executive.authority_semantics import (
     SemanticAuthorityTransport,
@@ -90,12 +98,59 @@ def test_revocation_prevents_new_authority_attempt(tmp_path: Path) -> None:
 
 def test_production_runtime_rejects_mock_or_missing_authority(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, _, _ = approved_project(tmp_path)
-    with pytest.raises(RuntimeError, match="Authority-backed"):
+    with pytest.raises(RuntimeError, match="semantic Authority"):
         ExecutiveRuntime(service.repository, object())  # type: ignore[arg-type]
     client_gateway, _ = semantic_gateway(tmp_path)
-    assert type(client_gateway) is AuthorityBackedSpecialistGateway
+    assert type(client_gateway) is SemanticAuthorityTestGateway
+    runtime = ExecutiveRuntime(service.repository, client_gateway)
+    with pytest.raises(AttributeError):
+        runtime.gateway = client_gateway  # type: ignore[misc]
+    monkeypatch.setenv("KEEPER_AUTHORITY_MOCK", "1")
+    production_client = ProductionAuthorityServiceClient(
+        timeout_seconds=0.01
+    )
+    assert not hasattr(production_client, "_test_transport")
+    with pytest.raises(TypeError):
+        ProductionAuthorityServiceClient(  # type: ignore[call-arg]
+            test_transport=SemanticAuthorityTransport()
+        )
+
+    test_client = InjectedAuthorityClient(SemanticAuthorityTransport())
+    test_backed_concrete = AuthorityBackedSpecialistGateway(
+        authority_operations(test_client),
+        (
+            AuthorityProviderBinding(
+                "registration-codex", "qualification-codex"
+            ),
+        ),
+        tmp_path / "test-backed",
+    )
+    with pytest.raises(RuntimeError, match="semantic Authority"):
+        ExecutiveRuntime(
+            service.repository,
+            test_backed_concrete,  # type: ignore[arg-type]
+        )
+    executive = KeeperExecutive(tmp_path / "production.db")
+    with pytest.raises(RuntimeError, match="production Authority client"):
+        executive.production_runtime(
+            test_client,  # type: ignore[arg-type]
+            provider_bindings=(
+                AuthorityProviderBinding(
+                    "registration-codex", "qualification-codex"
+                ),
+            ),
+            exchange_root=tmp_path / "exchange",
+        )
+
+    with pytest.raises(TypeError):
+        AuthorityProviderBinding(  # type: ignore[call-arg]
+            "registration-codex",
+            "qualification-codex",
+            ("caller-capability",),
+        )
 
 
 def test_unqualified_authority_registration_waits_safely(

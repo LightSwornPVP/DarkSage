@@ -12,8 +12,8 @@ if str(REPOSITORY) not in sys.path:
     sys.path.insert(0, str(REPOSITORY))
 
 from keeper.executive.authority_gateway import (
-    AuthorityBackedSpecialistGateway,
     AuthorityProviderBinding,
+    SemanticAuthorityTestGateway,
 )
 from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.runtime import ExecutiveRuntime
@@ -229,7 +229,7 @@ def main() -> int:
         )
         runtime = ExecutiveRuntime(
             executive.repository,
-            AuthorityBackedSpecialistGateway(
+            SemanticAuthorityTestGateway(
                 authority,
                 bindings,
                 root / "authority-exchange",

@@ -123,6 +123,56 @@ class AuthorityServiceClient:
         )
 
 
+class ProductionAuthorityServiceClient(AuthorityServiceClient):
+    """Structurally production-only client with fixed authenticated IPC transport."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        pipe_name: str = DEFAULT_PIPE_NAME,
+        *,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        if pipe_name != DEFAULT_PIPE_NAME:
+            raise RuntimeError("production Authority endpoint is not canonical")
+        super().__init__(pipe_name, timeout_seconds=timeout_seconds)
+        del self._test_transport
+
+    def _send(self, request: Request) -> dict[str, Any]:
+        if os.name != "nt":
+            raise RuntimeError("Keeper Authority Service requires Windows")
+        handle = _connect(self.pipe_name, self.timeout_seconds)
+        try:
+            _write_all(handle, encode_frame(request.to_dict()))
+            response = decode_frame(lambda length: _read(handle, length))
+        finally:
+            _close(handle)
+        return parse_response(response, request.request_id)
+
+    def require_live_identity(self) -> dict[str, Any]:
+        diagnostics = self.diagnostics()
+        if (
+            diagnostics.get("protocol_version") != 1
+            or diagnostics.get("observer_available") is not True
+            or not isinstance(diagnostics.get("service_root"), str)
+            or not isinstance(diagnostics.get("service_key_id"), str)
+            or not isinstance(diagnostics.get("service_key_version"), int)
+            or not isinstance(diagnostics.get("client_sid"), str)
+        ):
+            raise RuntimeError("live Keeper Authority identity is invalid")
+        return diagnostics
+
+
+class TestAuthorityServiceClient(AuthorityServiceClient):
+    """Explicit test-only injected Authority transport."""
+
+    __slots__ = ()
+
+    def __init__(self, test_transport: Callable[[Request], dict[str, Any]]) -> None:
+        super().__init__(test_transport=test_transport)
+
+
 def _connect(pipe_name: str, timeout_seconds: float) -> int:
     kernel32 = _kernel32()
     deadline = time.monotonic() + timeout_seconds

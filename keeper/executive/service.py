@@ -4,11 +4,10 @@ from pathlib import Path
 from typing import Any
 
 from keeper.app.storage import KeeperStore
-from keeper.authority_service.client import AuthorityServiceClient
+from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.executive.authority_gateway import (
-    AuthorityBackedSpecialistGateway,
     AuthorityProviderBinding,
-    authority_operations,
+    ProductionAuthorityBackedSpecialistGateway,
 )
 from keeper.executive.charters import CharterService
 from keeper.executive.intake import ConversationIntake, IntakeResult
@@ -88,15 +87,20 @@ class KeeperExecutive:
 
     def production_runtime(
         self,
-        authority_client: AuthorityServiceClient,
+        authority_client: ProductionAuthorityServiceClient,
         *,
         provider_bindings: tuple[AuthorityProviderBinding, ...],
         exchange_root: Path,
     ) -> ExecutiveRuntime:
         """Fail-closed production composition root; no mock gateway seam."""
-        gateway = AuthorityBackedSpecialistGateway(
-            authority_operations(authority_client),
+        if type(authority_client) is not ProductionAuthorityServiceClient:
+            raise RuntimeError(
+                "production runtime requires the production Authority client"
+            )
+        authority_client.require_live_identity()
+        gateway = ProductionAuthorityBackedSpecialistGateway(
+            authority_client,
             provider_bindings,
             exchange_root,
         )
-        return ExecutiveRuntime(self.repository, gateway)
+        return ExecutiveRuntime.production(self.repository, gateway)
