@@ -108,7 +108,7 @@ def test_production_runtime_rejects_mock_or_missing_authority(
     assert type(client_gateway) is SemanticAuthorityTestGateway
     runtime = ExecutiveRuntime(service.repository, client_gateway)
     with pytest.raises(AttributeError):
-        runtime.gateway = client_gateway  # type: ignore[misc]
+        runtime.gateway = client_gateway
     monkeypatch.setenv("KEEPER_AUTHORITY_MOCK", "1")
     production_client = ProductionAuthorityServiceClient(
         timeout_seconds=0.01

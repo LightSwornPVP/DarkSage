@@ -264,6 +264,22 @@ class KeeperStore:
             ).fetchone()
         return None if row is None else str(row["mode"])
 
+    def executive_repository_binding(self) -> tuple[str, str, str]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT mode, bound_at FROM executive_repository_mode "
+                "WHERE singleton=1"
+            ).fetchone()
+        if row is None:
+            raise PermissionError(
+                "Executive database has no trusted repository mode binding"
+            )
+        return (
+            str(self.path),
+            str(row["mode"]),
+            str(row["bound_at"]),
+        )
+
     def consume_reroute_authorization(
         self,
         authorization_id: str,

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 from keeper.authority_service.client import (
+    DEFAULT_PIPE_NAME,
     AuthorityServiceClient,
     ProductionAuthorityServiceClient,
 )
@@ -661,12 +663,26 @@ class SemanticAuthorityTestGateway(AuthorityBackedSpecialistGateway):
     __slots__ = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _ProductionGatewayRuntimeIdentity:
+    gateway_token: str
+    client_identity: int
+    pipe_name: str
+    timeout_seconds: float
+    bindings: tuple[AuthorityProviderBinding, ...]
+    exchange_root: str
+
+
 class ProductionAuthorityBackedSpecialistGateway(
     AuthorityBackedSpecialistGateway
 ):
     """Sealed production gateway accepting only the real IPC client type."""
 
-    __slots__ = ("_production_client",)
+    _production_client: ProductionAuthorityServiceClient
+    __runtime_token: str
+    __sealed: bool
+
+    __slots__ = ("_production_client", "__runtime_token", "__sealed")
 
     def __init__(
         self,
@@ -678,11 +694,85 @@ class ProductionAuthorityBackedSpecialistGateway(
             raise RuntimeError(
                 "production gateway requires the production Authority IPC client"
             )
+        object.__setattr__(
+            self,
+            "_ProductionAuthorityBackedSpecialistGateway__sealed",
+            False,
+        )
         self._production_client = authority_client
         super().__init__(
             authority_operations(authority_client),
             bindings,
             exchange_root,
+        )
+        object.__setattr__(
+            self,
+            "_ProductionAuthorityBackedSpecialistGateway__runtime_token",
+            secrets.token_hex(32),
+        )
+        object.__setattr__(
+            self,
+            "_ProductionAuthorityBackedSpecialistGateway__sealed",
+            True,
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if (
+            getattr(
+                self,
+                "_ProductionAuthorityBackedSpecialistGateway__sealed",
+                False,
+            )
+            and name
+            in {
+                "_production_client",
+                "_authority",
+                "_bindings",
+                "_exchange_root",
+                "_ProductionAuthorityBackedSpecialistGateway__runtime_token",
+            }
+        ):
+            raise AttributeError(
+                "production Authority gateway composition is immutable"
+            )
+        object.__setattr__(self, name, value)
+
+    def _production_runtime_identity(
+        self,
+    ) -> _ProductionGatewayRuntimeIdentity:
+        if type(self) is not ProductionAuthorityBackedSpecialistGateway:
+            raise PermissionError(
+                "production runtime requires the exact production gateway"
+            )
+        client = self._production_client
+        client_attributes = getattr(client, "__dict__", {})
+        if (
+            type(client) is not ProductionAuthorityServiceClient
+            or self._authority is not client
+            or client.pipe_name != DEFAULT_PIPE_NAME
+            or not isinstance(client.timeout_seconds, (int, float))
+            or not isinstance(client_attributes, dict)
+            or "_test_transport" in client_attributes
+            or "_send" in client_attributes
+            or type(client)._send is not ProductionAuthorityServiceClient._send
+            or not isinstance(self._bindings, tuple)
+            or not self._bindings
+            or any(
+                type(binding) is not AuthorityProviderBinding
+                for binding in self._bindings
+            )
+            or not isinstance(self._exchange_root, Path)
+        ):
+            raise PermissionError(
+                "production Authority gateway composition is invalid"
+            )
+        return _ProductionGatewayRuntimeIdentity(
+            gateway_token=self.__runtime_token,
+            client_identity=id(client),
+            pipe_name=client.pipe_name,
+            timeout_seconds=float(client.timeout_seconds),
+            bindings=self._bindings,
+            exchange_root=str(self._exchange_root),
         )
 
 

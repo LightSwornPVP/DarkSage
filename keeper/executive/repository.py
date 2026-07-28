@@ -5,7 +5,7 @@ import json
 import secrets
 import sqlite3
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -49,13 +49,25 @@ from keeper.executive.founder_auth import (
 from keeper.executive.state import PROJECT_TRANSITIONS, TASK_TRANSITIONS
 
 
+@dataclass(frozen=True, slots=True)
+class _ProductionRepositoryRuntimeIdentity:
+    repository_token: str
+    database_binding: tuple[str, str, str]
+
 class ExecutiveRepository:
     __slots__ = (
-        "__store", "__founder_authenticator", "__mode", "__sealed",
+        "__store",
+        "__founder_authenticator",
+        "__mode",
+        "__runtime_token",
+        "__database_binding",
+        "__sealed",
     )
     __store: KeeperStore
     __founder_authenticator: FounderAuthenticator
     __mode: str
+    __runtime_token: str
+    __database_binding: tuple[str, str, str]
     __sealed: bool
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -73,6 +85,11 @@ class ExecutiveRepository:
             raise AttributeError("Executive repository is already initialized")
         object.__setattr__(self, "_ExecutiveRepository__sealed", False)
         store.bind_executive_repository_mode(mode)
+        database_binding = store.executive_repository_binding()
+        if database_binding[1] != mode:
+            raise PermissionError(
+                "Executive database repository mode binding is invalid"
+            )
         object.__setattr__(self, "_ExecutiveRepository__store", store)
         object.__setattr__(
             self,
@@ -80,6 +97,12 @@ class ExecutiveRepository:
             founder_authenticator,
         )
         object.__setattr__(self, "_ExecutiveRepository__mode", mode)
+        object.__setattr__(
+            self, "_ExecutiveRepository__runtime_token", secrets.token_hex(32)
+        )
+        object.__setattr__(
+            self, "_ExecutiveRepository__database_binding", database_binding
+        )
         object.__setattr__(self, "_ExecutiveRepository__sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -94,6 +117,31 @@ class ExecutiveRepository:
                 "production repository does not expose mutable storage"
             )
         return self.__store
+
+    def _production_runtime_identity(
+        self,
+    ) -> _ProductionRepositoryRuntimeIdentity:
+        if type(self) is not ProductionExecutiveRepository:
+            raise PermissionError(
+                "production runtime requires the exact production repository"
+            )
+        if self.__mode != "PRODUCTION":
+            raise PermissionError(
+                "production repository mode is invalid"
+            )
+        self._trusted_authenticator()
+        current_binding = self.__store.executive_repository_binding()
+        if (
+            current_binding != self.__database_binding
+            or current_binding[1] != "PRODUCTION"
+        ):
+            raise PermissionError(
+                "production repository database binding changed"
+            )
+        return _ProductionRepositoryRuntimeIdentity(
+            repository_token=self.__runtime_token,
+            database_binding=current_binding,
+        )
 
     def _trusted_authenticator(self) -> FounderAuthenticator:
         authenticator = self.__founder_authenticator
