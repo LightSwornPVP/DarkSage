@@ -103,7 +103,7 @@ def test_missing_or_cross_project_approval_source_is_rejected(
     tmp_path: Path,
 ) -> None:
     service, _, proposed = _proposed(tmp_path)
-    with pytest.raises(KeyError, match="project_conversations"):
+    with pytest.raises(PermissionError, match="source"):
         service.approve(
             proposed,
             approver="Founder",
@@ -156,6 +156,64 @@ def test_activation_reloads_durable_charter_and_approval(
     assert stored.title == approved.title
     assert stored.status == "ACTIVE"
     assert stored.founder_approval_record_id == approval.approval_id
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("project_id", "another-project"),
+        ("charter_id", "another-charter"),
+        ("charter_revision", 999),
+        ("evidence_digest", "0" * 64),
+        ("approver", "copied-Founder-label"),
+    ],
+)
+def test_copied_or_misbound_durable_approval_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    approved, approval = service.approve(
+        proposed,
+        approver="Founder",
+        source_interaction_id="founder-approval",
+    )
+    tampered = approval.to_dict()
+    tampered[field] = value
+    service.repository.store.upsert(
+        "executive_approvals",
+        approval.approval_id,
+        tampered,
+    )
+    with pytest.raises(PermissionError, match="binding"):
+        service.activate(approved)
+
+
+def test_missing_approval_and_same_content_different_id_are_rejected(
+    tmp_path: Path,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    substituted = replace(
+        proposed,
+        charter_id="same-content-different-id",
+    )
+    with pytest.raises(PermissionError, match="unavailable"):
+        service.approve(
+            substituted,
+            approver="Founder",
+            source_interaction_id="founder-approval",
+        )
+    approved, approval = service.approve(
+        proposed,
+        approver="Founder",
+        source_interaction_id="founder-approval",
+    )
+    service.repository.store.delete(
+        "executive_approvals", approval.approval_id
+    )
+    with pytest.raises(PermissionError, match="unavailable"):
+        service.activate(approved)
 
 
 def test_unresolved_material_question_blocks_activation(tmp_path: Path) -> None:

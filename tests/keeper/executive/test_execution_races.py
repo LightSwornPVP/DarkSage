@@ -34,7 +34,6 @@ def test_side_effect_then_exception_stays_uncertain_and_is_not_retried(
     assert task.status == "UNCERTAIN"
     assert attempt_id is not None
     assert authority.side_effect_count == 1
-
     reopened_gateway, _ = semantic_gateway(
         tmp_path, transport=authority
     )
@@ -45,6 +44,32 @@ def test_side_effect_then_exception_stays_uncertain_and_is_not_retried(
     assert after.authority_attempt_id == attempt_id
     assert authority.side_effect_count == 1
 
+
+def test_restart_reconciles_reserved_attempt_without_new_reservation(
+    tmp_path: Path,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    authority.raise_after_reservation = True
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
+    before = service.repository.tasks(project.project_id)[0]
+    assert before.status == "UNCERTAIN"
+    assert before.authority_attempt_id in authority.attempts
+    assert authority.side_effect_count == 0
+
+    reopened_gateway, _ = semantic_gateway(
+        tmp_path, transport=authority
+    )
+    reopened = ExecutiveRuntime(service.repository, reopened_gateway)
+    reopened.progress(project.project_id)
+    after = service.repository.task(before.task_id)
+    assert after.authority_attempt_id == before.authority_attempt_id
+    assert after.status == "COMPLETED"
+    assert authority.side_effect_count == 1
+    assert len(authority.attempts) == 1
 
 def test_two_runtime_instances_create_one_claim_and_one_launch(
     tmp_path: Path,

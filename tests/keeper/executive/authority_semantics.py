@@ -44,9 +44,11 @@ class SemanticAuthorityTransport:
         self.execution_calls: list[str] = []
         self.side_effect_count = 0
         self.raise_after_side_effect = False
+        self.raise_after_reservation = False
         self.unsigned_completion = False
         self.wrong_completion_field: tuple[str, str] | None = None
         self.ignore_cancel_completion = False
+        self.fail_review_once = False
         self.started: threading.Event | None = None
         self.release: threading.Event | None = None
         self._lock = threading.RLock()
@@ -132,6 +134,11 @@ class SemanticAuthorityTransport:
                     **attempt,
                     "service_state": "RESERVED",
                 }
+                if self.raise_after_reservation:
+                    self.raise_after_reservation = False
+                    raise RuntimeError(
+                        "reservation response lost after durable reserve"
+                    )
                 return {"attempt": attempt, "attempt_id": attempt_id}
             if operation is Operation.CANCEL_ATTEMPT:
                 attempt_id = str(payload["attempt_id"])
@@ -195,10 +202,20 @@ class SemanticAuthorityTransport:
                     "role": attempt["role"],
                     "registration_id": attempt["registration_id"],
                     "provider_instance_id": attempt["provider_instance_id"],
-                    "normalized_result": "completed",
+                    "normalized_result": (
+                        "failed"
+                        if self.fail_review_once
+                        and attempt["role"] == "independent reviewer"
+                        else "completed"
+                    ),
                     "provider_evidence_digest": evidence_digest,
                 },
             )
+            if (
+                self.fail_review_once
+                and attempt["role"] == "independent reviewer"
+            ):
+                self.fail_review_once = False
             if self.unsigned_completion:
                 completion.pop("_signature")
             if self.wrong_completion_field is not None:

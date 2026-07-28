@@ -87,7 +87,7 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.BLOCKED: frozenset({TaskStatus.READY, TaskStatus.CANCELED, TaskStatus.FAILED}),
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELED: frozenset(),
-    TaskStatus.UNCERTAIN: frozenset({TaskStatus.REVIEW_REQUIRED, TaskStatus.CANCELED}),
+    TaskStatus.UNCERTAIN: frozenset({TaskStatus.EXECUTION_STARTED, TaskStatus.REVIEW_REQUIRED, TaskStatus.CANCELED}),
     TaskStatus.SKIPPED: frozenset(),
 }
 

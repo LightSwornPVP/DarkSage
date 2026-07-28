@@ -158,9 +158,14 @@ class ExecutiveRepository:
         timestamp = utc_now()
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            charter_payload, charter_hash = self._entity_in_transaction(
-                connection, "project_charters", charter_id
-            )
+            try:
+                charter_payload, charter_hash = self._entity_in_transaction(
+                    connection, "project_charters", charter_id
+                )
+            except KeyError as error:
+                raise PermissionError(
+                    "proposed charter is unavailable"
+                ) from error
             charter = ProjectCharter.from_dict(charter_payload)
             if (
                 charter.project_id != project_id
@@ -173,9 +178,16 @@ class ExecutiveRepository:
             self._require_no_newer_charter(
                 connection, project_id, charter_revision
             )
-            interaction_payload, _ = self._entity_in_transaction(
-                connection, "project_conversations", source_interaction_id
-            )
+            try:
+                interaction_payload, _ = self._entity_in_transaction(
+                    connection,
+                    "project_conversations",
+                    source_interaction_id,
+                )
+            except KeyError as error:
+                raise PermissionError(
+                    "Founder approval source is unavailable"
+                ) from error
             if (
                 interaction_payload.get("project_id") != project_id
                 or interaction_payload.get("speaker") != "Founder"
@@ -275,9 +287,14 @@ class ExecutiveRepository:
             approval_id = charter.founder_approval_record_id
             if approval_id is None:
                 raise PermissionError("charter approval record is missing")
-            approval_payload, _ = self._entity_in_transaction(
-                connection, "executive_approvals", approval_id
-            )
+            try:
+                approval_payload, _ = self._entity_in_transaction(
+                    connection, "executive_approvals", approval_id
+                )
+            except KeyError as error:
+                raise PermissionError(
+                    "charter approval record is unavailable"
+                ) from error
             approval = ApprovalRecord.from_dict(approval_payload)
             interaction_payload, _ = self._entity_in_transaction(
                 connection,

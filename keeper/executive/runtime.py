@@ -214,6 +214,7 @@ class ExecutiveRuntime:
             )
         except PermissionError:
             return self.repository.project(project_id)
+        owned = claimed
         try:
             self.gateway.reserve(plan)
             claimed = self.repository.transition_execution(
@@ -223,6 +224,7 @@ class ExecutiveRuntime:
                 target_status=TaskStatus.EXECUTION_STARTED,
                 attempt_state="RESERVED",
             )
+            owned = claimed
             self._recheck_launch(claimed, charter, author)
             running = self.repository.transition_execution(
                 claimed.task_id,
@@ -231,10 +233,16 @@ class ExecutiveRuntime:
                 target_status=TaskStatus.RUNNING,
                 attempt_state="EXECUTION_STARTED",
             )
+            owned = running
             self._cross_budget_boundary(running)
             result = self.gateway.execute(plan)
         except BaseException as error:
             current = self.repository.task(candidate.task_id)
+            if (
+                current.revision != owned.revision
+                or current.status != owned.status
+            ):
+                return self.repository.project(project_id)
             if current.status != TaskStatus.CANCELED:
                 try:
                     self.repository.mark_execution_uncertain(
@@ -462,15 +470,19 @@ class ExecutiveRuntime:
                 in {
                     TaskStatus.LAUNCH_CLAIMED,
                     TaskStatus.EXECUTION_STARTED,
+                    TaskStatus.UNCERTAIN,
                 }
             ):
                 current = task
-                if current.status == TaskStatus.LAUNCH_CLAIMED:
+                if current.status in {
+                    TaskStatus.LAUNCH_CLAIMED,
+                    TaskStatus.UNCERTAIN,
+                }:
                     try:
                         current = self.repository.transition_execution(
                             current.task_id,
                             expected_revision=current.revision,
-                            expected_status=TaskStatus.LAUNCH_CLAIMED,
+                            expected_status=TaskStatus(current.status),
                             target_status=TaskStatus.EXECUTION_STARTED,
                             attempt_state="RESERVED",
                         )
@@ -495,7 +507,12 @@ class ExecutiveRuntime:
                         ExecutiveState.BLOCKED,
                         "The claimed Authority provider is no longer qualified.",
                     )
-                self._recheck_launch(current, charter, author)
+                self._recheck_launch(
+                    current,
+                    charter,
+                    author,
+                    allow_blocked_reconciliation=True,
+                )
                 try:
                     running = self.repository.transition_execution(
                         current.task_id,
@@ -604,6 +621,8 @@ class ExecutiveRuntime:
         task: ExecutiveTask,
         charter: ProjectCharter,
         specialist: SpecialistProfile,
+        *,
+        allow_blocked_reconciliation: bool = False,
     ) -> None:
         project = self.repository.project(task.project_id)
         durable_task = self.repository.task(task.task_id)
@@ -619,8 +638,18 @@ class ExecutiveRuntime:
         action = TrustedActionClassifier().classify(
             durable_task, durable_charter, specialist
         )
+        authority_project = (
+            replace(
+                project,
+                state=ExecutiveState.EXECUTING.value,
+                pause_reason=None,
+            )
+            if allow_blocked_reconciliation
+            and project.state == ExecutiveState.BLOCKED
+            else project
+        )
         decision = self.evaluator.evaluate(
-            project,
+            authority_project,
             durable_charter,
             action,
             tuple(

@@ -187,3 +187,47 @@ def test_review_plan_must_bind_current_artifact_revision(
                 "artifact_revision_digest": "stale-artifact",
             },
         )
+
+
+def test_repaired_artifact_requires_a_new_current_review(
+    tmp_path: Path,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    authority.fail_review_once = True
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
+    blocked = runtime.progress(project.project_id)
+    first = next(
+        task
+        for task in service.repository.tasks(project.project_id)
+        if task.title == "Architecture"
+    )
+    first_reviews = service.repository.reviews(project.project_id)
+    assert blocked.state == "BLOCKED"
+    assert first.status == "REPAIR_REQUIRED"
+    assert first.retry_count == 1
+    assert len(first_reviews) == 1
+
+    runtime.resume(project.project_id)
+    runtime.progress(project.project_id)
+    repaired = service.repository.task(first.task_id)
+    reviews = service.repository.reviews(project.project_id)
+    assert repaired.status == "COMPLETED"
+    assert repaired.review_attempt_id is not None
+    assert len(reviews) == 2
+    current_review = service.repository.review(
+        repaired.review_attempt_id
+    )
+    assert (
+        current_review["artifact_revision_digest"]
+        == repaired.artifact_digest
+    )
+    assert {
+        item["artifact_revision_digest"] for item in reviews
+    } == {
+        first_reviews[0]["artifact_revision_digest"],
+        repaired.artifact_digest,
+    }
