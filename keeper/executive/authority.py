@@ -6,6 +6,7 @@ import re
 
 from keeper.executive.enums import (
     ActionCategory,
+    ActionEffect,
     ApprovalKind,
     AuthorityOutcome,
     DelegationMode,
@@ -198,43 +199,49 @@ class AuthorityEvaluator:
         self, action: ProposedAction
     ) -> AuthorityDecision | None:
         category = ActionCategory(action.category)
+        effects = {ActionEffect(item) for item in action.effect_classes}
+        required_by_effect = {
+            ActionEffect.DEPLOY_PRODUCTION: ActionCategory.DEPLOY_PRODUCTION,
+            ActionEffect.PUBLISH_PUBLIC: ActionCategory.PUBLISH_EXTERNAL,
+            ActionEffect.PURCHASE: ActionCategory.PURCHASE,
+            ActionEffect.PAID_PROVIDER_USE: ActionCategory.SPEND,
+            ActionEffect.HISTORY_REWRITE: ActionCategory.REWRITE_HISTORY,
+            ActionEffect.SECURITY_BOUNDARY_CHANGE: ActionCategory.CHANGE_SECURITY_BOUNDARY,
+            ActionEffect.CREDENTIAL_ACCESS: ActionCategory.ACCESS_CREDENTIAL,
+            ActionEffect.LIVE_TRADING: ActionCategory.ENABLE_LIVE_TRADING,
+            ActionEffect.FINANCIAL_AUTHORITY_CHANGE: ActionCategory.CHANGE_FINANCIAL_AUTHORITY,
+            ActionEffect.IRREVERSIBLE_DELETE: ActionCategory.IRREVERSIBLE_DESTRUCTIVE,
+        }
+        for effect, required_category in required_by_effect.items():
+            if effect in effects and category is not required_category:
+                return self._decision(
+                    AuthorityOutcome.DENIED,
+                    "classification-mismatch",
+                    "action_effects",
+                    f"structured action facts require {required_category.value}, not {category.value}",
+                    "correct the durable workflow classification",
+                )
         text = _normalized(
             " ".join((action.objective, action.target_resource, *action.scope))
         )
-        required: ActionCategory | None = None
-        if action.deployment or _contains_any(
-            text, ("production deployment", "deploy production", "deploy to production")
-        ):
-            required = ActionCategory.DEPLOY_PRODUCTION
-        elif action.publication or _contains_any(
-            text, ("publish externally", "external publication", "public release")
-        ):
-            required = ActionCategory.PUBLISH_EXTERNAL
-        elif action.spending or _contains_any(
-            text, ("purchase", "paid provider", "spend money", "buy ")
-        ):
-            required = (
-                ActionCategory.PURCHASE
-                if "purchase" in text or "buy " in text
-                else ActionCategory.SPEND
-            )
-        elif action.git_mutation == "REWRITE_HISTORY" or _contains_any(
-            text, ("rewrite history", "force push", "reset --hard")
-        ):
-            required = ActionCategory.REWRITE_HISTORY
-        elif action.security_boundary_impact or _contains_any(
-            text, ("change security boundary", "disable authentication")
-        ):
-            required = ActionCategory.CHANGE_SECURITY_BOUNDARY
-        elif _contains_any(text, ("enable live trading", "place live trade")):
-            required = ActionCategory.ENABLE_LIVE_TRADING
-        if required is not None and category is not required:
+        expected = _effects_required_by_objective(text)
+        missing = expected - effects
+        if missing:
             return self._decision(
                 AuthorityOutcome.DENIED,
                 "classification-mismatch",
-                "category",
-                f"trusted action facts require {required.value}, not {category.value}",
+                "action_effects",
+                "objective requires protected structured effects: "
+                + ", ".join(sorted(item.value for item in missing)),
                 "correct the durable workflow classification",
+            )
+        if _ambiguous_external_effect(text) and not expected:
+            return self._decision(
+                AuthorityOutcome.INDETERMINATE,
+                "ambiguous-external-effect",
+                "action_effects",
+                "external effect is ambiguous and cannot default to WRITE",
+                "supply explicit trusted action effects or revise the charter",
             )
         return None
 
@@ -306,55 +313,60 @@ class TrustedActionClassifier:
     ) -> ProposedAction:
         if task.project_id != charter.project_id or task.charter_id != charter.charter_id:
             raise PermissionError("task and charter identity do not match")
+        validate_durable_task_effects(task)
         if len(charter.workspaces) != 1 or len(charter.approved_tools) != 1:
             raise PermissionError(
                 "workflow launch requires one explicit workspace and tool"
             )
         if not charter.authority_envelope.data_classifications:
             raise PermissionError("workflow data classification is missing")
-        text = _normalized(
-            " ".join((task.title, task.objective, *task.instructions))
-        )
-        deployment = _contains_any(
-            text, ("production deployment", "deploy production", "deploy to production")
-        )
-        publication = _contains_any(
-            text, ("publish externally", "external publication", "public release")
-        )
-        spending = _contains_any(
-            text, ("purchase", "paid provider", "spend money", "buy ")
-        )
+        effects = task.action_effects
+        if effects is None:
+            raise PermissionError("durable structured action effects are missing")
+        if (
+            effects.workspace != charter.workspaces[0]
+            or effects.tool != charter.approved_tools[0]
+            or effects.provider not in {None, specialist.provider_id}
+        ):
+            raise PermissionError("structured action target binding is invalid")
+        effect_classes = {ActionEffect(item) for item in effects.side_effect_classes}
+        quoted_cost = _trusted_provider_cost(specialist)
+        if quoted_cost > 0:
+            effect_classes.add(ActionEffect.PAID_PROVIDER_USE)
+        deployment = effects.deployment_effect == "PRODUCTION"
+        publication = effects.publication_effect == "PUBLIC"
+        spending = effects.spending_effect == "PAID" or quoted_cost > 0
         git_mutation = (
-            "REWRITE_HISTORY"
-            if _contains_any(text, ("rewrite history", "force push", "reset --hard"))
-            else ("MUTATE" if "commit" in text or "push" in text else None)
+            None if effects.git_mutation == "NONE" else effects.git_mutation
         )
-        security_impact = _contains_any(
-            text, ("change security boundary", "disable authentication")
-        )
+        security_impact = effects.security_boundary_effect == "CHANGE"
         action = ProposedAction(
             action_id=f"task-action:{task.task_id}",
             project_id=task.project_id,
             charter_revision=task.charter_revision,
-            category=task.authority_category,
+            category=(
+                ActionCategory.SPEND.value
+                if quoted_cost > 0
+                else task.authority_category
+            ),
             target_resource=task.objective,
             provider=specialist.provider_id,
             tool=charter.approved_tools[0],
             workspace=charter.workspaces[0],
             scope=charter.deliverables,
-            cost=0.0,
-            reversible=not (
-                deployment
-                or publication
-                or spending
-                or git_mutation == "REWRITE_HISTORY"
-            ),
+            cost=quoted_cost,
+            reversible=effects.reversible,
             risk=charter.risk_classification,
             data_classification=charter.authority_envelope.data_classifications[0],
-            external_side_effect=deployment
-            or publication
-            or spending
-            or git_mutation is not None,
+            external_side_effect=any(
+                item not in {
+                    ActionEffect.LOCAL_READ,
+                    ActionEffect.LOCAL_WRITE,
+                    ActionEffect.SOURCE_EDIT,
+                    ActionEffect.TEST_EXECUTION,
+                }
+                for item in effect_classes
+            ),
             objective=task.objective,
             currency=charter.authority_envelope.currency,
             publication=publication,
@@ -363,11 +375,47 @@ class TrustedActionClassifier:
             git_mutation=git_mutation,
             security_boundary_impact=security_impact,
             trusted_source="DURABLE_WORKFLOW_TASK",
+            effect_classes=tuple(sorted(item.value for item in effect_classes)),
         )
         mismatch = AuthorityEvaluator()._classification_error(action)
         if mismatch is not None:
             raise PermissionError(mismatch.reason)
         return action
+
+
+def validate_durable_task_effects(task: ExecutiveTask) -> None:
+    effects = task.action_effects
+    if effects is None:
+        raise PermissionError("durable structured action effects are missing")
+    declared = {ActionEffect(item) for item in effects.side_effect_classes}
+    text = _normalized(" ".join((task.title, task.objective, *task.instructions)))
+    required = _effects_required_by_objective(text)
+    missing = required - declared
+    if missing:
+        raise PermissionError(
+            "task objective is inconsistent with structured action effects: "
+            + ", ".join(sorted(item.value for item in missing))
+        )
+    if _ambiguous_external_effect(text) and not required:
+        raise PermissionError("ambiguous external-effect task fails closed")
+    protected_categories = {
+        ActionEffect.DEPLOY_PRODUCTION: ActionCategory.DEPLOY_PRODUCTION,
+        ActionEffect.PUBLISH_PUBLIC: ActionCategory.PUBLISH_EXTERNAL,
+        ActionEffect.PURCHASE: ActionCategory.PURCHASE,
+        ActionEffect.PAID_PROVIDER_USE: ActionCategory.SPEND,
+        ActionEffect.HISTORY_REWRITE: ActionCategory.REWRITE_HISTORY,
+        ActionEffect.SECURITY_BOUNDARY_CHANGE: ActionCategory.CHANGE_SECURITY_BOUNDARY,
+        ActionEffect.CREDENTIAL_ACCESS: ActionCategory.ACCESS_CREDENTIAL,
+        ActionEffect.LIVE_TRADING: ActionCategory.ENABLE_LIVE_TRADING,
+        ActionEffect.FINANCIAL_AUTHORITY_CHANGE: ActionCategory.CHANGE_FINANCIAL_AUTHORITY,
+        ActionEffect.IRREVERSIBLE_DELETE: ActionCategory.IRREVERSIBLE_DESTRUCTIVE,
+    }
+    category = ActionCategory(task.authority_category)
+    for effect, expected_category in protected_categories.items():
+        if effect in declared and category is not expected_category:
+            raise PermissionError(
+                f"{effect.value} requires {expected_category.value}"
+            )
 
 
 def _normalized(value: str) -> str:
@@ -382,6 +430,11 @@ def _action_matches_non_goal(action: ProposedAction, non_goal: str) -> bool:
     denied = _normalized(non_goal)
     if not denied:
         return False
+    denied_effects = _effects_required_by_objective(denied)
+    if denied_effects.intersection(
+        ActionEffect(item) for item in action.effect_classes
+    ):
+        return True
     material = _normalized(
         " ".join(
             (
@@ -401,3 +454,97 @@ def _action_matches_non_goal(action: ProposedAction, non_goal: str) -> bool:
     }
     material_tokens = set(material.split())
     return bool(denied_tokens) and denied_tokens.issubset(material_tokens)
+
+
+def _trusted_provider_cost(specialist: SpecialistProfile) -> float:
+    now = datetime.now(UTC)
+    required = (
+        specialist.pricing_identity,
+        specialist.pricing_version,
+        specialist.billing_unit,
+        specialist.quote_timestamp,
+        specialist.quote_expiration,
+        specialist.pricing_source,
+    )
+    if any(value is None or value == "" for value in required):
+        raise PermissionError("trusted provider pricing is unavailable")
+    if datetime.fromisoformat(str(specialist.quote_expiration)) <= now:
+        raise PermissionError("trusted provider quote is expired")
+    if specialist.currency is None:
+        raise PermissionError("trusted provider pricing currency is unavailable")
+    if specialist.included_plan and specialist.marginally_free:
+        if specialist.cost_tier > 0:
+            raise PermissionError(
+                "positive provider cost tier cannot become zero-cost usage"
+            )
+        if specialist.estimated_cost != 0 or specialist.maximum_cost != 0:
+            raise PermissionError("included-plan pricing is inconsistent")
+        return 0.0
+    if specialist.maximum_cost is None or specialist.maximum_cost <= 0:
+        raise PermissionError("paid or unknown provider pricing fails closed")
+    if specialist.cost_tier <= 0:
+        raise PermissionError("paid pricing conflicts with provider cost tier")
+    return specialist.maximum_cost
+
+
+def _effects_required_by_objective(value: str) -> set[ActionEffect]:
+    mappings = (
+        (
+            (
+                "production deployment", "deploy production", "deploy to production",
+                "release the service on the customer-facing environment",
+                "release to customer-facing environment", "ship to customers",
+                "promote the build",
+            ),
+            {ActionEffect.DEPLOY_PRODUCTION},
+        ),
+        (
+            (
+                "publish externally", "external publication", "public release",
+                "publish the final artifact", "make available to users",
+                "ship to users",
+            ),
+            {ActionEffect.PUBLISH_PUBLIC},
+        ),
+        (
+            ("purchase", "buy access"),
+            {ActionEffect.PURCHASE, ActionEffect.PAID_PROVIDER_USE},
+        ),
+        (
+            ("paid provider", "premium provider", "spend money"),
+            {ActionEffect.PAID_PROVIDER_USE},
+        ),
+        (
+            (
+                "rewrite history", "force push", "reset --hard",
+                "replace remote branch history",
+            ),
+            {ActionEffect.HISTORY_REWRITE},
+        ),
+        (
+            ("change security boundary", "disable authentication"),
+            {ActionEffect.SECURITY_BOUNDARY_CHANGE},
+        ),
+        (
+            (
+                "enable live trading", "place live trade", "authorize real trades",
+                "activate live execution",
+            ),
+            {ActionEffect.LIVE_TRADING},
+        ),
+    )
+    found: set[ActionEffect] = set()
+    for phrases, effects in mappings:
+        if _contains_any(value, phrases):
+            found.update(effects)
+    return found
+
+
+def _ambiguous_external_effect(value: str) -> bool:
+    return _contains_any(
+        value,
+        (
+            "external environment", "live environment", "release environment",
+            "make available", "ship ", "promote ", "activate ",
+        ),
+    )

@@ -33,6 +33,9 @@ def profile(
         provider, f"{provider}-model", f"{provider}-session", (capability,),
         ("software", "general"), qualified, True, identity, cost,
         ("medium",), True, 1.0,
+        "included-plan", "2026-07", "USD", 0.0, 0.0, "session",
+        True, True, "2026-07-01T00:00:00+00:00",
+        "2099-01-01T00:00:00+00:00", "AUTHORITY_REGISTRATION",
     )
 
 

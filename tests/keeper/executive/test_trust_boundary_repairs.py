@@ -9,10 +9,11 @@ import pytest
 from keeper.app.storage import KeeperStore
 from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
 from keeper.executive.charters import CharterService
-from keeper.executive.enums import ActionCategory, ApprovalKind
+from keeper.executive.enums import ActionCategory, ActionEffect, ApprovalKind
 from keeper.executive.enums import ExecutiveState, FounderApprovalIntent
 from keeper.executive.intake import ConversationIntake
 from keeper.executive.models import (
+    ActionEffects,
     ProjectCharter,
     ProjectRecord,
     ProposedAction,
@@ -392,6 +393,17 @@ def test_readiness_classification_uses_actual_task_objective(
         ("medium",),
         True,
         1.0,
+        "included-plan",
+        "2026-07",
+        "USD",
+        0.0,
+        0.0,
+        "session",
+        True,
+        True,
+        "2026-07-01T00:00:00+00:00",
+        "2099-01-01T00:00:00+00:00",
+        "AUTHORITY_REGISTRATION",
     )
     action = TrustedActionClassifier().classify(task, charter, specialist)
     assert action.objective == task.objective
@@ -425,8 +437,8 @@ def _record_action_approval_interaction(
 
 
 def test_one_time_approval_is_consumed_atomically_once(tmp_path: Path) -> None:
-    service, project, proposed = _proposed(tmp_path)
-    _, charter = _activate(service, proposed)
+    service, _, proposed = _proposed(tmp_path)
+    project, charter = _activate(service, proposed)
     _record_action_approval_interaction(service, project.project_id)
     approval = service.repository.grant_action_approval(
         project_id=project.project_id,
@@ -564,7 +576,170 @@ def test_unknown_cost_and_absent_budget_fail_closed(tmp_path: Path) -> None:
     )
     decision = AuthorityEvaluator().evaluate(project, charter, action)
     assert decision.outcome == "DENIED"
-    assert decision.rule == "unknown-cost"
+    assert decision.rule == "classification-mismatch"
+
+
+@pytest.mark.parametrize(
+    ("objective", "effect", "category"),
+    [
+        (
+            "Release the service on the customer-facing environment",
+            ActionEffect.DEPLOY_PRODUCTION,
+            ActionCategory.DEPLOY_PRODUCTION,
+        ),
+        (
+            "Make available to users",
+            ActionEffect.PUBLISH_PUBLIC,
+            ActionCategory.PUBLISH_EXTERNAL,
+        ),
+        (
+            "Publish the final artifact",
+            ActionEffect.PUBLISH_PUBLIC,
+            ActionCategory.PUBLISH_EXTERNAL,
+        ),
+        (
+            "Ship to customers",
+            ActionEffect.DEPLOY_PRODUCTION,
+            ActionCategory.DEPLOY_PRODUCTION,
+        ),
+        (
+            "Promote the build",
+            ActionEffect.DEPLOY_PRODUCTION,
+            ActionCategory.DEPLOY_PRODUCTION,
+        ),
+        (
+            "Replace remote branch history",
+            ActionEffect.HISTORY_REWRITE,
+            ActionCategory.REWRITE_HISTORY,
+        ),
+        (
+            "Subscribe to premium provider",
+            ActionEffect.PAID_PROVIDER_USE,
+            ActionCategory.SPEND,
+        ),
+        (
+            "Authorize real trades",
+            ActionEffect.LIVE_TRADING,
+            ActionCategory.ENABLE_LIVE_TRADING,
+        ),
+    ],
+)
+def test_euphemistic_protected_actions_require_exact_structured_effect(
+    tmp_path: Path,
+    objective: str,
+    effect: ActionEffect,
+    category: ActionCategory,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    project, charter = _activate(service, proposed)
+    _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
+    task = replace(
+        tasks[0],
+        objective=objective,
+        authority_category=category.value,
+        action_effects=ActionEffects(
+            (effect.value,),
+            "PRODUCTION" if effect is ActionEffect.DEPLOY_PRODUCTION else "EXTERNAL",
+            "CUSTOMER_FACING",
+            "PUBLIC" if effect is ActionEffect.PUBLISH_PUBLIC else "NONE",
+            "PRODUCTION" if effect is ActionEffect.DEPLOY_PRODUCTION else "NONE",
+            "LIVE" if effect is ActionEffect.LIVE_TRADING else "NONE",
+            "PAID" if effect is ActionEffect.PAID_PROVIDER_USE else "NONE",
+            "HISTORY_REWRITE" if effect is ActionEffect.HISTORY_REWRITE else "NONE",
+            "NONE",
+            "NONE",
+            "LIVE_TRADING" if effect is ActionEffect.LIVE_TRADING else "NONE",
+            objective,
+            charter.workspaces[0],
+            None,
+            charter.approved_tools[0],
+            False,
+            "INTERNAL",
+        ),
+    )
+    from keeper.executive.authority import validate_durable_task_effects
+
+    validate_durable_task_effects(task)
+    with pytest.raises(PermissionError, match="inconsistent"):
+        validate_durable_task_effects(
+            replace(
+                task,
+                action_effects=replace(
+                    task.action_effects,
+                    side_effect_classes=(ActionEffect.LOCAL_WRITE.value,),
+                ),
+            )
+        )
+
+
+def test_ambiguous_external_action_fails_closed(tmp_path: Path) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    project, charter = _activate(service, proposed)
+    _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
+    task = replace(
+        tasks[0],
+        objective="Activate the external environment",
+        action_effects=replace(
+            tasks[0].action_effects,
+            target_resource="Activate the external environment",
+        ),
+    )
+    from keeper.executive.authority import validate_durable_task_effects
+
+    with pytest.raises(PermissionError, match="ambiguous"):
+        validate_durable_task_effects(task)
+
+
+def test_provider_pricing_is_trusted_and_unknown_or_false_zero_fails_closed(
+    tmp_path: Path,
+) -> None:
+    service, _, proposed = _proposed(tmp_path)
+    project, charter = _activate(service, proposed)
+    _, tasks = WorkflowPlanner(service.repository).generate(project, charter)
+    task = tasks[0]
+    included = SpecialistProfile(
+        "codex", "model", "session", task.required_capabilities, ("software",),
+        True, True, "identity", 0, ("high",), True, 1.0,
+        "pricing", "v1", "USD", 0.0, 0.0, "session", True, True,
+        "2026-07-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00",
+        "AUTHORITY_REGISTRATION",
+    )
+    action = TrustedActionClassifier().classify(task, charter, included)
+    assert action.cost == 0
+    assert action.spending is False
+
+    with pytest.raises(PermissionError, match="positive provider cost tier"):
+        TrustedActionClassifier().classify(
+            task, charter, replace(included, cost_tier=9)
+        )
+    with pytest.raises(PermissionError, match="unavailable"):
+        TrustedActionClassifier().classify(
+            task, charter, replace(included, pricing_identity=None)
+        )
+    with pytest.raises(PermissionError, match="expired"):
+        TrustedActionClassifier().classify(
+            task,
+            charter,
+            replace(included, quote_expiration="2000-01-01T00:00:00+00:00"),
+        )
+    with pytest.raises(PermissionError, match="currency"):
+        TrustedActionClassifier().classify(
+            task, charter, replace(included, currency=None)
+        )
+
+    paid = replace(
+        included,
+        cost_tier=9,
+        included_plan=False,
+        marginally_free=False,
+        estimated_cost=1.0,
+        maximum_cost=2.0,
+    )
+    paid_action = TrustedActionClassifier().classify(task, charter, paid)
+    assert paid_action.category == ActionCategory.SPEND
+    assert paid_action.cost == 2.0
+    decision = AuthorityEvaluator().evaluate(project, charter, paid_action)
+    assert decision.rule == "absent-spending-authority"
 
 
 def test_stale_project_write_and_cross_project_task_are_rejected(

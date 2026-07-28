@@ -127,9 +127,6 @@ def test_missing_distinct_reviewer_blocks_completion(
         AuthorityProviderBinding(
             "registration-codex",
             "qualification-codex",
-            ALL_CAPABILITIES,
-            ("software", "general"),
-            "codex-only",
         ),
     )
     gateway, authority = semantic_gateway(

@@ -87,6 +87,25 @@ class SemanticAuthorityTransport:
             "configuration_digest": hashlib.sha256(
                 f"registration:{registration_id}:{executable_digest}".encode()
             ).hexdigest(),
+            "capability_set": list(ALL_CAPABILITIES),
+            "role_eligibility": ["software", "research", "general"],
+            "model_or_service_identity": f"{provider_id}-test",
+            "independence_classification": provider_id,
+            "effort_levels": ["medium", "high"],
+            "pricing_authority": {
+                "pricing_identity": f"pricing:{registration_id}",
+                "pricing_version": "2026-07",
+                "currency": "USD",
+                "estimated_cost": 0.0,
+                "maximum_cost": 0.0,
+                "billing_unit": "included-session",
+                "included_plan": True,
+                "marginally_free": True,
+                "quoted_at": "2026-07-01T00:00:00+00:00",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "source": "AUTHORITY_REGISTRATION",
+                "cost_tier": 0,
+            },
         }
         self.qualifications[qualification_id] = {
             "service_state": "QUALIFIED",
@@ -255,16 +274,10 @@ def semantic_gateway(
         AuthorityProviderBinding(
             "registration-codex",
             "qualification-codex",
-            ALL_CAPABILITIES,
-            ("software", "research", "general"),
-            "codex-test",
         ),
         AuthorityProviderBinding(
             "registration-reviewer",
             "qualification-reviewer",
-            ALL_CAPABILITIES,
-            ("software", "research", "general"),
-            "reviewer-provider-test",
         ),
     )
     return (

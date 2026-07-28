@@ -53,6 +53,25 @@ class PilotAuthorityTransport:
                 "canonical_executable_path": executable,
                 "executable_sha256": executable_digest,
                 "configuration_digest": registration_digest,
+                "capability_set": list(CAPABILITIES),
+                "role_eligibility": ["software"],
+                "model_or_service_identity": f"pilot-{provider_id}",
+                "independence_classification": provider_id,
+                "effort_levels": ["medium", "high"],
+                "pricing_authority": {
+                    "pricing_identity": f"pilot-pricing:{registration_id}",
+                    "pricing_version": "2026-07",
+                    "currency": "USD",
+                    "estimated_cost": 0.0,
+                    "maximum_cost": 0.0,
+                    "billing_unit": "included-session",
+                    "included_plan": True,
+                    "marginally_free": True,
+                    "quoted_at": "2026-07-01T00:00:00+00:00",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "source": "AUTHORITY_REGISTRATION",
+                    "cost_tier": 0,
+                },
             }
             self.qualifications[qualification_id] = {
                 "service_state": "QUALIFIED",
@@ -205,9 +224,6 @@ def main() -> int:
             AuthorityProviderBinding(
                 f"pilot-registration-{provider_id}",
                 f"pilot-qualification-{provider_id}",
-                CAPABILITIES,
-                ("software",),
-                f"pilot-{provider_id}",
             )
             for provider_id in ("codex", "reviewer-provider")
         )

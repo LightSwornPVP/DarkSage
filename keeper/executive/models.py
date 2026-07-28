@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar, TypeVar, cast
 
 from keeper.executive.enums import (
+    ActionEffect,
     ActionCategory,
     ApprovalKind,
     AuthorityOutcome,
@@ -380,6 +381,65 @@ class FounderApprovalEvent(StrictRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class ActionEffects(StrictRecord):
+    side_effect_classes: tuple[str, ...]
+    execution_environment: str
+    external_visibility: str
+    publication_effect: str
+    deployment_effect: str
+    production_effect: str
+    spending_effect: str
+    git_mutation: str
+    security_boundary_effect: str
+    credential_requirement: str
+    financial_effect: str
+    target_resource: str
+    workspace: str | None
+    provider: str | None
+    tool: str | None
+    reversible: bool
+    data_classification: str
+
+    FIELDS = frozenset(
+        {
+            "side_effect_classes", "execution_environment",
+            "external_visibility", "publication_effect", "deployment_effect",
+            "production_effect", "spending_effect", "git_mutation",
+            "security_boundary_effect", "credential_requirement",
+            "financial_effect", "target_resource", "workspace", "provider",
+            "tool", "reversible", "data_classification",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        for item in self.side_effect_classes:
+            ActionEffect(item)
+        allowed = {
+            "execution_environment": {"LOCAL", "STAGING", "PRODUCTION", "EXTERNAL", "UNKNOWN"},
+            "external_visibility": {"INTERNAL", "PRIVATE", "PUBLIC", "CUSTOMER_FACING", "UNKNOWN"},
+            "publication_effect": {"NONE", "PRIVATE", "PUBLIC", "UNKNOWN"},
+            "deployment_effect": {"NONE", "STAGING", "PRODUCTION", "UNKNOWN"},
+            "production_effect": {"NONE", "LIVE", "UNKNOWN"},
+            "spending_effect": {"NONE", "INCLUDED_PLAN", "PAID", "UNKNOWN"},
+            "git_mutation": {"NONE", "COMMIT", "PUSH", "HISTORY_REWRITE", "UNKNOWN"},
+            "security_boundary_effect": {"NONE", "CHANGE", "UNKNOWN"},
+            "credential_requirement": {"NONE", "REQUIRED", "UNKNOWN"},
+            "financial_effect": {"NONE", "LIVE_TRADING", "AUTHORITY_CHANGE", "UNKNOWN"},
+        }
+        for field_name, values in allowed.items():
+            if getattr(self, field_name) not in values:
+                raise ValueError(f"invalid structured action effect: {field_name}")
+        if not self.target_resource or not self.data_classification:
+            raise ValueError("structured action target and data classification are required")
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> ActionEffects:
+        data = cls._validated_data(value)
+        data["side_effect_classes"] = tuple(data["side_effect_classes"])
+        return cls(**data)
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedAction(StrictRecord):
     action_id: str
     project_id: str
@@ -403,6 +463,7 @@ class ProposedAction(StrictRecord):
     git_mutation: str | None = None
     security_boundary_impact: bool = False
     trusted_source: str = "CALLER"
+    effect_classes: tuple[str, ...] = ()
 
     FIELDS = frozenset(
         {
@@ -411,6 +472,7 @@ class ProposedAction(StrictRecord):
             "reversible", "risk", "data_classification", "external_side_effect",
             "objective", "currency", "publication", "deployment", "spending",
             "git_mutation", "security_boundary_impact", "trusted_source",
+            "effect_classes",
         }
     )
 
@@ -422,6 +484,8 @@ class ProposedAction(StrictRecord):
             len(self.currency) != 3 or not self.currency.isalpha()
         ):
             raise ValueError("currency must be a three-letter code")
+        for item in self.effect_classes:
+            ActionEffect(item)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ProposedAction:
@@ -435,10 +499,12 @@ class ProposedAction(StrictRecord):
             "git_mutation": None,
             "security_boundary_impact": False,
             "trusted_source": "CALLER",
+            "effect_classes": (),
         }.items():
             normalized.setdefault(key, default)
         data = cls._validated_data(normalized)
         data["scope"] = tuple(data["scope"])
+        data["effect_classes"] = tuple(data["effect_classes"])
         return cls(**data)
 
 
@@ -553,6 +619,7 @@ class ExecutiveTask(StrictRecord):
     artifact_digest: str | None = None
     review_attempt_id: str | None = None
     late_result: bool = False
+    action_effects: ActionEffects | None = None
 
     FIELDS = frozenset(
         {
@@ -564,7 +631,7 @@ class ExecutiveTask(StrictRecord):
             "evidence_requirements", "review_requirements", "retry_count",
             "max_retries", "attempt_history", "result_disposition", "created_at",
             "updated_at", "revision", "authority_attempt_id", "artifact_digest",
-            "review_attempt_id", "late_result",
+            "review_attempt_id", "late_result", "action_effects",
         }
     )
     TUPLE_FIELDS = (
@@ -576,6 +643,9 @@ class ExecutiveTask(StrictRecord):
     def __post_init__(self) -> None:
         TaskStatus(self.status)
         ActionCategory(self.authority_category)
+        if self.action_effects is not None:
+            if self.action_effects.target_resource != self.objective:
+                raise ValueError("action effect target must match the task objective")
         if self.retry_count < 0 or self.max_retries < 0:
             raise ValueError("retry counts cannot be negative")
         if self.revision < 1:
@@ -592,11 +662,15 @@ class ExecutiveTask(StrictRecord):
             "artifact_digest": None,
             "review_attempt_id": None,
             "late_result": False,
+            "action_effects": None,
         }.items():
             normalized.setdefault(key, default)
         data = cls._validated_data(normalized)
         for key in cls.TUPLE_FIELDS:
             data[key] = tuple(data[key])
+        effects = data["action_effects"]
+        if isinstance(effects, dict):
+            data["action_effects"] = ActionEffects.from_dict(effects)
         return cls(**data)
 
 
@@ -717,19 +791,57 @@ class SpecialistProfile(StrictRecord):
     effort_levels: tuple[str, ...]
     credential_available: bool
     prior_success_rate: float
+    pricing_identity: str | None = None
+    pricing_version: str | None = None
+    currency: str | None = None
+    estimated_cost: float | None = None
+    maximum_cost: float | None = None
+    billing_unit: str | None = None
+    included_plan: bool = False
+    marginally_free: bool = False
+    quote_timestamp: str | None = None
+    quote_expiration: str | None = None
+    pricing_source: str | None = None
 
     FIELDS = frozenset(
         {
             "provider_id", "model_id", "session_id", "capabilities",
             "project_types", "qualified", "available", "independence_identity",
             "cost_tier", "effort_levels", "credential_available",
-            "prior_success_rate",
+            "prior_success_rate", "pricing_identity", "pricing_version",
+            "currency", "estimated_cost", "maximum_cost", "billing_unit",
+            "included_plan", "marginally_free", "quote_timestamp",
+            "quote_expiration", "pricing_source",
         }
     )
 
+    def __post_init__(self) -> None:
+        for amount in (self.estimated_cost, self.maximum_cost):
+            if amount is not None and amount < 0:
+                raise ValueError("provider pricing cannot be negative")
+        for name, value in (
+            ("quote_timestamp", self.quote_timestamp),
+            ("quote_expiration", self.quote_expiration),
+        ):
+            if value is not None:
+                validate_timestamp(value, name)
+        if self.currency is not None and (
+            len(self.currency) != 3 or not self.currency.isalpha()
+        ):
+            raise ValueError("provider pricing currency must be a three-letter code")
+
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> SpecialistProfile:
-        data = cls._validated_data(value)
+        normalized = dict(value)
+        for key, default in {
+            "pricing_identity": None, "pricing_version": None, "currency": None,
+            "estimated_cost": None, "maximum_cost": None, "billing_unit": None,
+            "included_plan": False, "marginally_free": False,
+            "quote_timestamp": None, "quote_expiration": None,
+            "pricing_source": None,
+        }.items():
+            normalized.setdefault(key, default)
+        data = cls._validated_data(normalized)
         data["capabilities"] = tuple(data["capabilities"])
         data["project_types"] = tuple(data["project_types"])
         return cls(**data)

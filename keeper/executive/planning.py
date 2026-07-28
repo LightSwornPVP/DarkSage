@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
-from keeper.executive.enums import ActionCategory, TaskStatus
+from keeper.executive.enums import ActionCategory, ActionEffect, TaskStatus
 from keeper.executive.models import (
+    ActionEffects,
     ExecutiveTask,
     ProjectCharter,
     ProjectRecord,
@@ -111,6 +112,10 @@ class WorkflowPlanner:
             )
             stages.append(stage)
             category = self._action_category(template)
+            side_effect = {
+                ActionCategory.READ: ActionEffect.LOCAL_READ,
+                ActionCategory.TEST: ActionEffect.TEST_EXECUTION,
+            }.get(category, ActionEffect.LOCAL_WRITE)
             task_id = f"{workflow_id}-task-{index}"
             task = ExecutiveTask(
                 task_id,
@@ -141,6 +146,25 @@ class WorkflowPlanner:
                 None,
                 now,
                 now,
+                action_effects=ActionEffects(
+                    (side_effect.value,),
+                    "LOCAL",
+                    "INTERNAL",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    template.purpose,
+                    charter.workspaces[0] if len(charter.workspaces) == 1 else None,
+                    None,
+                    charter.approved_tools[0] if len(charter.approved_tools) == 1 else None,
+                    True,
+                    charter.authority_envelope.data_classifications[0],
+                ),
             )
             tasks.append(task)
             prior_stage = stage_id

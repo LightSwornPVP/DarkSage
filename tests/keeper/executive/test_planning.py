@@ -16,6 +16,9 @@ def specialist(capability: str) -> SpecialistProfile:
     return SpecialistProfile(
         "codex", "model", "session", (capability,), ("software", "research"),
         True, True, "identity-1", 0, ("medium",), True, 1.0,
+        "included-plan", "2026-07", "USD", 0.0, 0.0, "session",
+        True, True, "2026-07-01T00:00:00+00:00",
+        "2099-01-01T00:00:00+00:00", "AUTHORITY_REGISTRATION",
     )
 
 

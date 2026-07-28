@@ -31,11 +31,6 @@ class AuthorityOperations(Protocol):
 class AuthorityProviderBinding:
     registration_id: str
     qualification_id: str
-    capabilities: tuple[str, ...]
-    project_types: tuple[str, ...]
-    model_id: str
-    effort_levels: tuple[str, ...] = ("medium", "high")
-    cost_tier: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,19 +157,52 @@ class AuthorityBackedSpecialistGateway:
                 or provider_id not in charter.approved_providers
             ):
                 continue
+            capabilities = registration.get("capability_set")
+            project_types = registration.get("role_eligibility")
+            model_id = registration.get("model_or_service_identity")
+            independence = registration.get("independence_classification")
+            effort_levels = registration.get("effort_levels")
+            pricing = registration.get("pricing_authority")
+            if (
+                not isinstance(capabilities, list)
+                or not capabilities
+                or not all(isinstance(item, str) for item in capabilities)
+                or not isinstance(project_types, list)
+                or not project_types
+                or not all(isinstance(item, str) for item in project_types)
+                or not isinstance(model_id, str)
+                or not model_id
+                or not isinstance(independence, str)
+                or not independence
+                or not isinstance(effort_levels, list)
+                or not effort_levels
+                or not isinstance(pricing, dict)
+            ):
+                continue
             profile = SpecialistProfile(
                 provider_id,
-                binding.model_id,
+                model_id,
                 session_id,
-                binding.capabilities,
-                binding.project_types,
+                tuple(capabilities),
+                tuple(project_types),
                 True,
                 True,
-                f"{binding.registration_id}:{session_id}",
-                binding.cost_tier,
-                binding.effort_levels,
+                f"{independence}:{binding.registration_id}:{session_id}",
+                int(pricing.get("cost_tier", -1)),
+                tuple(str(item) for item in effort_levels),
                 True,
                 1.0,
+                str(pricing["pricing_identity"]) if pricing.get("pricing_identity") else None,
+                str(pricing["pricing_version"]) if pricing.get("pricing_version") else None,
+                str(pricing["currency"]) if pricing.get("currency") else None,
+                float(pricing["estimated_cost"]) if isinstance(pricing.get("estimated_cost"), (int, float)) else None,
+                float(pricing["maximum_cost"]) if isinstance(pricing.get("maximum_cost"), (int, float)) else None,
+                str(pricing["billing_unit"]) if pricing.get("billing_unit") else None,
+                pricing.get("included_plan") is True,
+                pricing.get("marginally_free") is True,
+                str(pricing["quoted_at"]) if pricing.get("quoted_at") else None,
+                str(pricing["expires_at"]) if pricing.get("expires_at") else None,
+                str(pricing["source"]) if pricing.get("source") else None,
             )
             key = (profile.provider_id, profile.model_id, profile.session_id)
             self._resolved[key] = (binding, registration)

@@ -500,6 +500,9 @@ class ExecutiveRepository:
         *,
         expected: ExecutiveTask | None = None,
     ) -> None:
+        from keeper.executive.authority import validate_durable_task_effects
+
+        validate_durable_task_effects(task)
         existing = self.store.get("executive_tasks", task.task_id)
         if existing is None:
             if task.status != TaskStatus.PROPOSED or task.revision != 1:
