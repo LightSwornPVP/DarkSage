@@ -6,13 +6,15 @@ import secrets
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
+import keeper.authority_service.client as authority_client_module
 from keeper.authority_service.client import (
     DEFAULT_PIPE_NAME,
     AuthorityServiceClient,
     ProductionAuthorityServiceClient,
 )
+from keeper.authority_service.protocol import Operation, Request
 from keeper.executive.models import (
     ExecutiveTask,
     ProjectCharter,
@@ -116,6 +118,185 @@ def authority_operations(
     return client
 
 
+@dataclass(frozen=True, slots=True)
+class _ProductionTransportIdentity:
+    client_identity: int
+    pipe_name: str
+    timeout_seconds: float
+    protocol_version: object
+    implementation_identity: tuple[int, ...]
+
+
+def _capture_production_transport_validator() -> Callable[
+    [ProductionAuthorityServiceClient], _ProductionTransportIdentity
+]:
+    trusted_implementation = (
+        ProductionAuthorityServiceClient.__dict__["_send"],
+        AuthorityServiceClient.__dict__["request"],
+        AuthorityServiceClient.__dict__["diagnostics"],
+        AuthorityServiceClient.__dict__["query_state"],
+        AuthorityServiceClient.__dict__["reserve_attempt"],
+        AuthorityServiceClient.__dict__["authorize_project_launch"],
+        AuthorityServiceClient.__dict__["revoke_project_launch"],
+        AuthorityServiceClient.__dict__["execute_provider"],
+        AuthorityServiceClient.__dict__["finalize_completion"],
+        AuthorityServiceClient.__dict__["cancel_attempt"],
+        AuthorityServiceClient.__dict__["verify"],
+        authority_client_module._connect,
+        authority_client_module._write_all,
+        authority_client_module._read,
+        authority_client_module._close,
+        authority_client_module._kernel32,
+        authority_client_module.encode_frame,
+        authority_client_module.decode_frame,
+        authority_client_module.parse_response,
+        authority_client_module.Request,
+        authority_client_module.Operation,
+        authority_client_module.PROTOCOL_VERSION,
+        Request.__dict__["create"],
+        Request.__dict__["to_dict"],
+    )
+    protected_instance_names = frozenset(
+        {
+            "_send",
+            "request",
+            "diagnostics",
+            "query_state",
+            "reserve_attempt",
+            "authorize_project_launch",
+            "revoke_project_launch",
+            "execute_provider",
+            "finalize_completion",
+            "cancel_attempt",
+            "verify",
+            "_test_transport",
+        }
+    )
+
+    def validate(
+        client: ProductionAuthorityServiceClient,
+    ) -> _ProductionTransportIdentity:
+        current_implementation = (
+            ProductionAuthorityServiceClient.__dict__.get("_send"),
+            AuthorityServiceClient.__dict__.get("request"),
+            AuthorityServiceClient.__dict__.get("diagnostics"),
+            AuthorityServiceClient.__dict__.get("query_state"),
+            AuthorityServiceClient.__dict__.get("reserve_attempt"),
+            AuthorityServiceClient.__dict__.get("authorize_project_launch"),
+            AuthorityServiceClient.__dict__.get("revoke_project_launch"),
+            AuthorityServiceClient.__dict__.get("execute_provider"),
+            AuthorityServiceClient.__dict__.get("finalize_completion"),
+            AuthorityServiceClient.__dict__.get("cancel_attempt"),
+            AuthorityServiceClient.__dict__.get("verify"),
+            getattr(authority_client_module, "_connect", None),
+            getattr(authority_client_module, "_write_all", None),
+            getattr(authority_client_module, "_read", None),
+            getattr(authority_client_module, "_close", None),
+            getattr(authority_client_module, "_kernel32", None),
+            getattr(authority_client_module, "encode_frame", None),
+            getattr(authority_client_module, "decode_frame", None),
+            getattr(authority_client_module, "parse_response", None),
+            getattr(authority_client_module, "Request", None),
+            getattr(authority_client_module, "Operation", None),
+            getattr(authority_client_module, "PROTOCOL_VERSION", None),
+            Request.__dict__.get("create"),
+            Request.__dict__.get("to_dict"),
+        )
+        attributes = getattr(client, "__dict__", None)
+        if (
+            type(client) is not ProductionAuthorityServiceClient
+            or not isinstance(attributes, dict)
+            or protected_instance_names.intersection(attributes)
+            or client.pipe_name != DEFAULT_PIPE_NAME
+            or type(client.timeout_seconds) not in {int, float}
+            or float(client.timeout_seconds) <= 0
+            or len(current_implementation) != len(trusted_implementation)
+            or any(
+                current is not trusted
+                for current, trusted in zip(
+                    current_implementation, trusted_implementation, strict=True
+                )
+            )
+        ):
+            raise PermissionError(
+                "production Authority transport implementation is invalid"
+            )
+        return _ProductionTransportIdentity(
+            client_identity=id(client),
+            pipe_name=client.pipe_name,
+            timeout_seconds=float(client.timeout_seconds),
+            protocol_version=authority_client_module.PROTOCOL_VERSION,
+            implementation_identity=tuple(
+                id(item) for item in trusted_implementation
+            ),
+        )
+
+    return validate
+
+
+_validate_production_transport = _capture_production_transport_validator()
+del _capture_production_transport_validator
+
+
+class _PinnedProductionAuthorityOperations:
+    __slots__ = ("__client", "__identity")
+
+    def __init__(self, client: ProductionAuthorityServiceClient) -> None:
+        identity = _validate_production_transport(client)
+        object.__setattr__(self, "_PinnedProductionAuthorityOperations__client", client)
+        object.__setattr__(self, "_PinnedProductionAuthorityOperations__identity", identity)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise AttributeError("production Authority transport is immutable")
+
+    def __delattr__(self, name: str) -> None:
+        del name
+        raise AttributeError("production Authority transport is immutable")
+
+    def _validated_client(self) -> ProductionAuthorityServiceClient:
+        client = self.__client
+        identity = _validate_production_transport(client)
+        if identity != self.__identity:
+            raise PermissionError("production Authority transport identity changed")
+        return client
+
+    def _production_runtime_identity(self) -> _ProductionTransportIdentity:
+        self._validated_client()
+        return self.__identity
+
+    def diagnostics(self) -> dict[str, Any]:
+        return self._validated_client().diagnostics()
+
+    def query_state(self, kind: str, identifier: str) -> dict[str, Any]:
+        return self._validated_client().query_state(kind, identifier)
+
+    def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
+        return self._validated_client().reserve_attempt(**identity)
+
+    def authorize_project_launch(self, **identity: Any) -> dict[str, Any]:
+        return self._validated_client().authorize_project_launch(**identity)
+
+    def revoke_project_launch(
+        self, project_id: str, authorization_generation: int
+    ) -> dict[str, Any]:
+        return self._validated_client().revoke_project_launch(
+            project_id, authorization_generation
+        )
+
+    def execute_provider(self, attempt_id: str) -> dict[str, Any]:
+        return self._validated_client().execute_provider(attempt_id)
+
+    def finalize_completion(self, attempt_id: str) -> dict[str, Any]:
+        return self._validated_client().finalize_completion(attempt_id)
+
+    def cancel_attempt(self, attempt_id: str) -> dict[str, Any]:
+        return self._validated_client().cancel_attempt(attempt_id)
+
+    def verify(self, purpose: str, record: object) -> bool:
+        return self._validated_client().verify(purpose, record)
+
+
 class AuthorityBackedSpecialistGateway:
     """Production boundary for all Executive author and reviewer execution."""
 
@@ -131,12 +312,10 @@ class AuthorityBackedSpecialistGateway:
             raise RuntimeError(
                 "production Executive startup requires Authority provider bindings"
             )
-        self._authority = authority
-        self._bindings = bindings
-        self._exchange_root = exchange_root.resolve()
-        self._resolved: dict[
-            tuple[str, str, str], tuple[AuthorityProviderBinding, dict[str, Any]]
-        ] = {}
+        object.__setattr__(self, "_authority", authority)
+        object.__setattr__(self, "_bindings", bindings)
+        object.__setattr__(self, "_exchange_root", exchange_root.resolve())
+        object.__setattr__(self, "_resolved", {})
 
     def specialists(
         self,
@@ -667,6 +846,7 @@ class SemanticAuthorityTestGateway(AuthorityBackedSpecialistGateway):
 class _ProductionGatewayRuntimeIdentity:
     gateway_token: str
     client_identity: int
+    transport_identity: _ProductionTransportIdentity
     pipe_name: str
     timeout_seconds: float
     bindings: tuple[AuthorityProviderBinding, ...]
@@ -679,10 +859,10 @@ class ProductionAuthorityBackedSpecialistGateway(
     """Sealed production gateway accepting only the real IPC client type."""
 
     _production_client: ProductionAuthorityServiceClient
+    __operations: _PinnedProductionAuthorityOperations
     __runtime_token: str
-    __sealed: bool
 
-    __slots__ = ("_production_client", "__runtime_token", "__sealed")
+    __slots__ = ("_production_client", "__operations", "__runtime_token")
 
     def __init__(
         self,
@@ -694,48 +874,51 @@ class ProductionAuthorityBackedSpecialistGateway(
             raise RuntimeError(
                 "production gateway requires the production Authority IPC client"
             )
+        operations = _PinnedProductionAuthorityOperations(authority_client)
+        object.__setattr__(self, "_production_client", authority_client)
         object.__setattr__(
             self,
-            "_ProductionAuthorityBackedSpecialistGateway__sealed",
-            False,
+            "_ProductionAuthorityBackedSpecialistGateway__operations",
+            operations,
         )
-        self._production_client = authority_client
-        super().__init__(
-            authority_operations(authority_client),
-            bindings,
-            exchange_root,
-        )
+        super().__init__(operations, bindings, exchange_root)
         object.__setattr__(
             self,
             "_ProductionAuthorityBackedSpecialistGateway__runtime_token",
             secrets.token_hex(32),
         )
-        object.__setattr__(
-            self,
-            "_ProductionAuthorityBackedSpecialistGateway__sealed",
-            True,
-        )
 
     def __setattr__(self, name: str, value: object) -> None:
-        if (
-            getattr(
-                self,
-                "_ProductionAuthorityBackedSpecialistGateway__sealed",
-                False,
-            )
-            and name
-            in {
-                "_production_client",
-                "_authority",
-                "_bindings",
-                "_exchange_root",
-                "_ProductionAuthorityBackedSpecialistGateway__runtime_token",
-            }
-        ):
+        if name in {
+            "_production_client",
+            "_authority",
+            "_bindings",
+            "_exchange_root",
+            "__sealed",
+            "_ProductionAuthorityBackedSpecialistGateway__sealed",
+            "_ProductionAuthorityBackedSpecialistGateway__operations",
+            "_ProductionAuthorityBackedSpecialistGateway__runtime_token",
+        }:
             raise AttributeError(
                 "production Authority gateway composition is immutable"
             )
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in {
+            "_production_client",
+            "_authority",
+            "_bindings",
+            "_exchange_root",
+            "__sealed",
+            "_ProductionAuthorityBackedSpecialistGateway__sealed",
+            "_ProductionAuthorityBackedSpecialistGateway__operations",
+            "_ProductionAuthorityBackedSpecialistGateway__runtime_token",
+        }:
+            raise AttributeError(
+                "production Authority gateway composition is immutable"
+            )
+        object.__delattr__(self, name)
 
     def _production_runtime_identity(
         self,
@@ -745,16 +928,13 @@ class ProductionAuthorityBackedSpecialistGateway(
                 "production runtime requires the exact production gateway"
             )
         client = self._production_client
-        client_attributes = getattr(client, "__dict__", {})
+        operations = self.__operations
+        transport_identity = operations._production_runtime_identity()
         if (
             type(client) is not ProductionAuthorityServiceClient
-            or self._authority is not client
+            or self._authority is not operations
+            or transport_identity.client_identity != id(client)
             or client.pipe_name != DEFAULT_PIPE_NAME
-            or not isinstance(client.timeout_seconds, (int, float))
-            or not isinstance(client_attributes, dict)
-            or "_test_transport" in client_attributes
-            or "_send" in client_attributes
-            or type(client)._send is not ProductionAuthorityServiceClient._send
             or not isinstance(self._bindings, tuple)
             or not self._bindings
             or any(
@@ -769,12 +949,12 @@ class ProductionAuthorityBackedSpecialistGateway(
         return _ProductionGatewayRuntimeIdentity(
             gateway_token=self.__runtime_token,
             client_identity=id(client),
+            transport_identity=transport_identity,
             pipe_name=client.pipe_name,
             timeout_seconds=float(client.timeout_seconds),
             bindings=self._bindings,
             exchange_root=str(self._exchange_root),
         )
-
 
 def _record(state: dict[str, Any], name: str) -> dict[str, Any]:
     record = state.get("record")
