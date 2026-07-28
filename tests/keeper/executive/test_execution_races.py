@@ -71,6 +71,36 @@ def test_restart_reconciles_reserved_attempt_without_new_reservation(
     assert authority.side_effect_count == 1
     assert len(authority.attempts) == 1
 
+
+def test_restart_reconciles_reserved_review_without_duplicate_attempt(
+    tmp_path: Path,
+) -> None:
+    service, project, _ = approved_project(tmp_path)
+    authority = SemanticAuthorityTransport()
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    runtime.progress(project.project_id)
+    authority.raise_after_review_reservation = True
+    blocked = runtime.progress(project.project_id)
+    architecture = next(
+        task
+        for task in service.repository.tasks(project.project_id)
+        if task.title == "Architecture"
+    )
+    assert blocked.state == "BLOCKED"
+    assert architecture.review_attempt_id is not None
+    review_attempt_id = architecture.review_attempt_id
+    assert authority.attempts[review_attempt_id]["service_state"] == "RESERVED"
+
+    runtime.resume(project.project_id)
+    runtime.progress(project.project_id)
+    completed = service.repository.task(architecture.task_id)
+    assert completed.status == "COMPLETED"
+    assert completed.review_attempt_id == review_attempt_id
+    reviews = service.repository.reviews(project.project_id)
+    assert len(reviews) == 1
+
 def test_two_runtime_instances_create_one_claim_and_one_launch(
     tmp_path: Path,
 ) -> None:

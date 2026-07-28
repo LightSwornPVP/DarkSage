@@ -206,6 +206,11 @@ class ExecutiveRuntime:
                 charter=charter,
                 specialist=author,
                 available_inputs=available_inputs,
+                approvals=tuple(
+                    self.repository.approvals(
+                        project.project_id, charter.revision
+                    )
+                ),
             )
             if not readiness.ready:
                 return self._pause(
@@ -273,6 +278,27 @@ class ExecutiveRuntime:
             result = self.gateway.execute(plan)
         except BaseException as error:
             current = self.repository.task(candidate.task_id)
+            if (
+                current.revision == owned.revision
+                and current.status == TaskStatus.LAUNCH_CLAIMED
+                and current.authority_attempt_id is not None
+                and self.gateway.attempt_state(
+                    current.authority_attempt_id
+                )
+                is None
+            ):
+                try:
+                    self.repository.release_prelaunch_execution_claim(
+                        current.task_id,
+                        expected_revision=current.revision,
+                    )
+                except PermissionError:
+                    pass
+                return self._pause(
+                    self.repository.project(project_id),
+                    ExecutiveState.WAITING_FOR_PROVIDER,
+                    "Authority reservation failed before launch; local holds were released.",
+                )
             if (
                 current.revision != owned.revision
                 or current.status != owned.status
@@ -692,6 +718,49 @@ class ExecutiveRuntime:
         plan = self.gateway.plan_from_record(review["plan"])
         completion = self.gateway.reconcile(plan)
         if completion is None:
+            state = self.gateway.attempt_state(plan.authority_attempt_id)
+            if state == "RESERVED" and review.get("state") in {
+                "LAUNCH_CLAIMED",
+                "UNCERTAIN",
+            }:
+                self.repository.transition_review(
+                    plan.authority_attempt_id,
+                    expected_state=str(review["state"]),
+                    target_state="EXECUTION_STARTED",
+                )
+                self._recheck_artifact(task)
+                try:
+                    completion = self.gateway.execute(plan)
+                except BaseException:
+                    try:
+                        self.repository.transition_review(
+                            plan.authority_attempt_id,
+                            expected_state="EXECUTION_STARTED",
+                            target_state="UNCERTAIN",
+                        )
+                    except PermissionError:
+                        pass
+                    return self._pause(
+                        project,
+                        ExecutiveState.BLOCKED,
+                        "Independent review launch is uncertain and not retry-safe.",
+                    )
+            else:
+                if review.get("state") != "UNCERTAIN":
+                    try:
+                        self.repository.transition_review(
+                            plan.authority_attempt_id,
+                            expected_state=str(review["state"]),
+                            target_state="UNCERTAIN",
+                        )
+                    except PermissionError:
+                        pass
+                return self._pause(
+                    project,
+                    ExecutiveState.BLOCKED,
+                    "Independent review awaits Authority reconciliation.",
+                )
+        if completion is None:
             return self._pause(
                 project,
                 ExecutiveState.BLOCKED,
@@ -832,9 +901,14 @@ class ExecutiveRuntime:
         task: ExecutiveTask,
         completion_digest: str,
     ) -> None:
-        self.repository.insert_memory(
-            MemoryRecord(
-                new_id("memory"),
+        memory_id = (
+            "memory:authority-completion:"
+            f"{task.authority_attempt_id or task.task_id}"
+        )
+        if self.repository.store.get("project_memories", memory_id) is not None:
+            return
+        record = MemoryRecord(
+                memory_id,
                 task.project_id,
                 task.charter_revision,
                 task.task_id,
@@ -852,7 +926,14 @@ class ExecutiveRuntime:
                 None,
                 utc_now(),
             )
-        )
+        try:
+            self.repository.insert_memory(record)
+        except PermissionError:
+            if (
+                self.repository.store.get("project_memories", memory_id)
+                is None
+            ):
+                raise
 
     def _cross_budget_boundary(self, task: ExecutiveTask) -> None:
         if task.authority_attempt_id is None:

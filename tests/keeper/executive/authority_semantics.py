@@ -49,6 +49,8 @@ class SemanticAuthorityTransport:
         self.side_effect_count = 0
         self.raise_after_side_effect = False
         self.raise_after_reservation = False
+        self.raise_after_review_reservation = False
+        self.fail_before_reservation = False
         self.unsigned_completion = False
         self.wrong_completion_field: tuple[str, str] | None = None
         self.ignore_cancel_completion = False
@@ -216,6 +218,9 @@ class SemanticAuthorityTransport:
                     "canceled_attempt_ids": canceled,
                 }
             if operation is Operation.RESERVE_ATTEMPT:
+                if self.fail_before_reservation:
+                    self.fail_before_reservation = False
+                    raise RuntimeError("reservation failed before persistence")
                 authorization = self.launch_authorizations.get(
                     str(payload["launch_authorization_id"])
                 )
@@ -254,6 +259,14 @@ class SemanticAuthorityTransport:
                     self.raise_after_reservation = False
                     raise RuntimeError(
                         "reservation response lost after durable reserve"
+                    )
+                if (
+                    self.raise_after_review_reservation
+                    and payload["role"] == "reviewer"
+                ):
+                    self.raise_after_review_reservation = False
+                    raise RuntimeError(
+                        "review reservation response lost after persistence"
                     )
                 return {"attempt": attempt, "attempt_id": attempt_id}
             if operation is Operation.CANCEL_ATTEMPT:

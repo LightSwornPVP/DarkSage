@@ -21,8 +21,13 @@ from keeper.executive.models import (
     utc_now,
 )
 from keeper.executive.planning import WorkflowPlanner
+from keeper.executive.runtime import ExecutiveRuntime
 from keeper.executive.state import transition_project
 from keeper.executive.repository import ExecutiveRepository, charter_approval_digest
+from tests.keeper.executive.authority_semantics import (
+    SemanticAuthorityTransport,
+    semantic_gateway,
+)
 
 
 def _proposed(
@@ -740,6 +745,82 @@ def test_provider_pricing_is_trusted_and_unknown_or_false_zero_fails_closed(
     assert paid_action.cost == 2.0
     decision = AuthorityEvaluator().evaluate(project, charter, paid_action)
     assert decision.rule == "absent-spending-authority"
+
+
+def test_prelaunch_reservation_failure_releases_approval_and_budget(
+    tmp_path: Path,
+) -> None:
+    service, _, proposed = _proposed(tmp_path, budget_limit=10)
+    project, charter = _activate(service, proposed)
+    authority = SemanticAuthorityTransport()
+    paid = authority.registrations["registration-codex"][
+        "pricing_authority"
+    ]
+    paid.update(
+        {
+            "estimated_cost": 1.0,
+            "maximum_cost": 2.0,
+            "included_plan": False,
+            "marginally_free": False,
+            "cost_tier": 9,
+        }
+    )
+    authority.registrations["registration-reviewer"][
+        "capability_set"
+    ] = ["review"]
+    gateway, _ = semantic_gateway(tmp_path, transport=authority)
+    runtime = ExecutiveRuntime(service.repository, gateway)
+    runtime.progress(project.project_id)
+    task = next(
+        item
+        for item in service.repository.tasks(project.project_id)
+        if item.title == "Requirements"
+    )
+    _record_action_approval_interaction(service, project.project_id)
+    approval = service.repository.grant_action_approval(
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        kind=ApprovalKind.ONE_TIME,
+        action_category=ActionCategory.SPEND,
+        scope=charter.deliverables,
+        limits={
+            "action_id": f"task-action:{task.task_id}",
+            "maximum_cost": 10.0,
+            "currency": "USD",
+            "provider": "codex",
+        },
+        approver="Founder",
+        source_interaction_id="action-approval",
+    )
+    authority.fail_before_reservation = True
+    waiting = runtime.progress(project.project_id)
+    released = service.repository.task(task.task_id)
+    restored = next(
+        item
+        for item in service.repository.approvals(
+            project.project_id, charter.revision
+        )
+        if item.approval_id == approval.approval_id
+    )
+    with service.repository.store.connect() as connection:
+        budget_states = [
+            str(row["state"])
+            for row in connection.execute(
+                "SELECT state FROM executive_budget_reservations"
+            ).fetchall()
+        ]
+        consumptions = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM executive_approval_consumptions"
+            ).fetchone()[0]
+        )
+    assert waiting.state == "WAITING_FOR_PROVIDER"
+    assert released.status == "READY"
+    assert released.authority_attempt_id is None
+    assert restored.consumed_at is None
+    assert budget_states == ["RELEASED"]
+    assert consumptions == 0
 
 
 def test_stale_project_write_and_cross_project_task_are_rejected(

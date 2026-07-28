@@ -726,6 +726,115 @@ class ExecutiveRepository:
             )
         return updated_task
 
+    def release_prelaunch_execution_claim(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+    ) -> ExecutiveTask:
+        """Release local authority only when no Authority attempt was created."""
+        timestamp = utc_now()
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            if (
+                task.revision != expected_revision
+                or task.status != TaskStatus.LAUNCH_CLAIMED
+                or task.authority_attempt_id is None
+            ):
+                raise PermissionError("prelaunch claim release is stale")
+            attempt_payload, attempt_hash = self._entity_in_transaction(
+                connection,
+                "executive_execution_attempts",
+                task.authority_attempt_id,
+            )
+            if attempt_payload.get("state") != "LAUNCH_CLAIMED":
+                raise PermissionError("launch boundary was already crossed")
+            reservation_id = attempt_payload.get("budget_reservation_id")
+            if isinstance(reservation_id, str):
+                cursor = connection.execute(
+                    "UPDATE executive_budget_reservations SET state='RELEASED' "
+                    "WHERE reservation_id=? AND state='RESERVED'",
+                    (reservation_id,),
+                )
+                if cursor.rowcount != 1:
+                    raise PermissionError("budget hold is not releasable")
+            approval_id = attempt_payload.get("approval_id")
+            if isinstance(approval_id, str):
+                approval_payload, approval_hash = self._entity_in_transaction(
+                    connection, "executive_approvals", approval_id
+                )
+                approval = ApprovalRecord.from_dict(approval_payload)
+                if approval.kind == ApprovalKind.ONE_TIME:
+                    consumption = connection.execute(
+                        "SELECT task_id,action_id FROM "
+                        "executive_approval_consumptions WHERE approval_id=?",
+                        (approval_id,),
+                    ).fetchone()
+                    if (
+                        consumption is None
+                        or consumption["task_id"] != task.task_id
+                        or consumption["action_id"]
+                        != attempt_payload.get("action_id")
+                    ):
+                        raise PermissionError(
+                            "one-time approval consumption is not releasable"
+                        )
+                    connection.execute(
+                        "DELETE FROM executive_approval_consumptions "
+                        "WHERE approval_id=?",
+                        (approval_id,),
+                    )
+                    self._update_entity_cas(
+                        connection,
+                        "executive_approvals",
+                        approval_id,
+                        approval_hash,
+                        replace(approval, consumed_at=None).to_dict(),
+                    )
+            released_attempt = {
+                **attempt_payload,
+                "state": "PRELAUNCH_RELEASED",
+                "updated_at": timestamp,
+            }
+            released_task = replace(
+                task,
+                provider_id=None,
+                model_id=None,
+                session_id=None,
+                status=TaskStatus.READY.value,
+                authority_attempt_id=None,
+                revision=task.revision + 1,
+                result_disposition="PRELAUNCH_AUTHORITY_RELEASED",
+                attempt_history=task.attempt_history
+                + (
+                    {
+                        "authority_attempt_id": task.authority_attempt_id,
+                        "state": "PRELAUNCH_RELEASED",
+                        "recorded_at": timestamp,
+                    },
+                ),
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_execution_attempts",
+                task.authority_attempt_id,
+                attempt_hash,
+                released_attempt,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                released_task.to_dict(),
+            )
+        return released_task
+
     def accept_author_completion(
         self,
         task_id: str,

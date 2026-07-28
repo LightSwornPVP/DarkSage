@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from keeper.executive.authority import AuthorityEvaluator, TrustedActionClassifier
 from keeper.executive.enums import ActionCategory, ActionEffect, TaskStatus
 from keeper.executive.models import (
+    ApprovalRecord,
     ActionEffects,
     ExecutiveTask,
     ProjectCharter,
@@ -214,6 +215,7 @@ class TaskReadiness:
         charter: ProjectCharter,
         specialist: SpecialistProfile | None,
         available_inputs: frozenset[str],
+        approvals: tuple[ApprovalRecord, ...] = (),
     ) -> ReadinessResult:
         reasons: list[str] = []
         by_id = {item.task_id: item for item in all_tasks}
@@ -250,7 +252,7 @@ class TaskReadiness:
                     project,
                     charter,
                     action,
-                    tuple(),
+                    approvals,
                 )
                 if decision.outcome not in {"ALLOWED", "ALLOWED_WITHIN_LIMIT"}:
                     reasons.append(f"authority is not present: {decision.outcome}")
