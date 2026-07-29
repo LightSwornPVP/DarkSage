@@ -4,7 +4,10 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from keeper.pass_b.conversation import CharterDraftContextRecord
+from keeper.pass_b.conversation import (
+    CharterDraftContextRecord,
+    expire_delegated_grants,
+)
 from keeper.pass_b.enums import AssignmentState, DelegatedModeState
 from keeper.pass_b.models import (
     AssignmentRecord,
@@ -63,6 +66,7 @@ class ControlRoomService:
         )
 
     def snapshot(self, project_id: str | None = None) -> ControlRoomSnapshot:
+        expire_delegated_grants(self.repository)
         assignments = self.repository.list(
             AssignmentRecord, project_id=project_id
         )

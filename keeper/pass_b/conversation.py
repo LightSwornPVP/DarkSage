@@ -373,18 +373,34 @@ class DynamicWorkflowDesigner:
 
 FORBIDDEN_DELEGATED_SCOPE = frozenset(
     {
+        "FORCE_PUSH",
+        "GIT_PUSH_FORCE",
         "HISTORY_REWRITE",
+        "REWRITE_HISTORY",
         "DELETE_BACKUP",
+        "DELETE_BACKUP_BRANCH",
         "DELETE_WORKTREE",
+        "DELETE_BACKUP_WORKTREE",
         "SPENDING",
+        "PURCHASE",
+        "BUY_CREDITS",
         "PAID_FALLBACK",
+        "DEPLOY",
         "DEPLOY_PRODUCTION",
         "PUBLISH",
+        "PUBLICATION",
         "LIVE_TRADING",
+        "AUTONOMOUS_TRADING",
+        "CREDENTIAL_ACCESS",
+        "ACCESS_CREDENTIALS",
         "CREDENTIAL_CHANGE",
         "SECURITY_BOUNDARY_CHANGE",
+        "DESTRUCTIVE_ACTION",
+        "MAJOR_ARCHITECTURE_CHANGE",
+        "GOVERNANCE_CHANGE",
         "EXPAND_GOVERNANCE",
         "EXPAND_CHARTER",
+        "OUT_OF_CHARTER",
     }
 )
 
@@ -400,6 +416,7 @@ def activate_delegated_mode(
     scope: tuple[str, ...],
     expires_at: str,
 ) -> DelegatedModeGrantRecord:
+    normalized_scope = tuple(_delegated_action(item) for item in scope)
     if (
         charter.project_id != project_id
         or charter.status != CharterStatus.ACTIVE
@@ -411,13 +428,30 @@ def activate_delegated_mode(
         or founder_identity != charter.founder_approval_identity
         or founder_approval_digest
         != charter.founder_authorization_capability_digest
-        or not scope
-        or FORBIDDEN_DELEGATED_SCOPE.intersection(scope)
+        or not normalized_scope
+        or len(set(normalized_scope)) != len(normalized_scope)
+        or FORBIDDEN_DELEGATED_SCOPE.intersection(normalized_scope)
     ):
         raise PermissionError("delegated mode is outside Founder charter authority")
     now = _now()
     if _parse_time(expires_at) <= _parse_time(now):
         raise ValueError("delegated mode expiry must be in the future")
+    expire_delegated_grants(repository, observed_at=now)
+    existing = repository.list(
+        DelegatedModeGrantRecord, project_id=project_id
+    )
+    if any(
+        item.founder_approval_id == founder_approval_id
+        or (
+            item.charter_id == charter.charter_id
+            and item.charter_revision == charter.revision
+            and item.state == DelegatedModeState.ACTIVE
+        )
+        for item in existing
+    ):
+        raise PermissionError(
+            "delegated Founder approval was replayed or is already active"
+        )
     record = DelegatedModeGrantRecord(
         delegated_mode_grant_id=uuid.uuid4().hex,
         project_id=project_id,
@@ -426,7 +460,7 @@ def activate_delegated_mode(
         founder_identity=founder_identity,
         founder_approval_id=founder_approval_id,
         founder_approval_digest=founder_approval_digest,
-        scope=scope,
+        scope=normalized_scope,
         starts_at=now,
         expires_at=expires_at,
         state=DelegatedModeState.ACTIVE,
@@ -437,6 +471,76 @@ def activate_delegated_mode(
     )
     repository.insert(record)
     return record
+
+
+def validate_delegated_action(
+    repository: PassBRepository,
+    grant_id: str,
+    *,
+    project_id: str,
+    charter_id: str,
+    charter_revision: int,
+    action: str,
+    observed_at: str | None = None,
+) -> DelegatedModeGrantRecord:
+    now = observed_at or _now()
+    record = repository.get(DelegatedModeGrantRecord, grant_id)
+    if (
+        record.state == DelegatedModeState.ACTIVE
+        and _parse_time(record.expires_at) <= _parse_time(now)
+    ):
+        expired = repository.replace(
+            replace(
+                record,
+                state=DelegatedModeState.EXPIRED,
+                updated_at=now,
+                revision=record.revision + 1,
+            ),
+            expected_revision=record.revision,
+        )
+        raise PermissionError(
+            f"delegated mode grant expired: {expired.delegated_mode_grant_id}"
+        )
+    normalized_action = _delegated_action(action)
+    if (
+        record.state != DelegatedModeState.ACTIVE
+        or _parse_time(record.starts_at) > _parse_time(now)
+        or record.project_id != project_id
+        or record.charter_id != charter_id
+        or record.charter_revision != charter_revision
+        or normalized_action in FORBIDDEN_DELEGATED_SCOPE
+        or normalized_action not in record.scope
+    ):
+        raise PermissionError(
+            "delegated action is expired, revoked, stale, or out of scope"
+        )
+    return record
+
+
+def expire_delegated_grants(
+    repository: PassBRepository,
+    *,
+    observed_at: str | None = None,
+) -> tuple[DelegatedModeGrantRecord, ...]:
+    now = observed_at or _now()
+    expired: list[DelegatedModeGrantRecord] = []
+    for record in repository.list(DelegatedModeGrantRecord):
+        if (
+            record.state == DelegatedModeState.ACTIVE
+            and _parse_time(record.expires_at) <= _parse_time(now)
+        ):
+            expired.append(
+                repository.replace(
+                    replace(
+                        record,
+                        state=DelegatedModeState.EXPIRED,
+                        updated_at=now,
+                        revision=record.revision + 1,
+                    ),
+                    expected_revision=record.revision,
+                )
+            )
+    return tuple(expired)
 
 
 def revoke_delegated_mode(
@@ -494,6 +598,24 @@ def _parse_time(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timestamp must be timezone aware")
     return parsed
+
+
+def _delegated_action(value: str) -> str:
+    normalized = "".join(
+        character if character.isalnum() else "_"
+        for character in value.strip().upper()
+    )
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    normalized = normalized.strip("_")
+    if not normalized:
+        raise ValueError("delegated action cannot be empty")
+    aliases = {
+        "GIT_PUSH_FORCE_WITH_LEASE": "FORCE_PUSH",
+        "PUSH_FORCE": "FORCE_PUSH",
+        "PUSH_FORCE_WITH_LEASE": "FORCE_PUSH",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _now() -> str:

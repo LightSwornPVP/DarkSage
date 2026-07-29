@@ -2,10 +2,12 @@
 
 ## Launch protocol
 
-Keeper creates a durable `Attempt` in `RESERVED` state before external launch.
-It then transactionally acquires the launch claim and changes both attempt and
-assignment to `LAUNCH_CLAIMED`. Only after that commit does it call the provider
-adapter.
+Keeper first validates the exact active charter, signed KeeperAuthority
+attempt, active launch generation, canonical workspace reservation, protected
+write scope, and usage reservation. Creating the durable `Attempt` atomically
+claims the provider-session slot. Keeper then acquires the one-winner launch
+claim and changes attempt and assignment to `LAUNCH_CLAIMED`. Production calls
+KeeperAuthority's protected execution transition only after that commit.
 
 On restart:
 
@@ -30,25 +32,34 @@ assignment to `WAITING_FOR_USAGE_RESET` and writes a `PauseReason` and
 workspace reservation, usage pool, authority-envelope digest, and checkpoint
 state.
 
-Resume requires the reset window to have passed and revalidates assignment
-state, charter binding, authority digest, workspace ownership/state, and the
-absence of an active or uncertain launch. The workspace is preserved while
-waiting. There is no automatic paid fallback.
+Time passing is not a reset observation. A configured authenticated provider
+observer must issue a one-use observation bound to provider, account, pool,
+scheduled reset, observation time, and remaining capacity. The observation is
+stored once for the next usage generation. Reset accounting preserves all
+active reservations and computes remaining capacity after those reservations.
+
+Resume requires that durable observation and revalidates assignment revision,
+project, charter, authority digest, provider, account, session, model, usage
+generation, exact workspace reservation and canonical identity, and the absence
+of an uncertain launch. The checkpoint is one-use, the workspace is preserved,
+and there is no automatic paid fallback.
 
 ## Workspace concurrency
 
 SQLite `BEGIN IMMEDIATE` transactions and normalized claim tables provide:
 
-- one active writer for a canonical workspace path;
-- overlapping protected-scope exclusion;
+- one active writer across equal, parent, or child canonical workspace paths;
+- overlapping protected-scope exclusion based on physical canonical paths, not
+  caller-selected workspace labels;
 - concurrent reader allowance only through read-only reservations;
 - owner-token lease renewal;
 - explicit stale recovery after expiry;
 - atomic propagation of renewal, release, stale, and uncertain state from a
   workspace to linked write records and claims.
 
-Worktrees must be children of the configured implementation root. Protected
-roots and `.ai-workflow/pw/` are rejected. Cleanup requires explicit approval,
+Canonicalization resolves existing physical paths, case and alternate spelling
+before claiming them. Primary repositories and `.ai-workflow/pw/` are rejected.
+Cleanup requires explicit approval,
 terminal assignment state, preserved evidence, a clean worktree, and no
 untracked files.
 

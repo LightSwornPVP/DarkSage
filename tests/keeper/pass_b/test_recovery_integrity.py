@@ -17,7 +17,11 @@ from keeper.pass_b.models import (
     WorkspaceReservationRecord,
     WriteReservationRecord,
 )
-from tests.keeper.pass_b.test_orchestration import _assignment, _stack
+from tests.keeper.pass_b.test_orchestration import (
+    _assignment,
+    _authorize,
+    _stack,
+)
 
 
 def test_workspace_release_atomically_releases_write_claims(
@@ -101,6 +105,9 @@ def test_uncertain_recovery_updates_durable_workspace_and_write_records(
         assignment, workspace, ("keeper/pass_b",), lease_seconds=300
     )
     service.reserve_usage(assignment, workspace, 1)
+    authority_id = _authorize(
+        service, assignment, workspace, "authority-uncertain"
+    )
 
     def interrupt_after_claim() -> None:
         raise RuntimeError("simulated interruption")
@@ -109,7 +116,7 @@ def test_uncertain_recovery_updates_durable_workspace_and_write_records(
         service.run_assignment(
             assignment.assignment_id,
             path,
-            authority_attempt_id="authority-uncertain",
+            authority_attempt_id=authority_id,
             global_context={},
             task_context={},
             after_launch_claim=interrupt_after_claim,
@@ -153,10 +160,13 @@ def test_evidence_digest_is_bound_to_stored_payload(tmp_path: Path) -> None:
         assignment, workspace, ("keeper/pass_b",), lease_seconds=300
     )
     service.reserve_usage(assignment, workspace, 1)
+    authority_id = _authorize(
+        service, assignment, workspace, "authority-evidence"
+    )
     evidence = service.run_assignment(
         assignment.assignment_id,
         path,
-        authority_attempt_id="authority-evidence",
+        authority_attempt_id=authority_id,
         global_context={},
         task_context={},
     )
@@ -219,6 +229,14 @@ def test_concurrent_cancellation_claim_emits_one_external_effect(
         created_at=clock().isoformat(),
         updated_at=clock().isoformat(),
         revision=1,
+        workspace_reservation_id=workspace.workspace_reservation_id,
+        usage_reservation_id=str(
+            repository.usage_reservations(
+                assignment.assignment_id
+            )[0]["reservation_id"]
+        ),
+        launch_plan_digest="cancel-test-plan",
+        session_slot_claimed=True,
     )
     repository.reserve_attempt(attempt)
     repository.claim_launch(attempt.attempt_id, clock().isoformat())
@@ -271,7 +289,7 @@ def test_review_repair_is_transactional_and_retry_is_explicit(
         account,
         _,
         sessions,
-        _,
+        adapter,
     ) = _stack(tmp_path)
     producer = _assignment(service, provider, account, sessions[0])
     path = tmp_path / "workspace"
@@ -287,10 +305,13 @@ def test_review_repair_is_transactional_and_retry_is_explicit(
         producer, workspace, ("keeper/pass_b",), lease_seconds=300
     )
     service.reserve_usage(producer, workspace, 1)
+    producer_authority_id = _authorize(
+        service, producer, workspace, "authority-repair"
+    )
     evidence = service.run_assignment(
         producer.assignment_id,
         path,
-        authority_attempt_id="authority-repair",
+        authority_attempt_id=producer_authority_id,
         global_context={},
         task_context={},
     )
@@ -303,20 +324,53 @@ def test_review_repair_is_transactional_and_retry_is_explicit(
         account,
         sessions[1],
         role="REVIEWER",
+        work_item=repository.get(
+            WorkItemRecord, producer.work_item_id
+        ),
+        review_of_assignment_id=producer.assignment_id,
     )
-    review = service.create_review(
-        evidence.evidence_bundle_id, reviewer.assignment_id
+    review_path = tmp_path / "review-workspace"
+    review_path.mkdir()
+    review_workspace = service.reserve_workspace(
+        reviewer,
+        review_path,
+        lease_seconds=300,
+        branch="test/repair-review",
+        base_commit="abc",
     )
-    decided, original, work_item = service.decide_review(
-        review.review_id,
-        accepted=False,
-        findings=(
+    service.reserve_usage(reviewer, review_workspace, 1)
+    adapter.set_review_outcome(
+        "REPAIR_REQUIRED",
+        (
             {
                 "severity": "MEDIUM",
                 "summary": "bounded repair required",
             },
         ),
     )
+    reviewer_authority_id = _authorize(
+        service,
+        reviewer,
+        review_workspace,
+        "authority-repair-review",
+    )
+    reviewer_evidence = service.run_assignment(
+        reviewer.assignment_id,
+        review_path,
+        authority_attempt_id=reviewer_authority_id,
+        global_context={},
+        task_context={},
+    )
+    reviewer_evidence = service.validate_evidence(
+        reviewer_evidence.evidence_bundle_id,
+        review_path,
+    )
+    review = service.create_review(
+        evidence.evidence_bundle_id,
+        reviewer.assignment_id,
+        reviewer_evidence.evidence_bundle_id,
+    )
+    decided, original, work_item = service.decide_review(review.review_id)
 
     assert decided.state == "REPAIR_REQUIRED"
     assert original.state == "REPAIR_REQUIRED"

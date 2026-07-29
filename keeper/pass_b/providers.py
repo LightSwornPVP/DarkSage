@@ -50,6 +50,7 @@ class AdapterAssignment:
     task_context: dict[str, Any]
     expected_evidence: tuple[str, ...]
     authority_attempt_id: str
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +99,18 @@ class LocalMockAdapter:
         self.provider_id = provider_id
         self._launched: set[str] = set()
         self._canceled: set[str] = set()
+        self._review_disposition = "ACCEPTED"
+        self._review_findings: tuple[dict[str, Any], ...] = ()
+
+    def set_review_outcome(
+        self,
+        disposition: str,
+        findings: tuple[dict[str, Any], ...] = (),
+    ) -> None:
+        if disposition not in {"ACCEPTED", "REPAIR_REQUIRED"}:
+            raise ValueError("mock review disposition is invalid")
+        self._review_disposition = disposition
+        self._review_findings = tuple(dict(item) for item in findings)
 
     def descriptor(self) -> AdapterDescriptor:
         return AdapterDescriptor(
@@ -128,19 +141,25 @@ class LocalMockAdapter:
             raise PermissionError("review provider requires a read-only assignment")
         self._launched.add(assignment.attempt_id)
         external_id = f"{self.provider_id}:{assignment.attempt_id}"
+        artifact: dict[str, Any] = {
+            "kind": "structured-report",
+            "path": None,
+            "digest": hashlib.sha256(
+                assignment.assignment_id.encode("utf-8")
+            ).hexdigest(),
+            "execution_requested": False,
+        }
+        if assignment.role == AssignmentRole.REVIEWER:
+            artifact.update(
+                {
+                    "review_disposition": self._review_disposition,
+                    "findings": list(self._review_findings),
+                }
+            )
         return AdapterResult(
             external_execution_id=external_id,
             summary=f"Completed {assignment.role.casefold()} assignment.",
-            artifacts=(
-                {
-                    "kind": "structured-report",
-                    "path": None,
-                    "digest": hashlib.sha256(
-                        assignment.assignment_id.encode("utf-8")
-                    ).hexdigest(),
-                    "execution_requested": False,
-                },
-            ),
+            artifacts=(artifact,),
             usage=1.0,
             session_resume_token=hashlib.sha256(
                 external_id.encode("utf-8")
@@ -422,4 +441,5 @@ def assignment_to_adapter(
         task_context=dict(task_context),
         expected_evidence=assignment.expected_evidence,
         authority_attempt_id=authority_attempt_id,
+        session_id=assignment.session_id,
     )

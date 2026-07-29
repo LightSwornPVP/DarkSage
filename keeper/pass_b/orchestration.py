@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,10 @@ from keeper.pass_b.models import (
     WorkspaceReservationRecord,
     WriteReservationRecord,
 )
+from keeper.pass_b.launch_authority import (
+    LaunchAuthority,
+    UnavailableLaunchAuthority,
+)
 from keeper.pass_b.providers import (
     AdapterResult,
     ProviderAdapter,
@@ -43,6 +48,11 @@ from keeper.pass_b.repository import (
     PassBRepository,
     canonical_scope,
     canonical_workspace_path,
+)
+from keeper.pass_b.usage_authority import (
+    UnavailableUsageResetVerifier,
+    UsageResetObservation,
+    UsageResetVerifier,
 )
 
 
@@ -55,9 +65,17 @@ class OrchestrationService:
         repository: PassBRepository,
         *,
         clock: Clock | None = None,
+        launch_authority: LaunchAuthority | None = None,
+        usage_reset_verifier: UsageResetVerifier | None = None,
     ) -> None:
         self.repository = repository
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.launch_authority = (
+            launch_authority or UnavailableLaunchAuthority()
+        )
+        self.usage_reset_verifier = (
+            usage_reset_verifier or UnavailableUsageResetVerifier()
+        )
         self.adapters: dict[str, ProviderAdapter] = {}
 
     def register_provider(
@@ -92,26 +110,44 @@ class OrchestrationService:
     ) -> None:
         provider = self.repository.get(ProviderRecord, provider_id)
         descriptor = adapter.descriptor()
+        sessions = tuple(
+            item
+            for item in self.repository.list(ProviderSessionRecord)
+            if item.provider_id == provider_id
+        )
+        accounts = tuple(
+            item
+            for item in self.repository.list(ProviderAccountRecord)
+            if item.provider_id == provider_id
+        )
+        pools = tuple(
+            self.repository.get(UsagePoolRecord, item.usage_pool_id)
+            for item in accounts
+        )
         if (
             descriptor.provider_identity != provider.identity
             or descriptor.classification != provider.classification
             or descriptor.session_model != provider.session_model
             or descriptor.cost_mode != provider.cost_mode
-            or provider.concurrency_limit > descriptor.concurrency_limit
+            or provider.concurrency_limit != descriptor.concurrency_limit
             or descriptor.authentication_ready
             != provider.authentication_ready
             or descriptor.cancellation_support
             != provider.cancellation_support
             or descriptor.resume_support != provider.resume_support
             or descriptor.evidence_format != provider.evidence_format
-            or not set(provider.capabilities).issubset(
-                descriptor.capabilities
+            or descriptor.health != provider.health
+            or set(provider.capabilities) != set(descriptor.capabilities)
+            or set(provider.tool_support) != set(descriptor.tool_support)
+            or set(provider.workspace_support)
+            != set(descriptor.workspace_support)
+            or any(
+                item.model_id != descriptor.model_identity
+                for item in sessions
             )
-            or not set(provider.tool_support).issubset(
-                descriptor.tool_support
-            )
-            or not set(provider.workspace_support).issubset(
-                descriptor.workspace_support
+            or any(
+                item.identity != descriptor.usage_pool_identity
+                for item in pools
             )
         ):
             raise PermissionError("adapter does not match durable provider")
@@ -257,7 +293,8 @@ class OrchestrationService:
             assignment_id=assignment.assignment_id,
             scope=scopes,
             scope_keys=tuple(
-                canonical_scope(workspace.workspace_id, item) for item in scopes
+                canonical_scope(workspace.canonical_path, item)
+                for item in scopes
             ),
             owner_token=workspace.owner_token,
             lease_expires_at=(now + timedelta(seconds=lease_seconds)).isoformat(),
@@ -308,6 +345,9 @@ class OrchestrationService:
                 "account_id": assignment.account_id,
                 "session_id": assignment.session_id,
                 "model_id": assignment.model_id,
+                "usage_observation_generation": pool.observation_generation,
+                "workspace_id": workspace.workspace_id,
+                "workspace_canonical_path": workspace.canonical_path,
             },
             created_at=now,
             resumed_at=None,
@@ -337,6 +377,27 @@ class OrchestrationService:
             resumed_at=self._now(),
         )
 
+    def observe_usage_reset(
+        self,
+        observation: UsageResetObservation,
+    ) -> UsagePoolRecord:
+        pool = self.repository.get(
+            UsagePoolRecord, observation.pool_id
+        )
+        self.usage_reset_verifier.verify(
+            pool, observation, now=self.clock()
+        )
+        return self.repository.observe_usage_reset(
+            pool_id=observation.pool_id,
+            observation_id=observation.observation_id,
+            observation_digest=observation.digest(),
+            observed_reset_at=observation.reset_at,
+            observation_source=observation.source,
+            observed_remaining=observation.remaining,
+            confidence="HIGH",
+            observed_at=observation.observed_at,
+        )
+
     def run_assignment(
         self,
         assignment_id: str,
@@ -352,12 +413,62 @@ class OrchestrationService:
         adapter = self.adapters.get(assignment.provider_id)
         if adapter is None:
             raise RuntimeError("assignment provider adapter is unavailable")
+        workspaces = [
+            item
+            for item in self.repository.list(
+                WorkspaceReservationRecord,
+                project_id=assignment.project_id,
+            )
+            if item.assignment_id == assignment.assignment_id
+            and item.state == ReservationState.ACTIVE
+        ]
+        if len(workspaces) != 1:
+            raise PermissionError(
+                "assignment needs exactly one active workspace"
+            )
+        workspace = workspaces[0]
+        if (
+            workspace.workspace_id != assignment.workspace_id
+            or canonical_workspace_path(workspace_path)
+            != workspace.canonical_path
+        ):
+            raise PermissionError(
+                "launch workspace does not match the durable reservation"
+            )
+        provider = self.repository.get(
+            ProviderRecord, assignment.provider_id
+        )
+        authorization = self.launch_authority.authorize(
+            assignment,
+            provider,
+            workspace,
+            authority_attempt_id,
+        )
+        usage_rows = [
+            item
+            for item in self.repository.usage_reservations(
+                assignment.assignment_id
+            )
+            if item["state"] == "ACTIVE"
+        ]
+        reservation_required = bool(
+            assignment.usage_policy.get("reservation_required", True)
+        )
+        if reservation_required and len(usage_rows) != 1:
+            raise PermissionError(
+                "launch requires exactly one active usage reservation"
+            )
+        usage_reservation_id = (
+            str(usage_rows[0]["reservation_id"])
+            if usage_rows
+            else None
+        )
         now = self._now()
         attempt = AttemptRecord(
             attempt_id=uuid.uuid4().hex,
             assignment_id=assignment_id,
             authority_attempt_id=authority_attempt_id,
-            launch_token=uuid.uuid4().hex,
+            launch_token=authorization.launch_token,
             state=AttemptState.RESERVED,
             external_execution_id=None,
             side_effect_class=side_effect_class,
@@ -367,6 +478,10 @@ class OrchestrationService:
             created_at=now,
             updated_at=now,
             revision=1,
+            workspace_reservation_id=workspace.workspace_reservation_id,
+            usage_reservation_id=usage_reservation_id,
+            launch_plan_digest=authorization.launch_plan_digest,
+            session_slot_claimed=True,
         )
         self.repository.reserve_attempt(attempt)
         claimed = self.repository.claim_launch(attempt.attempt_id, self._now())
@@ -381,10 +496,24 @@ class OrchestrationService:
             task_context=dict(task_context),
         )
         try:
-            result = adapter.launch(request)
+            result = self.launch_authority.launch(
+                authorization, request, adapter
+            )
         except BaseException:
             # The durable claim deliberately remains ambiguous for restart recovery.
             raise
+        if (
+            result.usage is not None
+            and (
+                not math.isfinite(result.usage)
+                or result.usage < 0
+                or not usage_rows
+                or result.usage > float(usage_rows[0]["amount"])
+            )
+        ):
+            raise PermissionError(
+                "provider usage exceeds the durable launch reservation"
+            )
         running = self.repository.mark_running(
             claimed.attempt_id, result.external_execution_id, self._now()
         )
@@ -445,7 +574,7 @@ class OrchestrationService:
         ):
             errors.append("producer identity does not match assignment")
         kinds: set[str] = set()
-        root = workspace_path.resolve()
+        root = workspace_path.resolve(strict=True)
         forbidden_keys = {
             "evaluate",
             "exec",
@@ -471,9 +600,16 @@ class OrchestrationService:
                 if not candidate.is_absolute():
                     candidate = root / candidate
                 try:
-                    candidate.resolve().relative_to(root)
-                except ValueError:
+                    resolved = candidate.resolve(strict=True)
+                    resolved.relative_to(root)
+                except (FileNotFoundError, ValueError):
                     errors.append("artifact path escapes assigned workspace")
+                    continue
+                if not resolved.is_file():
+                    errors.append("artifact path is not a regular file")
+                    continue
+                if hashlib.sha256(resolved.read_bytes()).hexdigest() != digest:
+                    errors.append("artifact digest does not match file content")
         if not set(assignment.expected_evidence).issubset(kinds):
             errors.append("required evidence kind is missing")
         updated = replace(
@@ -491,6 +627,7 @@ class OrchestrationService:
         self,
         evidence_id: str,
         reviewer_assignment_id: str,
+        reviewer_evidence_id: str,
     ) -> ReviewRecord:
         evidence = self.repository.get(EvidenceBundleRecord, evidence_id)
         producer = self.repository.get(
@@ -504,8 +641,29 @@ class OrchestrationService:
             or reviewer.role != AssignmentRole.REVIEWER
             or not reviewer.read_only
             or reviewer.independence_key == producer.independence_key
-            or reviewer.provider_id == producer.provider_id
-            and reviewer.session_id == producer.session_id
+            or (
+                reviewer.provider_id == producer.provider_id
+                and reviewer.session_id == producer.session_id
+            )
+        ):
+            raise PermissionError("review independence or evidence is invalid")
+        reviewer_evidence = self.repository.get(
+            EvidenceBundleRecord, reviewer_evidence_id
+        )
+        reviewer_attempt = self.repository.get(
+            AttemptRecord, reviewer_evidence.attempt_id
+        )
+        disposition, findings = _review_outcome(reviewer_evidence)
+        if (
+            reviewer_evidence.state != EvidenceState.VALIDATED
+            or reviewer_evidence.assignment_id != reviewer.assignment_id
+            or reviewer_attempt.assignment_id != reviewer.assignment_id
+            or reviewer_attempt.state != AttemptState.COMPLETED
+            or reviewer.project_id != producer.project_id
+            or reviewer.charter_id != producer.charter_id
+            or reviewer.charter_revision != producer.charter_revision
+            or reviewer.usage_policy.get("review_of_assignment_id")
+            != producer.assignment_id
         ):
             raise PermissionError("review independence or evidence is invalid")
         now = self._now()
@@ -517,11 +675,14 @@ class OrchestrationService:
             reviewer_assignment_id=reviewer_assignment_id,
             independence_key=reviewer.independence_key,
             state=ReviewState.PENDING,
-            findings=(),
-            disposition=None,
+            findings=findings,
+            disposition=disposition,
             created_at=now,
             updated_at=now,
             revision=1,
+            producer_evidence_bundle_id=evidence.evidence_bundle_id,
+            reviewer_attempt_id=reviewer_attempt.attempt_id,
+            reviewer_evidence_bundle_id=reviewer_evidence.evidence_bundle_id,
         )
         self.repository.insert(review)
         return review
@@ -529,15 +690,9 @@ class OrchestrationService:
     def decide_review(
         self,
         review_id: str,
-        *,
-        accepted: bool,
-        findings: tuple[dict[str, object], ...] = (),
     ) -> tuple[ReviewRecord, AssignmentRecord, WorkItemRecord]:
-        normalized_findings = tuple(dict(item) for item in findings)
         return self.repository.decide_review(
             review_id,
-            accepted=accepted,
-            findings=normalized_findings,
             decided_at=self._now(),
         )
 
@@ -665,3 +820,27 @@ def authority_envelope_digest(value: dict[str, object]) -> str:
             "utf-8"
         )
     ).hexdigest()
+
+
+def _review_outcome(
+    evidence: EvidenceBundleRecord,
+) -> tuple[str, tuple[dict[str, object], ...]]:
+    reports = [
+        artifact
+        for artifact in evidence.artifacts
+        if artifact.get("kind") == "structured-report"
+    ]
+    if len(reports) != 1:
+        raise PermissionError(
+            "reviewer evidence needs one structured review report"
+        )
+    report = reports[0]
+    disposition = report.get("review_disposition")
+    findings = report.get("findings")
+    if disposition not in {"ACCEPTED", "REPAIR_REQUIRED"}:
+        raise PermissionError("review disposition is missing or invalid")
+    if not isinstance(findings, list) or any(
+        not isinstance(item, dict) for item in findings
+    ):
+        raise PermissionError("review findings are malformed")
+    return str(disposition), tuple(dict(item) for item in findings)

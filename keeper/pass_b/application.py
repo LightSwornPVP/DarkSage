@@ -27,9 +27,14 @@ from keeper.pass_b.models import (
     ProviderSessionRecord,
     UsagePoolRecord,
 )
+from keeper.pass_b.launch_authority import (
+    ExecutiveAuthorityLaunchGate,
+    LaunchAuthority,
+)
 from keeper.pass_b.orchestration import OrchestrationService
 from keeper.pass_b.providers import LocalMockAdapter, ProviderAdapter
 from keeper.pass_b.repository import PassBRepository
+from keeper.pass_b.usage_authority import UsageResetVerifier
 
 
 class PassBApplication:
@@ -41,6 +46,8 @@ class PassBApplication:
         *,
         executive: ConversationExecutive | None = None,
         authority_client: ProductionAuthorityServiceClient | None = None,
+        usage_reset_verifier: UsageResetVerifier | None = None,
+        _test_launch_authority: LaunchAuthority | None = None,
     ) -> None:
         self.data_directory = (
             data_directory or default_data_directory()
@@ -53,7 +60,24 @@ class PassBApplication:
         )
         self.executive = executive or KeeperExecutive(self.store.path)
         self.authority_client = authority_client
-        self.orchestration = OrchestrationService(self.repository)
+        self._test_authority_configured = _test_launch_authority is not None
+        if _test_launch_authority is not None:
+            launch_authority = _test_launch_authority
+        elif authority_client is not None:
+            if not isinstance(self.executive, KeeperExecutive):
+                raise TypeError(
+                    "production Authority requires the production Executive"
+                )
+            launch_authority = ExecutiveAuthorityLaunchGate.production(
+                self.executive, authority_client
+            )
+        else:
+            launch_authority = None
+        self.orchestration = OrchestrationService(
+            self.repository,
+            launch_authority=launch_authority,
+            usage_reset_verifier=usage_reset_verifier,
+        )
         self.conversation = DurableConversationService(
             self.repository, self.executive
         )
@@ -61,6 +85,24 @@ class PassBApplication:
             self.repository, authority_health=self._authority_health
         )
         self._ensure_presentation_state()
+
+    @classmethod
+    def test_composition(
+        cls,
+        data_directory: Path,
+        *,
+        executive: ConversationExecutive,
+        launch_authority: LaunchAuthority,
+        usage_reset_verifier: UsageResetVerifier,
+    ) -> PassBApplication:
+        """Build an explicitly non-production deterministic composition."""
+
+        return cls(
+            data_directory,
+            executive=executive,
+            usage_reset_verifier=usage_reset_verifier,
+            _test_launch_authority=launch_authority,
+        )
 
     def begin_conversation(self, message: str) -> Any:
         return self.conversation.begin(message)
@@ -141,7 +183,7 @@ class PassBApplication:
             pool_id=pool_id,
             provider_id=provider_id,
             account_id=account_id,
-            identity=f"{provider_id}:{account_id}:shared",
+            identity=descriptor.usage_pool_identity,
             limit_type="UNLIMITED_LOCAL",
             capacity=None,
             consumed=0,
@@ -200,8 +242,12 @@ class PassBApplication:
     def diagnostics(self) -> dict[str, Any]:
         return {
             "data_directory": str(self.data_directory),
-            "pass_b_schema_version": 1,
+            "pass_b_schema_version": 3,
             "authority": self._authority_health(),
+            "launch_authority_configured": (
+                self.authority_client is not None
+                or self._test_authority_configured
+            ),
             "providers": len(self.repository.list(ProviderRecord)),
             "sessions": len(self.repository.list(ProviderSessionRecord)),
             "startup_recovery": dict(self.startup_recovery),
@@ -213,6 +259,11 @@ class PassBApplication:
     def _authority_health(self) -> dict[str, Any]:
         client = self.authority_client
         if client is None:
+            if self._test_authority_configured:
+                return {
+                    "state": "TEST_COMPOSITION",
+                    "production_validation": False,
+                }
             return {"state": "NOT_CONFIGURED"}
         try:
             value = client.require_live_identity()

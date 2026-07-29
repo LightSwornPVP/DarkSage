@@ -40,7 +40,7 @@ from keeper.pass_b.models import (
 
 
 R = TypeVar("R", bound=PassBRecord)
-PASS_B_SCHEMA_VERSION = 1
+PASS_B_SCHEMA_VERSION = 3
 
 
 class PassBRepository:
@@ -131,6 +131,44 @@ class PassBRepository:
                     "VALUES(1,?)",
                     (_now(),),
                 )
+            if current < 2:
+                connection.execute(
+                    "ALTER TABLE pass_b_usage_reservations "
+                    "ADD COLUMN observation_generation INTEGER NOT NULL DEFAULT 1"
+                )
+                connection.execute(
+                    "ALTER TABLE pass_b_launch_claims "
+                    "ADD COLUMN authority_attempt_id TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execute(
+                    "UPDATE pass_b_launch_claims "
+                    "SET authority_attempt_id='legacy:' || attempt_id "
+                    "WHERE authority_attempt_id=''"
+                )
+                connection.execute(
+                    "CREATE UNIQUE INDEX ux_pass_b_authority_attempt "
+                    "ON pass_b_launch_claims(authority_attempt_id)"
+                )
+                connection.execute(
+                    "INSERT INTO pass_b_schema_migrations(version,applied_at) "
+                    "VALUES(2,?)",
+                    (_now(),),
+                )
+            if current < 3:
+                connection.execute(
+                    "CREATE TABLE pass_b_usage_reset_observations ("
+                    "observation_id TEXT PRIMARY KEY, "
+                    "pool_id TEXT NOT NULL, "
+                    "observation_generation INTEGER NOT NULL, "
+                    "observation_digest TEXT NOT NULL, "
+                    "observed_at TEXT NOT NULL, "
+                    "UNIQUE(pool_id,observation_generation))"
+                )
+                connection.execute(
+                    "INSERT INTO pass_b_schema_migrations(version,applied_at) "
+                    "VALUES(3,?)",
+                    (_now(),),
+                )
 
     def insert(self, record: PassBRecord) -> None:
         with self.store.connect() as connection:
@@ -186,13 +224,18 @@ class PassBRepository:
             if assignment.read_only and record.mode != ReservationMode.READ_ONLY:
                 raise PermissionError("read-only assignment cannot reserve a writer")
             claims = connection.execute(
-                "SELECT mode,state FROM pass_b_workspace_claims "
-                "WHERE canonical_path=? AND state IN ('ACTIVE','UNCERTAIN')",
-                (record.canonical_path,),
+                "SELECT canonical_path,mode,state "
+                "FROM pass_b_workspace_claims "
+                "WHERE state IN ('ACTIVE','UNCERTAIN')"
             ).fetchall()
             if any(
-                record.mode == ReservationMode.WRITE
-                or str(item["mode"]) == ReservationMode.WRITE
+                _path_overlap(
+                    record.canonical_path, str(item["canonical_path"])
+                )
+                and (
+                    record.mode == ReservationMode.WRITE
+                    or str(item["mode"]) == ReservationMode.WRITE
+                )
                 for item in claims
             ):
                 raise PermissionError("workspace already has an incompatible owner")
@@ -242,7 +285,8 @@ class PassBRepository:
                 raise PermissionError("protected write scope is already reserved")
             self._insert(connection, record)
             connection.executemany(
-                "INSERT INTO pass_b_write_claims VALUES(?,?,?,?,?)",
+                "INSERT OR REPLACE INTO pass_b_write_claims "
+                "VALUES(?,?,?,?,?)",
                 [
                     (
                         key,
@@ -462,7 +506,10 @@ class PassBRepository:
             )
             self._replace(connection, updated_pool, pool.revision)
             connection.execute(
-                "INSERT INTO pass_b_usage_reservations VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO pass_b_usage_reservations("
+                "reservation_id,pool_id,assignment_id,amount,state,"
+                "reserved_at,updated_at,observation_generation"
+                ") VALUES(?,?,?,?,?,?,?,?)",
                 (
                     reservation_id,
                     pool_id,
@@ -471,9 +518,98 @@ class PassBRepository:
                     "ACTIVE",
                     observed_at,
                     observed_at,
+                    pool.observation_generation,
                 ),
             )
             return True
+
+    def observe_usage_reset(
+        self,
+        *,
+        pool_id: str,
+        observation_id: str,
+        observation_digest: str,
+        observed_reset_at: str,
+        observation_source: str,
+        observed_remaining: float | None,
+        confidence: str,
+        observed_at: str,
+    ) -> UsagePoolRecord:
+        reset = _parse_time(observed_reset_at)
+        observation = _parse_time(observed_at)
+        if reset > observation:
+            raise PermissionError("usage reset observation is in the future")
+        if (
+            not observation_id
+            or len(observation_digest) != 64
+            or not observation_source
+            or confidence not in {"HIGH", "MEDIUM"}
+        ):
+            raise PermissionError("usage reset observation is not trustworthy")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            pool = self._get(connection, UsagePoolRecord, pool_id)
+            if (
+                pool.reset_at is None
+                or reset < _parse_time(pool.reset_at)
+                or observation <= _parse_time(pool.last_observed_at)
+            ):
+                raise PermissionError("usage reset observation is stale")
+            active = connection.execute(
+                "SELECT COALESCE(SUM(amount),0) "
+                "FROM pass_b_usage_reservations "
+                "WHERE pool_id=? AND state='ACTIVE'",
+                (pool_id,),
+            ).fetchone()
+            reserved = float(active[0])
+            observed_capacity = (
+                pool.capacity
+                if observed_remaining is None
+                else (
+                    observed_remaining
+                    if pool.capacity is None
+                    else min(pool.capacity, observed_remaining)
+                )
+            )
+            remaining = (
+                None
+                if observed_capacity is None
+                else max(0.0, observed_capacity - reserved)
+            )
+            updated = replace(
+                pool,
+                consumed=0,
+                reserved=reserved,
+                remaining=remaining,
+                reset_at=None,
+                observation_source=observation_source,
+                confidence=confidence,
+                exhausted=(
+                    remaining is not None and remaining <= 0
+                ),
+                last_observed_at=observed_at,
+                updated_at=observed_at,
+                revision=pool.revision + 1,
+                observation_generation=pool.observation_generation + 1,
+            )
+            self._replace(connection, updated, pool.revision)
+            try:
+                connection.execute(
+                    "INSERT INTO pass_b_usage_reset_observations "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        observation_id,
+                        pool_id,
+                        updated.observation_generation,
+                        observation_digest,
+                        observed_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise PermissionError(
+                    "usage reset observation was replayed"
+                ) from error
+        return updated
 
     def resume_after_usage_reset(
         self,
@@ -503,10 +639,30 @@ class PassBRepository:
                 != assignment.authority_envelope_digest
                 or checkpoint.usage_pool_id != pool_id
                 or checkpoint.resumed_at is not None
+                or checkpoint.checkpoint_state.get(
+                    "usage_observation_generation"
+                )
+                != pool.observation_generation - 1
+                or checkpoint.checkpoint_state.get("provider_id")
+                != assignment.provider_id
+                or checkpoint.checkpoint_state.get("account_id")
+                != assignment.account_id
+                or checkpoint.checkpoint_state.get("session_id")
+                != assignment.session_id
+                or checkpoint.checkpoint_state.get("model_id")
+                != assignment.model_id
+                or checkpoint.checkpoint_state.get(
+                    "assignment_revision"
+                )
+                != assignment.revision - 1
             ):
                 raise PermissionError("resume checkpoint no longer matches assignment")
-            if pool.reset_at is None or _parse_time(pool.reset_at) > resumed:
-                raise PermissionError("usage reset has not occurred")
+            if (
+                pool.observation_generation < 2
+                or _parse_time(pool.last_observed_at) > resumed
+                or pool.exhausted
+            ):
+                raise PermissionError("validated usage reset has not occurred")
             workspace = self._get(
                 connection,
                 WorkspaceReservationRecord,
@@ -515,6 +671,24 @@ class PassBRepository:
             if (
                 workspace.assignment_id != assignment_id
                 or workspace.state != ReservationState.ACTIVE
+                or workspace.workspace_id != assignment.workspace_id
+                or (
+                    "workspace_id" in checkpoint.checkpoint_state
+                    and checkpoint.checkpoint_state["workspace_id"]
+                    != workspace.workspace_id
+                )
+                or (
+                    "workspace_canonical_path"
+                    in checkpoint.checkpoint_state
+                    and checkpoint.checkpoint_state[
+                        "workspace_canonical_path"
+                    ]
+                    != workspace.canonical_path
+                )
+                or checkpoint.checkpoint_state.get(
+                    "workspace_revision"
+                )
+                != workspace.revision
             ):
                 raise PermissionError("resume workspace is unavailable")
             uncertain = connection.execute(
@@ -524,17 +698,15 @@ class PassBRepository:
             ).fetchone()
             if uncertain is not None:
                 raise PermissionError("uncertain attempt cannot resume automatically")
-            updated_pool = replace(
-                pool,
-                consumed=0,
-                reserved=0,
-                remaining=pool.capacity,
-                exhausted=False,
-                reset_at=None,
-                last_observed_at=resumed_at,
-                updated_at=resumed_at,
-                revision=pool.revision + 1,
-            )
+            reset_observation = connection.execute(
+                "SELECT 1 FROM pass_b_usage_reset_observations "
+                "WHERE pool_id=? AND observation_generation=?",
+                (pool_id, pool.observation_generation),
+            ).fetchone()
+            if reset_observation is None:
+                raise PermissionError(
+                    "durable usage reset observation is missing"
+                )
             updated_assignment = replace(
                 assignment,
                 state=AssignmentState.READY,
@@ -546,7 +718,6 @@ class PassBRepository:
                 resumed_at=resumed_at,
                 revision=checkpoint.revision + 1,
             )
-            self._replace(connection, updated_pool, pool.revision)
             self._replace(connection, updated_assignment, assignment.revision)
             self._replace(connection, updated_checkpoint, checkpoint.revision)
             pauses = connection.execute(
@@ -580,32 +751,84 @@ class PassBRepository:
                 connection, ProviderSessionRecord, assignment.session_id
             )
             workspace = self._active_workspace(connection, assignment.assignment_id)
+            usage_row = connection.execute(
+                "SELECT reservation_id,pool_id,observation_generation "
+                "FROM pass_b_usage_reservations "
+                "WHERE assignment_id=? AND state='ACTIVE'",
+                (assignment.assignment_id,),
+            ).fetchone()
             if (
                 assignment.state != AssignmentState.READY
                 or session.provider_id != assignment.provider_id
                 or session.account_id != assignment.account_id
                 or session.active_assignments >= session.concurrency_limit
                 or workspace.workspace_id != assignment.workspace_id
+                or workspace.workspace_reservation_id
+                != attempt.workspace_reservation_id
+                or workspace.state != ReservationState.ACTIVE
+                or _parse_time(workspace.lease_expires_at)
+                <= _parse_time(attempt.created_at)
             ):
                 raise PermissionError("assignment is not launch-ready")
             if bool(assignment.usage_policy.get("reservation_required", True)):
-                usage = connection.execute(
-                    "SELECT 1 FROM pass_b_usage_reservations "
-                    "WHERE assignment_id=? AND state='ACTIVE'",
-                    (assignment.assignment_id,),
-                ).fetchone()
-                if usage is None:
+                if (
+                    usage_row is None
+                    or usage_row["reservation_id"]
+                    != attempt.usage_reservation_id
+                ):
                     raise PermissionError("assignment has no usage reservation")
+                pool = self._get(
+                    connection,
+                    UsagePoolRecord,
+                    str(usage_row["pool_id"]),
+                )
+                if pool.exhausted:
+                    raise PermissionError(
+                        "usage pool exhausted before provider launch"
+                    )
+            elif attempt.usage_reservation_id is not None:
+                raise PermissionError("unexpected usage reservation binding")
+            if not assignment.read_only:
+                write = connection.execute(
+                    "SELECT 1 FROM pass_b_write_claims "
+                    "WHERE reservation_id=? AND assignment_id=? "
+                    "AND state='ACTIVE'",
+                    (
+                        workspace.workspace_reservation_id,
+                        assignment.assignment_id,
+                    ),
+                ).fetchone()
+                if write is None:
+                    raise PermissionError(
+                        "write-capable launch requires a protected write scope"
+                    )
+            updated_session = replace(
+                session,
+                active_assignments=session.active_assignments + 1,
+                state=(
+                    "BUSY"
+                    if session.active_assignments + 1
+                    >= session.concurrency_limit
+                    else session.state
+                ),
+                last_seen_at=attempt.created_at,
+                updated_at=attempt.created_at,
+                revision=session.revision + 1,
+            )
             self._insert(connection, attempt)
+            self._replace(connection, updated_session, session.revision)
             try:
                 connection.execute(
-                    "INSERT INTO pass_b_launch_claims VALUES(?,?,?,?,?)",
+                    "INSERT INTO pass_b_launch_claims("
+                    "attempt_id,assignment_id,launch_token,state,updated_at,"
+                    "authority_attempt_id) VALUES(?,?,?,?,?,?)",
                     (
                         attempt.attempt_id,
                         attempt.assignment_id,
                         attempt.launch_token,
                         attempt.state,
                         attempt.updated_at,
+                        attempt.authority_attempt_id,
                     ),
                 )
             except sqlite3.IntegrityError as error:
@@ -617,8 +840,6 @@ class PassBRepository:
         self,
         review_id: str,
         *,
-        accepted: bool,
-        findings: tuple[dict[str, Any], ...],
         decided_at: str,
     ) -> tuple[ReviewRecord, AssignmentRecord, WorkItemRecord]:
         with self.store.connect() as connection:
@@ -630,19 +851,65 @@ class PassBRepository:
             work_item = self._get(
                 connection, WorkItemRecord, assignment.work_item_id
             )
+            producer_evidence = self._get(
+                connection,
+                EvidenceBundleRecord,
+                review.producer_evidence_bundle_id,
+            )
+            reviewer_assignment = self._get(
+                connection,
+                AssignmentRecord,
+                review.reviewer_assignment_id,
+            )
+            reviewer_attempt = self._get(
+                connection, AttemptRecord, review.reviewer_attempt_id
+            )
+            reviewer_evidence = self._get(
+                connection,
+                EvidenceBundleRecord,
+                review.reviewer_evidence_bundle_id,
+            )
             if (
                 review.state != ReviewState.PENDING
+                or review.disposition
+                not in {
+                    ReviewState.ACCEPTED,
+                    ReviewState.REPAIR_REQUIRED,
+                }
                 or assignment.state != AssignmentState.REVIEW_REQUIRED
+                or producer_evidence.state != EvidenceState.VALIDATED
+                or producer_evidence.assignment_id
+                != assignment.assignment_id
+                or producer_evidence.attempt_id != review.attempt_id
+                or reviewer_assignment.role != AssignmentRole.REVIEWER
+                or not reviewer_assignment.read_only
+                or reviewer_assignment.state
+                != AssignmentState.REVIEW_REQUIRED
+                or reviewer_attempt.assignment_id
+                != reviewer_assignment.assignment_id
+                or reviewer_attempt.state != AttemptState.COMPLETED
+                or reviewer_evidence.assignment_id
+                != reviewer_assignment.assignment_id
+                or reviewer_evidence.attempt_id
+                != reviewer_attempt.attempt_id
+                or reviewer_evidence.state != EvidenceState.VALIDATED
+                or reviewer_assignment.project_id != assignment.project_id
+                or reviewer_assignment.charter_id != assignment.charter_id
+                or reviewer_assignment.charter_revision
+                != assignment.charter_revision
+                or reviewer_assignment.usage_policy.get(
+                    "review_of_assignment_id"
+                )
+                != assignment.assignment_id
+                or reviewer_assignment.independence_key
+                == assignment.independence_key
                 or work_item.project_id != assignment.project_id
                 or work_item.charter_id != assignment.charter_id
                 or work_item.charter_revision != assignment.charter_revision
             ):
                 raise PermissionError("review decision binding changed")
-            review_state = (
-                ReviewState.ACCEPTED
-                if accepted
-                else ReviewState.REPAIR_REQUIRED
-            )
+            review_state = ReviewState(review.disposition)
+            accepted = review_state == ReviewState.ACCEPTED
             assignment_state = (
                 AssignmentState.COMPLETED
                 if accepted
@@ -656,8 +923,6 @@ class PassBRepository:
             updated_review = replace(
                 review,
                 state=review_state,
-                findings=findings,
-                disposition=review_state,
                 updated_at=decided_at,
                 revision=review.revision + 1,
             )
@@ -673,12 +938,23 @@ class PassBRepository:
                 updated_at=decided_at,
                 revision=work_item.revision + 1,
             )
+            updated_reviewer = replace(
+                reviewer_assignment,
+                state=AssignmentState.COMPLETED,
+                updated_at=decided_at,
+                revision=reviewer_assignment.revision + 1,
+            )
             self._replace(connection, updated_review, review.revision)
             self._replace(
                 connection, updated_assignment, assignment.revision
             )
             self._replace(
                 connection, updated_work_item, work_item.revision
+            )
+            self._replace(
+                connection,
+                updated_reviewer,
+                reviewer_assignment.revision,
             )
         return updated_review, updated_assignment, updated_work_item
 
@@ -732,7 +1008,8 @@ class PassBRepository:
             if (
                 attempt.state != AttemptState.LAUNCH_CLAIMED
                 or assignment.state != AssignmentState.LAUNCH_CLAIMED
-                or session.active_assignments >= session.concurrency_limit
+                or not attempt.session_slot_claimed
+                or session.active_assignments < 1
             ):
                 raise PermissionError("attempt cannot cross the launch boundary")
             updated_attempt = replace(
@@ -749,19 +1026,8 @@ class PassBRepository:
                 updated_at=started_at,
                 revision=assignment.revision + 1,
             )
-            updated_session = replace(
-                session,
-                active_assignments=session.active_assignments + 1,
-                state="BUSY"
-                if session.active_assignments + 1 >= session.concurrency_limit
-                else session.state,
-                last_seen_at=started_at,
-                updated_at=started_at,
-                revision=session.revision + 1,
-            )
             self._replace(connection, updated_attempt, attempt.revision)
             self._replace(connection, updated_assignment, assignment.revision)
-            self._replace(connection, updated_session, session.revision)
             cursor = connection.execute(
                 "UPDATE pass_b_launch_claims SET state='RUNNING',updated_at=? "
                 "WHERE attempt_id=? AND state='LAUNCH_CLAIMED'",
@@ -941,6 +1207,11 @@ class PassBRepository:
                 )
                 state = str(claim["state"])
                 if state == AttemptState.RESERVED:
+                    session = self._get(
+                        connection,
+                        ProviderSessionRecord,
+                        assignment.session_id,
+                    )
                     self._replace(
                         connection,
                         replace(
@@ -953,6 +1224,27 @@ class PassBRepository:
                         ),
                         attempt.revision,
                     )
+                    if attempt.session_slot_claimed:
+                        remaining = max(
+                            0, session.active_assignments - 1
+                        )
+                        self._replace(
+                            connection,
+                            replace(
+                                session,
+                                active_assignments=remaining,
+                                state=(
+                                    "BUSY"
+                                    if remaining
+                                    >= session.concurrency_limit
+                                    else "READY"
+                                ),
+                                last_seen_at=recovered_at,
+                                updated_at=recovered_at,
+                                revision=session.revision + 1,
+                            ),
+                            session.revision,
+                        )
                     connection.execute(
                         "UPDATE pass_b_launch_claims "
                         "SET state='FAILED',updated_at=? WHERE attempt_id=?",
@@ -966,6 +1258,10 @@ class PassBRepository:
                     last_error="external execution outcome is uncertain after restart",
                     updated_at=recovered_at,
                     revision=attempt.revision + 1,
+                    session_slot_claimed=(
+                        attempt.session_slot_claimed
+                        or state == AttemptState.LAUNCH_CLAIMED
+                    ),
                 )
                 uncertain_assignment = replace(
                     assignment,
@@ -975,6 +1271,31 @@ class PassBRepository:
                 )
                 self._replace(connection, uncertain_attempt, attempt.revision)
                 self._replace(connection, uncertain_assignment, assignment.revision)
+                if (
+                    state == AttemptState.LAUNCH_CLAIMED
+                    and not attempt.session_slot_claimed
+                ):
+                    session = self._get(
+                        connection,
+                        ProviderSessionRecord,
+                        assignment.session_id,
+                    )
+                    if session.active_assignments >= session.concurrency_limit:
+                        raise RuntimeError(
+                            "legacy uncertain launch exceeds session capacity"
+                        )
+                    self._replace(
+                        connection,
+                        replace(
+                            session,
+                            active_assignments=session.active_assignments + 1,
+                            state="BUSY",
+                            last_seen_at=recovered_at,
+                            updated_at=recovered_at,
+                            revision=session.revision + 1,
+                        ),
+                        session.revision,
+                    )
                 workspace_rows = connection.execute(
                     "SELECT payload,payload_hash FROM pass_b_records "
                     "WHERE kind=? AND state='ACTIVE'",
@@ -1216,14 +1537,47 @@ class PassBRepository:
 
 
 def canonical_workspace_path(path: Path) -> str:
-    return str(path.resolve()).replace("\\", "/").casefold()
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError("workspace path must be an existing directory")
+    parts = tuple(item.casefold() for item in resolved.parts)
+    if any(
+        parts[index : index + 2] == (".ai-workflow", "pw")
+        for index in range(max(0, len(parts) - 1))
+    ):
+        raise PermissionError("Keeper browser evidence workspace is protected")
+    for ancestor in (resolved, *resolved.parents):
+        marker = ancestor / ".git"
+        if marker.is_dir():
+            raise PermissionError(
+                "primary repository cannot be a writable Keeper workspace"
+            )
+        if marker.is_file():
+            break
+    return str(resolved).replace("\\", "/").casefold()
 
 
-def canonical_scope(workspace_id: str, scope: str) -> str:
+def canonical_scope(workspace_path: str, scope: str) -> str:
     normalized = scope.replace("\\", "/").strip("/")
     if not normalized or normalized == "." or ".." in normalized.split("/"):
         raise ValueError("write scope must be a contained relative path")
-    return f"{workspace_id.casefold()}:{normalized.casefold()}"
+    root = Path(workspace_path).resolve(strict=True)
+    candidate = (root / normalized).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise PermissionError(
+            "write scope resolves outside the assigned workspace"
+        ) from error
+    return str(candidate).replace("\\", "/").casefold()
+
+
+def _path_overlap(left: str, right: str) -> bool:
+    return (
+        left == right
+        or left.startswith(right.rstrip("/") + "/")
+        or right.startswith(left.rstrip("/") + "/")
+    )
 
 
 def _scope_overlap(left: str, right: str) -> bool:

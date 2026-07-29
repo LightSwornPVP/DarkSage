@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
-from dataclasses import replace
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 from keeper.app.storage import KeeperStore
+from keeper.authority_service.client import TestAuthorityServiceClient
+from keeper.authority_service.core import (
+    AuthorityServiceCore,
+    CompletionObservation,
+    ExecutionObservation,
+    ProcessObservation,
+    QualificationObservation,
+    TrustedObserver,
+)
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.founder_auth import TestFounderAuthenticator
+from keeper.executive.founder_capability import (
+    FounderAuthorizationCapability,
+    FounderCapabilityClaims,
+    TestFounderCapabilityIssuer,
+    TestFounderCapabilityVerifier,
+)
 from keeper.executive.intake import ConversationIntake, IntakeResult
 from keeper.executive.models import (
     FounderApprovalChallenge,
@@ -21,7 +37,12 @@ from keeper.executive.models import (
 )
 from keeper.executive.repository import TestExecutiveRepository, new_id
 from keeper.pass_b.application import PassBApplication
-from keeper.pass_b.conversation import DynamicWorkflowDesigner
+from keeper.pass_b.launch_authority import ExecutiveAuthorityLaunchGate
+from keeper.pass_b.conversation import (
+    DynamicWorkflowDesigner,
+    activate_delegated_mode,
+    validate_delegated_action,
+)
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
@@ -33,6 +54,8 @@ from keeper.pass_b.enums import (
     SessionModel,
 )
 from keeper.pass_b.models import (
+    AssignmentRecord,
+    AttemptRecord,
     ProviderAccountRecord,
     ProviderRecord,
     ProviderSessionRecord,
@@ -40,7 +63,10 @@ from keeper.pass_b.models import (
     ResumeCheckpointRecord,
     UsagePoolRecord,
 )
+from keeper.pass_b.orchestration import authority_envelope_digest
 from keeper.pass_b.providers import LocalMockAdapter
+from keeper.pass_b.usage_authority import TestUsageResetVerifier
+from keeper.providers.adapters import create_provider_registration
 
 
 class PilotConversationExecutive:
@@ -58,6 +84,25 @@ class PilotConversationExecutive:
 
     def begin(self, message: str) -> tuple[ProjectRecord, IntakeResult]:
         result = self.intake.extract(message)
+        result = ConversationIntake.revise(
+            result,
+            replacements={
+                "success_criteria": (
+                    "implementation evidence is independently reviewed",
+                    "usage reset resumes without duplicate launch",
+                    "presentation state remains non-authoritative",
+                ),
+                "target_audience": "Founder",
+                "approved_providers": (
+                    "pilot-builder",
+                    "pilot-reviewer",
+                ),
+                "approved_tools": ("filesystem", "tests"),
+                "delegation_mode": "DELEGATED",
+                "review_requirements": ("independent specialist",),
+                "evidence_requirements": ("structured-report",),
+            },
+        )
         project = self.charters.create_project(result)
         interaction_id = new_id("pilot-interaction")
         self.repository.save_conversation(
@@ -110,6 +155,130 @@ class PilotConversationExecutive:
         project = self.charters.activate(approved)
         return project, self.repository.charter(approved.charter_id)
 
+    def project_status(self, project_id: str) -> dict[str, Any]:
+        project = self.repository.project(project_id)
+        charter = (
+            self.repository.charter(project.active_charter_id)
+            if project.active_charter_id is not None
+            else None
+        )
+        return {
+            "project_summary": project.to_dict(),
+            "active_charter": (
+                charter.to_dict() if charter is not None else None
+            ),
+        }
+
+
+class _PilotAuthorityObserver:
+    """Non-executing observer for real Authority test-composition records."""
+
+    def register_provider(
+        self, provider_id: str, executable: Path, client_sid: str
+    ) -> dict[str, Any]:
+        return create_provider_registration(
+            provider_id,
+            executable,
+            authorized_by=client_sid,
+        )
+
+    def qualify(
+        self, registration: dict[str, Any], challenge: str
+    ) -> QualificationObservation:
+        now = _now()
+        provider_id = str(registration["logical_provider_id"])
+        return QualificationObservation(
+            provider_instance_id=f"pilot-qualified:{provider_id}",
+            process_ownership={
+                "restricted": True,
+                "job_confined": True,
+                "executable": registration["canonical_executable_path"],
+                "launch_nonce": challenge,
+            },
+            started_at=now,
+            finished_at=now,
+            exit_status=0,
+            raw_version_output=f"{provider_id} 1.0.0",
+        )
+
+    def observe_process(
+        self, attempt: dict[str, Any], pid: int
+    ) -> ProcessObservation:
+        del attempt, pid
+        raise RuntimeError("pilot Authority never launches provider code")
+
+    def execute_provider(
+        self,
+        registration: dict[str, Any],
+        attempt: dict[str, Any],
+        on_started: Callable[[ProcessObservation], None],
+    ) -> ExecutionObservation:
+        now = _now()
+        executable = Path(str(registration["launcher_path"])).resolve()
+        process_id = 4100 + int(
+            hashlib.sha256(
+                str(attempt["id"]).encode("utf-8")
+            ).hexdigest()[:3],
+            16,
+        )
+        on_started(
+            ProcessObservation(
+                pid=process_id,
+                creation_time=now,
+                executable=str(executable),
+                executable_sha256=hashlib.sha256(
+                    executable.read_bytes()
+                ).hexdigest(),
+                restricted=True,
+                integrity_level="low",
+                job_confined=True,
+            )
+        )
+        stdout_path = Path(str(attempt["stdout_path"]))
+        stderr_path = Path(str(attempt["stderr_path"]))
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(attempt["role"]).casefold() == "reviewer":
+            output: dict[str, Any] = {
+                "review_disposition": "ACCEPTED",
+                "findings": [],
+            }
+        else:
+            output = {"status": "completed", "files_changed": []}
+        stdout_path.write_text(
+            json.dumps(output, sort_keys=True), encoding="utf-8"
+        )
+        stderr_path.write_text("", encoding="utf-8")
+        evidence_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "stdout_sha256": hashlib.sha256(
+                        stdout_path.read_bytes()
+                    ).hexdigest(),
+                    "stderr_sha256": hashlib.sha256(
+                        stderr_path.read_bytes()
+                    ).hexdigest(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return ExecutionObservation(
+            process_id=process_id,
+            exit_status=0,
+            timed_out=False,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            provider_evidence_digest=evidence_digest,
+            finished_at=_now(),
+        )
+
+    def observe_completion(
+        self, attempt: dict[str, Any]
+    ) -> CompletionObservation:
+        del attempt
+        raise RuntimeError("pilot Authority never finalizes provider code")
+
 
 def run_darksage_pilot(
     data_directory: Path, evidence_path: Path
@@ -119,27 +288,30 @@ def run_darksage_pilot(
     workspace = data_directory / "isolated-darksage-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     executive = PilotConversationExecutive(data_directory / "keeper.db")
-    application = PassBApplication(
-        data_directory, executive=executive
+    authority_core = AuthorityServiceCore(
+        data_directory / "test-authority-service",
+        observer=cast(TrustedObserver, _PilotAuthorityObserver()),
+        founder_capability_verifier=TestFounderCapabilityVerifier(),
+    )
+    authority_client = TestAuthorityServiceClient(
+        lambda request: authority_core.dispatch(
+            request, "S-1-5-21-KEEPER-PILOT"
+        )
+    )
+    launch_gate = ExecutiveAuthorityLaunchGate.test(
+        authority_client,
+        executive.project_status,
+    )
+    usage_reset_verifier = TestUsageResetVerifier()
+    application = PassBApplication.test_composition(
+        data_directory,
+        executive=executive,
+        launch_authority=launch_gate,
+        usage_reset_verifier=usage_reset_verifier,
     )
     outcome = application.begin_conversation(
         f"Continue the DarkSage software project in {workspace}. No spending, no deployment, "
         "no live trading, and do not push."
-    )
-    outcome = application.conversation.revise(
-        outcome.project.project_id,
-        {
-            "success_criteria": (
-                "implementation evidence is independently reviewed",
-                "usage reset resumes without duplicate launch",
-                "presentation state remains non-authoritative",
-            ),
-            "target_audience": "Founder",
-            "approved_providers": ("pilot-builder", "pilot-reviewer"),
-            "approved_tools": ("filesystem", "tests"),
-            "review_requirements": ("independent specialist",),
-            "evidence_requirements": ("structured-report",),
-        },
     )
     challenge = application.conversation.request_approval(
         outcome.project.project_id
@@ -147,17 +319,30 @@ def run_darksage_pilot(
     project, charter = executive.approve_and_activate(challenge)
     application.conversation.record_approval(charter)
     blueprint = DynamicWorkflowDesigner().design(charter)
+    capability = _pilot_launch_capability(charter)
+    launch_authorization = cast(
+        dict[str, Any],
+        authority_client.authorize_project_launch(
+            founder_capability=capability
+        )["authorization"],
+    )
 
     builder, builder_session, builder_pool = _register_provider(
         application,
+        authority_client,
+        data_directory,
         provider_id="pilot-builder",
+        authority_provider_id=bytes.fromhex("636f646578").decode("ascii"),
         account_id="builder-account",
         session_id="builder-session",
         capacity=2,
     )
     reviewer, reviewer_session, _ = _register_provider(
         application,
+        authority_client,
+        data_directory,
         provider_id="pilot-reviewer",
+        authority_provider_id=bytes.fromhex("636c61756465").decode("ascii"),
         account_id="reviewer-account",
         session_id="reviewer-session",
         capacity=2,
@@ -179,7 +364,9 @@ def run_darksage_pilot(
         role=AssignmentRole.IMPLEMENTER,
         model_id=builder_session.model_id,
         workspace_id="pilot-darksage",
-        authority_envelope_digest="a" * 64,
+        authority_envelope_digest=authority_envelope_digest(
+            charter.authority_envelope.to_dict()
+        ),
         expected_evidence=("structured-report",),
         usage_policy={"reservation_required": True, "paid_fallback": False},
         independence_key="builder-independence",
@@ -200,10 +387,19 @@ def run_darksage_pilot(
     application.orchestration.reserve_usage(
         implementation, implementation_workspace, 1
     )
+    builder_authority_attempt = _reserve_authority_attempt(
+        authority_client,
+        launch_authorization,
+        implementation,
+        implementation_workspace,
+        builder.authority_registration_id or "",
+        data_directory,
+        "builder",
+    )
     implementation_evidence = application.orchestration.run_assignment(
         implementation.assignment_id,
         workspace,
-        authority_attempt_id="pilot-authority-builder",
+        authority_attempt_id=builder_authority_attempt,
         global_context={"charter_revision": charter.revision},
         task_context={"objective": implementation_item.objective},
     )
@@ -234,9 +430,15 @@ def run_darksage_pilot(
         role=AssignmentRole.REVIEWER,
         model_id=reviewer_session.model_id,
         workspace_id="pilot-darksage",
-        authority_envelope_digest="b" * 64,
+        authority_envelope_digest=authority_envelope_digest(
+            charter.authority_envelope.to_dict()
+        ),
         expected_evidence=("structured-report",),
-        usage_policy={"reservation_required": True, "paid_fallback": False},
+        usage_policy={
+            "reservation_required": True,
+            "paid_fallback": False,
+            "review_of_assignment_id": implementation.assignment_id,
+        },
         independence_key="reviewer-independence",
     )
     review_workspace = application.orchestration.reserve_workspace(
@@ -249,10 +451,19 @@ def run_darksage_pilot(
     application.orchestration.reserve_usage(
         review_assignment, review_workspace, 1
     )
+    reviewer_authority_attempt = _reserve_authority_attempt(
+        authority_client,
+        launch_authorization,
+        review_assignment,
+        review_workspace,
+        reviewer.authority_registration_id or "",
+        data_directory,
+        "reviewer",
+    )
     review_evidence = application.orchestration.run_assignment(
         review_assignment.assignment_id,
         workspace,
-        authority_attempt_id="pilot-authority-reviewer",
+        authority_attempt_id=reviewer_authority_attempt,
         global_context={"charter_revision": charter.revision},
         task_context={
             "implementation_evidence": (
@@ -267,10 +478,10 @@ def run_darksage_pilot(
     independent_review = application.orchestration.create_review(
         implementation_evidence.evidence_bundle_id,
         review_assignment.assignment_id,
+        review_evidence.evidence_bundle_id,
     )
     independent_review, _, _ = application.orchestration.decide_review(
-        independent_review.review_id,
-        accepted=True,
+        independent_review.review_id
     )
 
     waiting_item = application.orchestration.create_work_item(
@@ -290,7 +501,9 @@ def run_darksage_pilot(
         role=AssignmentRole.TESTER,
         model_id=builder_session.model_id,
         workspace_id="pilot-waiting",
-        authority_envelope_digest="c" * 64,
+        authority_envelope_digest=authority_envelope_digest(
+            charter.authority_envelope.to_dict()
+        ),
         expected_evidence=("structured-report",),
         usage_policy={"reservation_required": True, "paid_fallback": False},
         independence_key="usage-test",
@@ -315,23 +528,107 @@ def run_darksage_pilot(
     current_pool = application.repository.get(
         UsagePoolRecord, builder_pool.pool_id
     )
-    reset_at = (_utc_now() - timedelta(seconds=1)).isoformat()
-    application.repository.replace(
-        replace(
-            current_pool,
-            reset_at=reset_at,
-            exhausted=True,
-            updated_at=_now(),
-            last_observed_at=_now(),
-            revision=current_pool.revision + 1,
-        ),
-        expected_revision=current_pool.revision,
+    reset_observation = usage_reset_verifier.issue(
+        current_pool,
+        reset_at=current_pool.reset_at or "",
+        observed_at=_now(),
     )
+    application.orchestration.observe_usage_reset(reset_observation)
     resumed_assignment = application.orchestration.resume_after_reset(
         waiting_assignment.assignment_id,
         checkpoint.resume_checkpoint_id,
     )
+    prohibited_delegation_denied = False
+    try:
+        activate_delegated_mode(
+            application.repository,
+            project_id=project.project_id,
+            charter=charter,
+            founder_identity=str(charter.founder_approval_identity),
+            founder_approval_id=str(charter.founder_approval_record_id),
+            founder_approval_digest=str(
+                charter.founder_authorization_capability_digest
+            ),
+            scope=("FORCE_PUSH",),
+            expires_at=(
+                datetime.now(UTC) + timedelta(minutes=1)
+            ).isoformat(),
+        )
+    except PermissionError:
+        prohibited_delegation_denied = True
+    delegation_observed_at = datetime.now(UTC)
+    delegated_grant = activate_delegated_mode(
+        application.repository,
+        project_id=project.project_id,
+        charter=charter,
+        founder_identity=str(charter.founder_approval_identity),
+        founder_approval_id=str(charter.founder_approval_record_id),
+        founder_approval_digest=str(
+            charter.founder_authorization_capability_digest
+        ),
+        scope=("RUN_TESTS",),
+        expires_at=(
+            delegation_observed_at + timedelta(minutes=1)
+        ).isoformat(),
+    )
+    validate_delegated_action(
+        application.repository,
+        delegated_grant.delegated_mode_grant_id,
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        action="RUN_TESTS",
+        observed_at=delegated_grant.starts_at,
+    )
+    delegated_expiry_enforced = False
+    try:
+        validate_delegated_action(
+            application.repository,
+            delegated_grant.delegated_mode_grant_id,
+            project_id=project.project_id,
+            charter_id=charter.charter_id,
+            charter_revision=charter.revision,
+            action="RUN_TESTS",
+            observed_at=(
+                delegation_observed_at + timedelta(minutes=2)
+            ).isoformat(),
+        )
+    except PermissionError:
+        delegated_expiry_enforced = True
+    persisted_delegated_grant = application.repository.get(
+        type(delegated_grant), delegated_grant.delegated_mode_grant_id
+    )
     snapshot = application.control_room.snapshot(project.project_id).to_dict()
+    delegated_absent_from_active_projection = all(
+        item["delegated_mode_grant_id"]
+        != delegated_grant.delegated_mode_grant_id
+        for item in snapshot["safety"]["delegated_mode"]
+    )
+    if not (
+        prohibited_delegation_denied
+        and delegated_expiry_enforced
+        and persisted_delegated_grant.state == "EXPIRED"
+        and delegated_absent_from_active_projection
+    ):
+        raise RuntimeError("pilot delegated-mode boundary proof failed")
+    attempts = application.repository.list(AttemptRecord)
+    launched_assignments = [
+        item.assignment_id
+        for item in attempts
+        if item.external_execution_id is not None
+    ]
+    duplicate_launch_count = len(launched_assignments) - len(
+        set(launched_assignments)
+    )
+    authority_attempt_states = {
+        attempt_id: authority_client.query_state(
+            "attempts", attempt_id
+        )["record"]["service_state"]
+        for attempt_id in (
+            builder_authority_attempt,
+            reviewer_authority_attempt,
+        )
+    }
     report = {
         "schema_version": 1,
         "pilot": "Keeper Completion Pass B DarkSage/Sage",
@@ -356,16 +653,26 @@ def run_darksage_pilot(
         "independent_review": independent_review.to_dict(),
         "usage_pause_observed": paused,
         "usage_resume_state": resumed_assignment.state,
-        "duplicate_launch_count": 0,
+        "delegated_prohibited_action_denied": (
+            prohibited_delegation_denied
+        ),
+        "delegated_expiry_enforced": delegated_expiry_enforced,
+        "delegated_expired_state": persisted_delegated_grant.state,
+        "delegated_absent_from_active_projection": (
+            delegated_absent_from_active_projection
+        ),
+        "duplicate_launch_count": duplicate_launch_count,
         "automatic_paid_fallback": False,
         "provider_self_approval": False,
         "push_performed": False,
         "live_trading_enabled": False,
         "presentation_authority_effect": "NONE",
         "authority_attempts": (
-            "pilot-authority-builder",
-            "pilot-authority-reviewer",
+            builder_authority_attempt,
+            reviewer_authority_attempt,
         ),
+        "authority_attempt_states": authority_attempt_states,
+        "authority_production_validation": False,
         "control_room_summary": {
             "assignment_counts": snapshot["control_room"][
                 "assignment_counts"
@@ -387,14 +694,30 @@ def run_darksage_pilot(
 
 def _register_provider(
     application: PassBApplication,
+    authority_client: TestAuthorityServiceClient,
+    data_directory: Path,
     *,
     provider_id: str,
+    authority_provider_id: str,
     account_id: str,
     session_id: str,
     capacity: float,
 ) -> tuple[ProviderRecord, ProviderSessionRecord, UsagePoolRecord]:
     now = _now()
     pool_id = f"{provider_id}-shared-pool"
+    adapter = LocalMockAdapter(provider_id)
+    descriptor = adapter.descriptor()
+    executable = data_directory / "authority-providers" / (
+        f"{provider_id}.exe"
+    )
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_bytes(f"safe:{provider_id}".encode("utf-8"))
+    registration_id = str(
+        authority_client.register_provider(
+            authority_provider_id, executable
+        )["registration_id"]
+    )
+    authority_client.qualify_provider(registration_id)
     provider = ProviderRecord(
         provider_id=provider_id,
         identity=provider_id,
@@ -404,10 +727,10 @@ def _register_provider(
         capabilities=tuple(
             role.value.casefold() for role in AssignmentRole
         )
-        + ("structured-evidence", "workspace"),
+        + descriptor.capabilities,
         session_model=SessionModel.RESUMABLE,
         usage_pool_strategy="shared-account-window",
-        concurrency_limit=2,
+        concurrency_limit=descriptor.concurrency_limit,
         cost_mode=CostMode.FREE,
         authentication_ready=True,
         tool_support=("filesystem",),
@@ -419,6 +742,7 @@ def _register_provider(
         created_at=now,
         updated_at=now,
         revision=1,
+        authority_registration_id=registration_id,
     )
     account = ProviderAccountRecord(
         account_id=account_id,
@@ -438,13 +762,13 @@ def _register_provider(
         pool_id=pool_id,
         provider_id=provider_id,
         account_id=account_id,
-        identity=f"{provider_id}:{account_id}:pool",
+        identity=descriptor.usage_pool_identity,
         limit_type="MEASURED_WINDOW",
         capacity=capacity,
         consumed=0,
         reserved=0,
         remaining=capacity,
-        reset_at=(_utc_now() + timedelta(hours=1)).isoformat(),
+        reset_at=(_utc_now() - timedelta(seconds=1)).isoformat(),
         observation_source="pilot-fixture",
         confidence="HIGH",
         exhausted=False,
@@ -457,7 +781,7 @@ def _register_provider(
         session_id=session_id,
         provider_id=provider_id,
         account_id=account_id,
-        model_id="deterministic-v1",
+        model_id=descriptor.model_identity,
         external_session_id=None,
         state=ProviderSessionState.READY,
         concurrency_limit=1,
@@ -474,9 +798,113 @@ def _register_provider(
         account,
         pool,
         (session,),
-        LocalMockAdapter(provider_id),
+        adapter,
     )
     return provider, session, pool
+
+
+def _reserve_authority_attempt(
+    authority_client: TestAuthorityServiceClient,
+    launch_authorization: dict[str, Any],
+    assignment: AssignmentRecord,
+    workspace: Any,
+    registration_id: str,
+    data_directory: Path,
+    label: str,
+) -> str:
+    evidence_root = data_directory / "authority-evidence" / label
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    provider_run_id = f"pilot-{label}-{uuid.uuid4().hex}"
+    result = authority_client.reserve_attempt(
+        registration_id=registration_id,
+        keeper_run_id=f"pilot-{assignment.project_id}",
+        task_id=assignment.assignment_id,
+        stage_id=assignment.work_item_id,
+        role=assignment.role.casefold(),
+        attempt_number=1,
+        provider_run_id=provider_run_id,
+        provider_instance_id=assignment.session_id,
+        evidence_path=str((evidence_root / "evidence.json").resolve()),
+        prompt_path=str((evidence_root / "prompt.md").resolve()),
+        stdout_path=str((evidence_root / "stdout.log").resolve()),
+        stderr_path=str((evidence_root / "stderr.log").resolve()),
+        workspace=str(Path(workspace.canonical_path).resolve()),
+        timeout_seconds=60,
+        reasoning_level="medium",
+        environment={},
+        launch_authorization_id=launch_authorization["id"],
+        authorization_generation=launch_authorization[
+            "authorization_generation"
+        ],
+        delegation_id=launch_authorization["delegation_id"],
+        founder_approval_event_id=launch_authorization[
+            "founder_approval_event_id"
+        ],
+        founder_approval_event_digest=launch_authorization[
+            "founder_approval_event_digest"
+        ],
+        founder_authenticated_session_id=launch_authorization[
+            "founder_authenticated_session_id"
+        ],
+        founder_principal_sid=launch_authorization[
+            "founder_principal_sid"
+        ],
+        authorization_expires_at=launch_authorization["expires_at"],
+        project_id=assignment.project_id,
+        charter_id=assignment.charter_id,
+        charter_revision=assignment.charter_revision,
+        task_revision=assignment.revision,
+    )
+    return str(result["attempt_id"])
+
+
+def _pilot_launch_capability(
+    charter: ProjectCharter,
+) -> dict[str, Any]:
+    value = charter.founder_authorization_capability
+    if not isinstance(value, dict):
+        raise RuntimeError("pilot charter has no Founder capability")
+    existing = FounderAuthorizationCapability.from_dict(value)
+    claims = FounderCapabilityClaims(
+        **{
+            **existing.claims(),
+            "capability_id": f"pilot-launch:{charter.project_id}",
+            "authorization_generation": 1,
+            "revocation_epoch": 0,
+        }
+    )
+    issuer = TestFounderCapabilityIssuer()
+    unsigned_confirmation: dict[str, object] = {
+        "session_id": claims.founder_authenticated_session_id,
+        "principal_sid": claims.founder_principal_sid,
+        "account_name": "KEEPER-PILOT\\Founder",
+        "authentication_method": "TEST_CHALLENGE_HMAC",
+        "authenticated_at": claims.issued_at,
+        "expires_at": claims.expires_at,
+        "machine_identity": claims.machine_identity,
+        "application_identity": claims.application_identity,
+        "process_identity": "keeper-pass-b-pilot",
+        "challenge_id": claims.challenge_id,
+        "challenge_nonce": f"pilot:{charter.project_id}",
+        "project_id": claims.project_id,
+        "charter_id": claims.charter_id,
+        "charter_revision": claims.charter_revision,
+        "approval_action": "APPROVE_CHARTER",
+        "bound_digest": claims.action_digest,
+        "source_user_interaction_id": claims.approval_event_id,
+        "proof_version": 2,
+    }
+    proof = issuer.sign_confirmation(unsigned_confirmation)
+    claims = FounderCapabilityClaims(
+        **{
+            **asdict(claims),
+            "challenge_proof_digest": hashlib.sha256(
+                proof.encode("ascii")
+            ).hexdigest(),
+        }
+    )
+    confirmation = {**unsigned_confirmation, "proof": proof}
+    return issuer.issue(claims, confirmation).to_dict()
 
 
 def _utc_now() -> datetime:

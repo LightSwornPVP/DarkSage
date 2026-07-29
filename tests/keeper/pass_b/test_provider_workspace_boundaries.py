@@ -30,7 +30,11 @@ from keeper.pass_b.providers import (
     select_provider_session,
 )
 from keeper.pass_b.workspaces import GitWorktreeService, WorkspacePolicy
-from tests.keeper.pass_b.test_orchestration import _assignment, _stack
+from tests.keeper.pass_b.test_orchestration import (
+    _assignment,
+    _authorize,
+    _stack,
+)
 
 
 def test_generic_remote_adapter_translates_structured_data_only() -> None:
@@ -270,10 +274,13 @@ def test_provider_generated_code_loading_request_is_rejected(
         assignment, workspace, ("keeper",), lease_seconds=300
     )
     service.reserve_usage(assignment, workspace, 1)
+    authority_id = _authorize(
+        service, assignment, workspace, "authority-1"
+    )
     evidence = service.run_assignment(
         assignment.assignment_id,
         workspace_path,
-        authority_attempt_id="authority-1",
+        authority_attempt_id=authority_id,
         global_context={},
         task_context={},
     )
@@ -329,7 +336,11 @@ def test_provider_cannot_approve_its_own_evidence(tmp_path: Path) -> None:
     )
     repository.insert(evidence)
     with pytest.raises(PermissionError, match="independence"):
-        service.create_review(evidence.evidence_bundle_id, reviewer.assignment_id)
+        service.create_review(
+            evidence.evidence_bundle_id,
+            reviewer.assignment_id,
+            evidence.evidence_bundle_id,
+        )
 
 
 def test_workspace_policy_blocks_protected_roots_and_implicit_cleanup(

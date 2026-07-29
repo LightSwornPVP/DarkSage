@@ -29,11 +29,14 @@ from keeper.pass_b.models import (
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     UsagePoolRecord,
+    WorkItemRecord,
     WorkspaceReservationRecord,
 )
+from keeper.pass_b.launch_authority import TestLaunchAuthority
 from keeper.pass_b.orchestration import OrchestrationService
 from keeper.pass_b.providers import LocalMockAdapter
 from keeper.pass_b.repository import PassBRepository
+from keeper.pass_b.usage_authority import TestUsageResetVerifier
 
 
 class FixedClock:
@@ -67,10 +70,19 @@ def _stack(
     store.migrate()
     repository = PassBRepository(store)
     clock = FixedClock()
-    service = OrchestrationService(repository, clock=clock)
+    launch_authority = TestLaunchAuthority()
+    usage_reset_verifier = TestUsageResetVerifier()
+    service = OrchestrationService(
+        repository,
+        clock=clock,
+        launch_authority=launch_authority,
+        usage_reset_verifier=usage_reset_verifier,
+    )
     now = clock().isoformat()
     account_id = f"{provider_id}-account"
     pool_id = f"{provider_id}-pool"
+    adapter = LocalMockAdapter(provider_id)
+    descriptor = adapter.descriptor()
     provider = ProviderRecord(
         provider_id=provider_id,
         identity=provider_id,
@@ -80,10 +92,10 @@ def _stack(
         capabilities=tuple(
             role.value.casefold() for role in AssignmentRole
         )
-        + ("structured-evidence", "workspace"),
+        + descriptor.capabilities,
         session_model=SessionModel.RESUMABLE,
         usage_pool_strategy="shared-account-window",
-        concurrency_limit=sessions,
+        concurrency_limit=descriptor.concurrency_limit,
         cost_mode=CostMode.FREE,
         authentication_ready=True,
         tool_support=("filesystem",),
@@ -95,6 +107,7 @@ def _stack(
         created_at=now,
         updated_at=now,
         revision=1,
+        authority_registration_id=f"test-registration:{provider_id}",
     )
     account = ProviderAccountRecord(
         account_id=account_id,
@@ -114,7 +127,7 @@ def _stack(
         pool_id=pool_id,
         provider_id=provider_id,
         account_id=account_id,
-        identity=f"{provider_id}:{account_id}:pool",
+        identity=descriptor.usage_pool_identity,
         limit_type="MEASURED_WINDOW",
         capacity=capacity,
         consumed=0,
@@ -134,7 +147,7 @@ def _stack(
             session_id=f"{provider_id}-session-{index}",
             provider_id=provider_id,
             account_id=account_id,
-            model_id="model-1",
+            model_id=descriptor.model_identity,
             external_session_id=None,
             state=ProviderSessionState.READY,
             concurrency_limit=1,
@@ -148,7 +161,6 @@ def _stack(
         )
         for index in range(1, sessions + 1)
     )
-    adapter = LocalMockAdapter(provider_id)
     service.register_provider(
         provider, account, pool, provider_sessions, adapter
     )
@@ -164,6 +176,41 @@ def _stack(
     )
 
 
+def _authorize(
+    service: OrchestrationService,
+    assignment: AssignmentRecord,
+    workspace: WorkspaceReservationRecord,
+    authority_attempt_id: str,
+) -> str:
+    authority = service.launch_authority
+    assert isinstance(authority, TestLaunchAuthority)
+    provider = service.repository.get(
+        ProviderRecord, assignment.provider_id
+    )
+    return authority.reserve(
+        assignment,
+        provider,
+        workspace,
+        authority_attempt_id,
+    )
+
+
+def _observe_reset(
+    service: OrchestrationService,
+    pool: UsagePoolRecord,
+    clock: FixedClock,
+) -> UsagePoolRecord:
+    verifier = service.usage_reset_verifier
+    assert isinstance(verifier, TestUsageResetVerifier)
+    current = service.repository.get(UsagePoolRecord, pool.pool_id)
+    observation = verifier.issue(
+        current,
+        reset_at=current.reset_at or pool.reset_at or "",
+        observed_at=clock().isoformat(),
+    )
+    return service.observe_usage_reset(observation)
+
+
 def _assignment(
     service: OrchestrationService,
     provider: ProviderRecord,
@@ -172,16 +219,19 @@ def _assignment(
     *,
     role: str = AssignmentRole.IMPLEMENTER,
     workspace_id: str | None = None,
+    work_item: WorkItemRecord | None = None,
+    review_of_assignment_id: str | None = None,
 ) -> AssignmentRecord:
-    work_item = service.create_work_item(
-        project_id="project-1",
-        charter_id="charter-1",
-        charter_revision=1,
-        workflow_id="workflow-1",
-        title=f"{role} work",
-        objective="Produce bounded evidence",
-        required_roles=(role,),
-    )
+    if work_item is None:
+        work_item = service.create_work_item(
+            project_id="project-1",
+            charter_id="charter-1",
+            charter_revision=1,
+            workflow_id="workflow-1",
+            title=f"{role} work",
+            objective="Produce bounded evidence",
+            required_roles=(role,),
+        )
     return service.create_assignment(
         work_item=work_item,
         provider_id=provider.provider_id,
@@ -192,7 +242,15 @@ def _assignment(
         workspace_id=workspace_id or uuid.uuid4().hex,
         authority_envelope_digest="a" * 64,
         expected_evidence=("structured-report",),
-        usage_policy={"reservation_required": True, "paid_fallback": False},
+        usage_policy={
+            "reservation_required": True,
+            "paid_fallback": False,
+            **(
+                {"review_of_assignment_id": review_of_assignment_id}
+                if review_of_assignment_id is not None
+                else {}
+            ),
+        },
         independence_key=f"{provider.provider_id}:{session.session_id}",
     )
 
@@ -247,18 +305,8 @@ def test_usage_exhaustion_waits_and_resumes_from_checkpoint(
     assert waiting.state == AssignmentState.WAITING_FOR_USAGE_RESET
     checkpoints = repository.list(ResumeCheckpointRecord)
     assert len(checkpoints) == 1
-    current_pool = repository.get(UsagePoolRecord, pool.pool_id)
     clock.advance(hours=2)
-    repository.replace(
-        replace(
-            current_pool,
-            reset_at=(clock() - timedelta(seconds=1)).isoformat(),
-            updated_at=clock().isoformat(),
-            last_observed_at=clock().isoformat(),
-            revision=current_pool.revision + 1,
-        ),
-        expected_revision=current_pool.revision,
-    )
+    _observe_reset(service, pool, clock)
     resumed = service.resume_after_reset(
         assignment.assignment_id,
         checkpoints[0].resume_checkpoint_id,
@@ -296,10 +344,13 @@ def test_launch_is_durable_and_completion_cannot_duplicate(
         assignment, workspace, ("keeper/pass_b",), lease_seconds=300
     )
     assert service.reserve_usage(assignment, workspace, 1)
+    authority_id = _authorize(
+        service, assignment, workspace, "authority-1"
+    )
     evidence = service.run_assignment(
         assignment.assignment_id,
         workspace_path,
-        authority_attempt_id="authority-1",
+        authority_attempt_id=authority_id,
         global_context={"project": "test"},
         task_context={"objective": "test"},
     )
@@ -309,6 +360,7 @@ def test_launch_is_durable_and_completion_cannot_duplicate(
         AssignmentRecord, assignment.assignment_id
     ).state == AssignmentState.REVIEW_REQUIRED
     with pytest.raises(PermissionError):
+        _authorize(service, assignment, workspace, "authority-2")
         service.run_assignment(
             assignment.assignment_id,
             workspace_path,
@@ -346,6 +398,9 @@ def test_crash_after_launch_claim_becomes_uncertain_and_not_retryable(
         assignment, workspace, ("keeper/pass_b",), lease_seconds=300
     )
     service.reserve_usage(assignment, workspace, 1)
+    authority_id = _authorize(
+        service, assignment, workspace, "authority-1"
+    )
 
     def crash() -> None:
         raise RuntimeError("simulated process loss")
@@ -354,7 +409,7 @@ def test_crash_after_launch_claim_becomes_uncertain_and_not_retryable(
         service.run_assignment(
             assignment.assignment_id,
             workspace_path,
-            authority_attempt_id="authority-1",
+            authority_attempt_id=authority_id,
             global_context={},
             task_context={},
             after_launch_claim=crash,
@@ -419,6 +474,14 @@ def test_interruption_before_launch_claim_is_safe_to_reprepare(
         created_at=clock().isoformat(),
         updated_at=clock().isoformat(),
         revision=1,
+        workspace_reservation_id=workspace.workspace_reservation_id,
+        usage_reservation_id=str(
+            repository.usage_reservations(
+                assignment.assignment_id
+            )[0]["reservation_id"]
+        ),
+        launch_plan_digest="legacy-test-plan",
+        session_slot_claimed=True,
     )
     repository.reserve_attempt(attempt)
     recovered = repository.recover_interrupted_attempts(
@@ -429,6 +492,7 @@ def test_interruption_before_launch_claim_is_safe_to_reprepare(
     replacement = replace(
         attempt,
         attempt_id="attempt-replacement",
+        authority_attempt_id="authority-2",
         launch_token="launch-2",
         created_at=(clock() + timedelta(seconds=1)).isoformat(),
         updated_at=(clock() + timedelta(seconds=1)).isoformat(),

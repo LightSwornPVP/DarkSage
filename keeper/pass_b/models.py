@@ -52,6 +52,7 @@ class PassBRecord:
     KIND: ClassVar[str]
     ID_FIELD: ClassVar[str]
     TUPLE_FIELDS: ClassVar[tuple[str, ...]] = ()
+    DEFAULTS: ClassVar[dict[str, Any]] = {}
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,13 +60,13 @@ class PassBRecord:
     @classmethod
     def from_dict(cls: type[R], value: dict[str, Any]) -> R:
         expected = {item.name for item in fields(cls) if item.init}
-        if set(value) != expected:
+        normalized = {**cls.DEFAULTS, **value}
+        if set(normalized) != expected:
             raise ValueError(
                 f"{cls.__name__} fields invalid; "
-                f"unknown={sorted(set(value) - expected)}, "
-                f"missing={sorted(expected - set(value))}"
+                f"unknown={sorted(set(normalized) - expected)}, "
+                f"missing={sorted(expected - set(normalized))}"
             )
-        normalized = dict(value)
         for name in cls.TUPLE_FIELDS:
             normalized[name] = tuple(normalized[name])
         return cls(**normalized)
@@ -100,10 +101,12 @@ class ProviderRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    authority_registration_id: str | None = None
 
     KIND = "provider"
     ID_FIELD = "provider_id"
     TUPLE_FIELDS = ("capabilities", "tool_support", "workspace_support")
+    DEFAULTS = {"authority_registration_id": None}
 
     def __post_init__(self) -> None:
         ProviderClassification(self.classification)
@@ -195,9 +198,11 @@ class UsagePoolRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    observation_generation: int = 1
 
     KIND = "usage_pool"
     ID_FIELD = "pool_id"
+    DEFAULTS = {"observation_generation": 1}
 
     def __post_init__(self) -> None:
         values = [self.consumed, self.reserved]
@@ -209,6 +214,8 @@ class UsagePoolRecord(PassBRecord):
             raise ValueError(
                 "usage values must be finite and cannot be negative"
             )
+        if self.observation_generation < 1:
+            raise ValueError("usage observation generation must be positive")
         _optional_timestamp(self.reset_at, "reset_at")
         _timestamp(self.last_observed_at, "last_observed_at")
         _timestamp(self.created_at, "created_at")
@@ -302,13 +309,28 @@ class AttemptRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    workspace_reservation_id: str = ""
+    usage_reservation_id: str | None = None
+    launch_plan_digest: str = ""
+    session_slot_claimed: bool = False
 
     KIND = "attempt"
     ID_FIELD = "attempt_id"
+    DEFAULTS = {
+        "workspace_reservation_id": "legacy-unbound",
+        "usage_reservation_id": None,
+        "launch_plan_digest": "legacy-unbound",
+        "session_slot_claimed": False,
+    }
 
     def __post_init__(self) -> None:
         AttemptState(self.state)
-        if not self.authority_attempt_id or not self.launch_token:
+        if (
+            not self.authority_attempt_id
+            or not self.launch_token
+            or not self.workspace_reservation_id
+            or not self.launch_plan_digest
+        ):
             raise ValueError("attempt authority and launch identities are required")
         _optional_timestamp(self.started_at, "started_at")
         _optional_timestamp(self.finished_at, "finished_at")
@@ -331,13 +353,29 @@ class ReviewRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    producer_evidence_bundle_id: str = ""
+    reviewer_attempt_id: str = ""
+    reviewer_evidence_bundle_id: str = ""
 
     KIND = "review"
     ID_FIELD = "review_id"
     TUPLE_FIELDS = ("findings",)
+    DEFAULTS = {
+        "producer_evidence_bundle_id": "legacy-unbound",
+        "reviewer_attempt_id": "legacy-unbound",
+        "reviewer_evidence_bundle_id": "legacy-unbound",
+    }
 
     def __post_init__(self) -> None:
         ReviewState(self.state)
+        if (
+            not self.producer_evidence_bundle_id
+            or not self.reviewer_attempt_id
+            or not self.reviewer_evidence_bundle_id
+        ):
+            raise ValueError(
+                "review requires producer and reviewer execution evidence"
+            )
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)

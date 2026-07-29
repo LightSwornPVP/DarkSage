@@ -18,10 +18,15 @@ views, and the Sage presentation boundary.
 5. Assignments bind immutable provider, account, session, role, model,
    workspace, charter revision, authority-envelope digest, expected evidence,
    and usage policy.
-6. Keeper reserves usage and workspace scope before launch, persists the
-   attempt before calling an adapter, validates returned evidence as untrusted
-   data, and requires independent review where the charter requires it.
-7. The control room presents durable state, blockers, uncertainty, recovery
+6. Keeper validates the active Founder-approved charter and signed
+   KeeperAuthority attempt, then atomically claims usage, the exact workspace,
+   protected write scope, and provider-session capacity before launch.
+   Production execution crosses KeeperAuthority's protected execution
+   transition; only explicit test composition calls a mock adapter directly.
+7. Keeper validates returned evidence as untrusted data. Review acceptance is
+   derived from a distinct completed reviewer attempt and validated reviewer
+   evidence, never from a caller-supplied Boolean.
+8. The control room presents durable state, blockers, uncertainty, recovery
    prompts, and Authority health.
 
 The workflow designer has separate adaptive strategies for software, research,
@@ -31,7 +36,9 @@ projects. It does not impose one universal coding pipeline.
 ## Durable storage
 
 Pass B records are stored in the existing Keeper SQLite database. Migration
-version 1 is recorded in `pass_b_schema_migrations`. Generic records use
+version 3 is recorded in `pass_b_schema_migrations`. Migrations retain version
+1 records while adding unique Authority-attempt identity, usage-window
+generation, and authenticated reset-observation claims. Generic records use
 revision-and-payload-hash compare-and-swap updates. Normalized claim tables
 provide transactionally enforced uniqueness for workspace writers, protected
 write scopes, usage reservations, and launch identity.
@@ -49,8 +56,11 @@ system.
 
 Provider adapters translate data only. They cannot approve, expand charters,
 authorize side effects, or load provider-generated code into the Executive.
-Launch calls carry an existing authority attempt identity; production
-composition supplies the live Authority client.
+Launch calls must match the active project, Founder-approved charter revision,
+assignment, work item, role, provider registration, session, workspace, and
+authority-envelope digest. Production composition validates the signed attempt
+and active launch generation, then asks KeeperAuthority to execute it. A bare
+or replayed attempt string cannot authorize provider work.
 
 ## Supported entry points
 

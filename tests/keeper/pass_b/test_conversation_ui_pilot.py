@@ -176,10 +176,21 @@ def test_darksage_pilot_completes_with_independent_roles(
     assert report["independent_review"]["state"] == "ACCEPTED"
     assert report["usage_pause_observed"] is True
     assert report["usage_resume_state"] == "READY"
+    assert report["delegated_prohibited_action_denied"] is True
+    assert report["delegated_expiry_enforced"] is True
+    assert report["delegated_expired_state"] == "EXPIRED"
+    assert report["delegated_absent_from_active_projection"] is True
     assert report["duplicate_launch_count"] == 0
     assert report["automatic_paid_fallback"] is False
     assert report["provider_self_approval"] is False
     assert report["push_performed"] is False
     assert report["live_trading_enabled"] is False
     assert report["presentation_authority_effect"] == "NONE"
+    assert set(report["authority_attempt_states"].values()) == {
+        "COMPLETED"
+    }
+    assert report["authority_production_validation"] is False
+    assert report["control_room_summary"]["authority_state"] == (
+        "TEST_COMPOSITION"
+    )
     assert evidence_path.is_file()

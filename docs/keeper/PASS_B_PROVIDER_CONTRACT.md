@@ -16,15 +16,27 @@ An adapter descriptor declares:
 - evidence format;
 - health state.
 
+Reattachment is exact for durable model, capability, tool, workspace,
+usage-pool, cost, health, cancellation, and resume declarations. An adapter
+with a widened declaration is rejected rather than silently expanding a
+persisted provider.
+
 An assignment request contains only the bounded project, charter revision,
 assignment, attempt, role, model, workspace, authority attempt, global context,
 task context, and expected-evidence data required by the provider.
 
-Adapters do not make authority decisions. Results are structured untrusted
+Adapters do not make authority decisions. Production provider execution is
+performed by KeeperAuthority against the qualified durable registration.
+Explicit unit-test composition may launch the deterministic mock adapter
+directly. Results are structured untrusted
 data containing an external execution identity, summary, artifact descriptors,
 usage, and an optional opaque resume-token digest. Keeper validates identity,
 required evidence kinds, artifact paths, digests, and the prohibition on
 trusted-process execution before evidence can become `VALIDATED`.
+
+Session capacity is claimed transactionally with the Pass B attempt before any
+provider call. Completion or confirmed cancellation releases it; ambiguous
+post-claim outcomes retain the slot until explicit reconciliation.
 
 Artifact dictionaries that request evaluation, execution, module import,
 library loading, trusted plug-in loading, or any execution request are rejected.
