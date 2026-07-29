@@ -1,0 +1,1252 @@
+from __future__ import annotations
+
+import builtins
+import hashlib
+import json
+import math
+import sqlite3
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+from typing import Any, TypeVar, cast
+
+from keeper.app.storage import KeeperStore
+from keeper.pass_b.enums import (
+    AssignmentRole,
+    AssignmentState,
+    AttemptState,
+    EvidenceState,
+    ReservationMode,
+    ReservationState,
+    ReviewState,
+    WorkItemState,
+)
+from keeper.pass_b.models import (
+    AssignmentRecord,
+    AttemptRecord,
+    EvidenceBundleRecord,
+    PassBRecord,
+    PauseReasonRecord,
+    ProviderAccountRecord,
+    ProviderRecord,
+    ProviderSessionRecord,
+    ResumeCheckpointRecord,
+    ReviewRecord,
+    UsagePoolRecord,
+    WorkItemRecord,
+    WorkspaceReservationRecord,
+    WriteReservationRecord,
+)
+
+
+R = TypeVar("R", bound=PassBRecord)
+PASS_B_SCHEMA_VERSION = 1
+
+
+class PassBRepository:
+    """Transactional Pass B records stored inside the existing Keeper database."""
+
+    def __init__(self, store: KeeperStore) -> None:
+        self.store = store
+        self.migrate()
+
+    def migrate(self) -> None:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS pass_b_schema_migrations ("
+                "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+            )
+            current = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(version),0) FROM pass_b_schema_migrations"
+                ).fetchone()[0]
+            )
+            if current > PASS_B_SCHEMA_VERSION:
+                raise RuntimeError("Pass B schema is newer than this application")
+            if current < 1:
+                connection.execute(
+                    "CREATE TABLE pass_b_records ("
+                    "kind TEXT NOT NULL, id TEXT NOT NULL, project_id TEXT, "
+                    "state TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), "
+                    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                    "payload TEXT NOT NULL, payload_hash TEXT NOT NULL, "
+                    "PRIMARY KEY(kind,id))"
+                )
+                connection.execute(
+                    "CREATE INDEX ix_pass_b_records_project "
+                    "ON pass_b_records(project_id,kind,updated_at)"
+                )
+                connection.execute(
+                    "CREATE TABLE pass_b_workspace_claims ("
+                    "reservation_id TEXT PRIMARY KEY, canonical_path TEXT NOT NULL, "
+                    "assignment_id TEXT NOT NULL, "
+                    "mode TEXT NOT NULL CHECK(mode IN ('READ_ONLY','WRITE')), "
+                    "state TEXT NOT NULL CHECK(state IN "
+                    "('ACTIVE','RELEASED','STALE','UNCERTAIN')), "
+                    "lease_expires_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE INDEX ix_pass_b_workspace_claim_path "
+                    "ON pass_b_workspace_claims(canonical_path,state)"
+                )
+                connection.execute(
+                    "CREATE TABLE pass_b_write_claims ("
+                    "scope_key TEXT PRIMARY KEY, reservation_id TEXT NOT NULL, "
+                    "assignment_id TEXT NOT NULL, "
+                    "state TEXT NOT NULL CHECK(state IN "
+                    "('ACTIVE','RELEASED','STALE','UNCERTAIN')), "
+                    "lease_expires_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE TABLE pass_b_usage_reservations ("
+                    "reservation_id TEXT PRIMARY KEY, pool_id TEXT NOT NULL, "
+                    "assignment_id TEXT NOT NULL, amount REAL NOT NULL CHECK(amount>=0), "
+                    "state TEXT NOT NULL CHECK(state IN "
+                    "('ACTIVE','CONSUMED','RELEASED')), "
+                    "reserved_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE UNIQUE INDEX ux_pass_b_usage_assignment_active "
+                    "ON pass_b_usage_reservations(assignment_id) "
+                    "WHERE state='ACTIVE'"
+                )
+                connection.execute(
+                    "CREATE TABLE pass_b_launch_claims ("
+                    "attempt_id TEXT PRIMARY KEY, assignment_id TEXT NOT NULL, "
+                    "launch_token TEXT NOT NULL UNIQUE, "
+                    "state TEXT NOT NULL CHECK(state IN "
+                    "('RESERVED','LAUNCH_CLAIMED','RUNNING','COMPLETED',"
+                    "'CANCELED','FAILED','UNCERTAIN')), "
+                    "updated_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE UNIQUE INDEX ux_pass_b_assignment_active_launch "
+                    "ON pass_b_launch_claims(assignment_id) "
+                    "WHERE state IN "
+                    "('RESERVED','LAUNCH_CLAIMED','RUNNING','COMPLETED','UNCERTAIN')"
+                )
+                connection.execute(
+                    "INSERT INTO pass_b_schema_migrations(version,applied_at) "
+                    "VALUES(1,?)",
+                    (_now(),),
+                )
+
+    def insert(self, record: PassBRecord) -> None:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert(connection, record)
+
+    def replace(self, record: R, *, expected_revision: int) -> R:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._replace(connection, record, expected_revision)
+        return record
+
+    def get(self, record_type: type[R], record_id: str) -> R:
+        with self.store.connect() as connection:
+            return self._get(connection, record_type, record_id)
+
+    def optional(self, record_type: type[R], record_id: str) -> R | None:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND id=?",
+                (record_type.KIND, record_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._decode(record_type, row)
+
+    def list(
+        self, record_type: type[R], *, project_id: str | None = None
+    ) -> list[R]:
+        query = (
+            "SELECT payload,payload_hash FROM pass_b_records WHERE kind=?"
+        )
+        parameters: tuple[object, ...] = (record_type.KIND,)
+        if project_id is not None:
+            query += " AND project_id=?"
+            parameters += (project_id,)
+        query += " ORDER BY created_at,id"
+        with self.store.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._decode(record_type, row) for row in rows]
+
+    def reserve_workspace(self, record: WorkspaceReservationRecord) -> None:
+        if record.state != ReservationState.ACTIVE:
+            raise ValueError("new workspace reservations must be active")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assignment = self._get(
+                connection, AssignmentRecord, record.assignment_id
+            )
+            if assignment.workspace_id != record.workspace_id:
+                raise PermissionError("workspace identity differs from assignment")
+            if assignment.read_only and record.mode != ReservationMode.READ_ONLY:
+                raise PermissionError("read-only assignment cannot reserve a writer")
+            claims = connection.execute(
+                "SELECT mode,state FROM pass_b_workspace_claims "
+                "WHERE canonical_path=? AND state IN ('ACTIVE','UNCERTAIN')",
+                (record.canonical_path,),
+            ).fetchall()
+            if any(
+                record.mode == ReservationMode.WRITE
+                or str(item["mode"]) == ReservationMode.WRITE
+                for item in claims
+            ):
+                raise PermissionError("workspace already has an incompatible owner")
+            self._insert(connection, record)
+            connection.execute(
+                "INSERT INTO pass_b_workspace_claims VALUES(?,?,?,?,?,?)",
+                (
+                    record.workspace_reservation_id,
+                    record.canonical_path,
+                    record.assignment_id,
+                    record.mode,
+                    record.state,
+                    record.lease_expires_at,
+                ),
+            )
+
+    def reserve_write(self, record: WriteReservationRecord) -> None:
+        if record.state != ReservationState.ACTIVE:
+            raise ValueError("new write reservations must be active")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assignment = self._get(
+                connection, AssignmentRecord, record.assignment_id
+            )
+            workspace = self._get(
+                connection,
+                WorkspaceReservationRecord,
+                record.workspace_reservation_id,
+            )
+            if (
+                assignment.read_only
+                or workspace.mode != ReservationMode.WRITE
+                or workspace.state != ReservationState.ACTIVE
+                or workspace.assignment_id != assignment.assignment_id
+            ):
+                raise PermissionError("assignment has no active writer workspace")
+            active = connection.execute(
+                "SELECT scope_key FROM pass_b_write_claims "
+                "WHERE state IN ('ACTIVE','UNCERTAIN')"
+            ).fetchall()
+            existing = [str(row["scope_key"]) for row in active]
+            if any(
+                _scope_overlap(candidate, current)
+                for candidate in record.scope_keys
+                for current in existing
+            ):
+                raise PermissionError("protected write scope is already reserved")
+            self._insert(connection, record)
+            connection.executemany(
+                "INSERT INTO pass_b_write_claims VALUES(?,?,?,?,?)",
+                [
+                    (
+                        key,
+                        record.workspace_reservation_id,
+                        record.assignment_id,
+                        record.state,
+                        record.lease_expires_at,
+                    )
+                    for key in record.scope_keys
+                ],
+            )
+
+    def renew_workspace(
+        self,
+        reservation_id: str,
+        owner_token: str,
+        lease_expires_at: str,
+        updated_at: str,
+    ) -> WorkspaceReservationRecord:
+        _parse_time(lease_expires_at)
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get(
+                connection, WorkspaceReservationRecord, reservation_id
+            )
+            if (
+                current.owner_token != owner_token
+                or current.state != ReservationState.ACTIVE
+            ):
+                raise PermissionError("workspace lease owner or state changed")
+            updated = replace(
+                current,
+                lease_expires_at=lease_expires_at,
+                updated_at=updated_at,
+                revision=current.revision + 1,
+            )
+            self._replace(connection, updated, current.revision)
+            for write in self._active_writes(connection, reservation_id):
+                self._replace(
+                    connection,
+                    replace(
+                        write,
+                        lease_expires_at=lease_expires_at,
+                        updated_at=updated_at,
+                        revision=write.revision + 1,
+                    ),
+                    write.revision,
+                )
+            connection.execute(
+                "UPDATE pass_b_write_claims SET lease_expires_at=? "
+                "WHERE reservation_id=? AND state='ACTIVE'",
+                (lease_expires_at, reservation_id),
+            )
+            connection.execute(
+                "UPDATE pass_b_workspace_claims SET lease_expires_at=? "
+                "WHERE reservation_id=? AND state='ACTIVE'",
+                (lease_expires_at, reservation_id),
+            )
+        return updated
+
+    def release_workspace(
+        self, reservation_id: str, owner_token: str, updated_at: str
+    ) -> WorkspaceReservationRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get(
+                connection, WorkspaceReservationRecord, reservation_id
+            )
+            assignment = self._get(
+                connection, AssignmentRecord, current.assignment_id
+            )
+            if current.owner_token != owner_token:
+                raise PermissionError("workspace lease owner changed")
+            if assignment.state in {
+                AssignmentState.LAUNCH_CLAIMED,
+                AssignmentState.RUNNING,
+                AssignmentState.UNCERTAIN,
+            }:
+                raise PermissionError("active or uncertain workspace cannot be released")
+            updated = replace(
+                current,
+                state=ReservationState.RELEASED,
+                updated_at=updated_at,
+                revision=current.revision + 1,
+            )
+            self._replace(connection, updated, current.revision)
+            for write in self._active_writes(connection, reservation_id):
+                self._replace(
+                    connection,
+                    replace(
+                        write,
+                        state=ReservationState.RELEASED,
+                        updated_at=updated_at,
+                        revision=write.revision + 1,
+                    ),
+                    write.revision,
+                )
+            connection.execute(
+                "UPDATE pass_b_workspace_claims SET state='RELEASED' "
+                "WHERE reservation_id=? AND state='ACTIVE'",
+                (reservation_id,),
+            )
+            connection.execute(
+                "UPDATE pass_b_write_claims SET state='RELEASED' "
+                "WHERE reservation_id=? AND state='ACTIVE'",
+                (reservation_id,),
+            )
+        return updated
+
+    def recover_stale_workspace(
+        self, reservation_id: str, observed_at: str
+    ) -> WorkspaceReservationRecord:
+        observed = _parse_time(observed_at)
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get(
+                connection, WorkspaceReservationRecord, reservation_id
+            )
+            assignment = self._get(
+                connection, AssignmentRecord, current.assignment_id
+            )
+            if _parse_time(current.lease_expires_at) > observed:
+                raise PermissionError("workspace lease has not expired")
+            if assignment.state in {
+                AssignmentState.LAUNCH_CLAIMED,
+                AssignmentState.RUNNING,
+                AssignmentState.UNCERTAIN,
+            }:
+                raise PermissionError("stale active work requires Founder review")
+            updated = replace(
+                current,
+                state=ReservationState.STALE,
+                updated_at=observed_at,
+                revision=current.revision + 1,
+            )
+            self._replace(connection, updated, current.revision)
+            for write in self._active_writes(connection, reservation_id):
+                self._replace(
+                    connection,
+                    replace(
+                        write,
+                        state=ReservationState.STALE,
+                        updated_at=observed_at,
+                        revision=write.revision + 1,
+                    ),
+                    write.revision,
+                )
+            connection.execute(
+                "UPDATE pass_b_workspace_claims SET state='STALE' "
+                "WHERE reservation_id=? AND state='ACTIVE'",
+                (reservation_id,),
+            )
+            connection.execute(
+                "UPDATE pass_b_write_claims SET state='STALE' "
+                "WHERE reservation_id=? AND state='ACTIVE'",
+                (reservation_id,),
+            )
+        return updated
+
+    def reserve_usage_or_pause(
+        self,
+        *,
+        reservation_id: str,
+        pool_id: str,
+        assignment_id: str,
+        amount: float,
+        pause: PauseReasonRecord,
+        checkpoint: ResumeCheckpointRecord,
+        observed_at: str,
+    ) -> bool:
+        if not math.isfinite(amount) or amount < 0:
+            raise ValueError("usage reservation must be finite and nonnegative")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            pool = self._get(connection, UsagePoolRecord, pool_id)
+            assignment = self._get(
+                connection, AssignmentRecord, assignment_id
+            )
+            account = self._get(
+                connection, ProviderAccountRecord, assignment.account_id
+            )
+            if account.usage_pool_id != pool_id:
+                raise PermissionError("assignment account uses another usage pool")
+            remaining = pool.remaining
+            exhausted = pool.exhausted or (
+                remaining is not None and remaining < amount
+            )
+            if exhausted:
+                paused_assignment = replace(
+                    assignment,
+                    state=AssignmentState.WAITING_FOR_USAGE_RESET,
+                    updated_at=observed_at,
+                    revision=assignment.revision + 1,
+                )
+                exhausted_pool = replace(
+                    pool,
+                    exhausted=True,
+                    updated_at=observed_at,
+                    last_observed_at=observed_at,
+                    revision=pool.revision + 1,
+                )
+                self._replace(connection, paused_assignment, assignment.revision)
+                self._replace(connection, exhausted_pool, pool.revision)
+                self._insert(connection, pause)
+                self._insert(connection, checkpoint)
+                return False
+            updated_remaining = (
+                None if remaining is None else max(0.0, remaining - amount)
+            )
+            updated_pool = replace(
+                pool,
+                reserved=pool.reserved + amount,
+                remaining=updated_remaining,
+                last_observed_at=observed_at,
+                updated_at=observed_at,
+                revision=pool.revision + 1,
+            )
+            self._replace(connection, updated_pool, pool.revision)
+            connection.execute(
+                "INSERT INTO pass_b_usage_reservations VALUES(?,?,?,?,?,?,?)",
+                (
+                    reservation_id,
+                    pool_id,
+                    assignment_id,
+                    amount,
+                    "ACTIVE",
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            return True
+
+    def resume_after_usage_reset(
+        self,
+        *,
+        pool_id: str,
+        assignment_id: str,
+        checkpoint_id: str,
+        resumed_at: str,
+    ) -> AssignmentRecord:
+        resumed = _parse_time(resumed_at)
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            pool = self._get(connection, UsagePoolRecord, pool_id)
+            assignment = self._get(
+                connection, AssignmentRecord, assignment_id
+            )
+            checkpoint = self._get(
+                connection, ResumeCheckpointRecord, checkpoint_id
+            )
+            if (
+                assignment.state != AssignmentState.WAITING_FOR_USAGE_RESET
+                or checkpoint.assignment_id != assignment_id
+                or checkpoint.project_id != assignment.project_id
+                or checkpoint.charter_id != assignment.charter_id
+                or checkpoint.charter_revision != assignment.charter_revision
+                or checkpoint.authority_envelope_digest
+                != assignment.authority_envelope_digest
+                or checkpoint.usage_pool_id != pool_id
+                or checkpoint.resumed_at is not None
+            ):
+                raise PermissionError("resume checkpoint no longer matches assignment")
+            if pool.reset_at is None or _parse_time(pool.reset_at) > resumed:
+                raise PermissionError("usage reset has not occurred")
+            workspace = self._get(
+                connection,
+                WorkspaceReservationRecord,
+                checkpoint.workspace_reservation_id,
+            )
+            if (
+                workspace.assignment_id != assignment_id
+                or workspace.state != ReservationState.ACTIVE
+            ):
+                raise PermissionError("resume workspace is unavailable")
+            uncertain = connection.execute(
+                "SELECT 1 FROM pass_b_launch_claims "
+                "WHERE assignment_id=? AND state='UNCERTAIN'",
+                (assignment_id,),
+            ).fetchone()
+            if uncertain is not None:
+                raise PermissionError("uncertain attempt cannot resume automatically")
+            updated_pool = replace(
+                pool,
+                consumed=0,
+                reserved=0,
+                remaining=pool.capacity,
+                exhausted=False,
+                reset_at=None,
+                last_observed_at=resumed_at,
+                updated_at=resumed_at,
+                revision=pool.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.READY,
+                updated_at=resumed_at,
+                revision=assignment.revision + 1,
+            )
+            updated_checkpoint = replace(
+                checkpoint,
+                resumed_at=resumed_at,
+                revision=checkpoint.revision + 1,
+            )
+            self._replace(connection, updated_pool, pool.revision)
+            self._replace(connection, updated_assignment, assignment.revision)
+            self._replace(connection, updated_checkpoint, checkpoint.revision)
+            pauses = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='' ORDER BY created_at",
+                (PauseReasonRecord.KIND,),
+            ).fetchall()
+            for row in pauses:
+                pause = self._decode(PauseReasonRecord, row)
+                if pause.assignment_id == assignment_id and pause.resolved_at is None:
+                    self._replace(
+                        connection,
+                        replace(
+                            pause,
+                            resolved_at=resumed_at,
+                            revision=pause.revision + 1,
+                        ),
+                        pause.revision,
+                    )
+        return updated_assignment
+
+    def reserve_attempt(self, attempt: AttemptRecord) -> None:
+        if attempt.state != AttemptState.RESERVED:
+            raise ValueError("new attempts must begin reserved")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            session = self._get(
+                connection, ProviderSessionRecord, assignment.session_id
+            )
+            workspace = self._active_workspace(connection, assignment.assignment_id)
+            if (
+                assignment.state != AssignmentState.READY
+                or session.provider_id != assignment.provider_id
+                or session.account_id != assignment.account_id
+                or session.active_assignments >= session.concurrency_limit
+                or workspace.workspace_id != assignment.workspace_id
+            ):
+                raise PermissionError("assignment is not launch-ready")
+            if bool(assignment.usage_policy.get("reservation_required", True)):
+                usage = connection.execute(
+                    "SELECT 1 FROM pass_b_usage_reservations "
+                    "WHERE assignment_id=? AND state='ACTIVE'",
+                    (assignment.assignment_id,),
+                ).fetchone()
+                if usage is None:
+                    raise PermissionError("assignment has no usage reservation")
+            self._insert(connection, attempt)
+            try:
+                connection.execute(
+                    "INSERT INTO pass_b_launch_claims VALUES(?,?,?,?,?)",
+                    (
+                        attempt.attempt_id,
+                        attempt.assignment_id,
+                        attempt.launch_token,
+                        attempt.state,
+                        attempt.updated_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise PermissionError(
+                    "assignment already has an active or completed launch"
+                ) from error
+
+    def decide_review(
+        self,
+        review_id: str,
+        *,
+        accepted: bool,
+        findings: tuple[dict[str, Any], ...],
+        decided_at: str,
+    ) -> tuple[ReviewRecord, AssignmentRecord, WorkItemRecord]:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            review = self._get(connection, ReviewRecord, review_id)
+            assignment = self._get(
+                connection, AssignmentRecord, review.assignment_id
+            )
+            work_item = self._get(
+                connection, WorkItemRecord, assignment.work_item_id
+            )
+            if (
+                review.state != ReviewState.PENDING
+                or assignment.state != AssignmentState.REVIEW_REQUIRED
+                or work_item.project_id != assignment.project_id
+                or work_item.charter_id != assignment.charter_id
+                or work_item.charter_revision != assignment.charter_revision
+            ):
+                raise PermissionError("review decision binding changed")
+            review_state = (
+                ReviewState.ACCEPTED
+                if accepted
+                else ReviewState.REPAIR_REQUIRED
+            )
+            assignment_state = (
+                AssignmentState.COMPLETED
+                if accepted
+                else AssignmentState.REPAIR_REQUIRED
+            )
+            work_item_state = (
+                WorkItemState.COMPLETED
+                if accepted
+                else WorkItemState.REPAIR_REQUIRED
+            )
+            updated_review = replace(
+                review,
+                state=review_state,
+                findings=findings,
+                disposition=review_state,
+                updated_at=decided_at,
+                revision=review.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=assignment_state,
+                updated_at=decided_at,
+                revision=assignment.revision + 1,
+            )
+            updated_work_item = replace(
+                work_item,
+                state=work_item_state,
+                updated_at=decided_at,
+                revision=work_item.revision + 1,
+            )
+            self._replace(connection, updated_review, review.revision)
+            self._replace(
+                connection, updated_assignment, assignment.revision
+            )
+            self._replace(
+                connection, updated_work_item, work_item.revision
+            )
+        return updated_review, updated_assignment, updated_work_item
+
+    def claim_launch(self, attempt_id: str, claimed_at: str) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            if (
+                attempt.state != AttemptState.RESERVED
+                or assignment.state != AssignmentState.READY
+            ):
+                raise PermissionError("attempt launch claim was already consumed")
+            updated_attempt = replace(
+                attempt,
+                state=AttemptState.LAUNCH_CLAIMED,
+                updated_at=claimed_at,
+                revision=attempt.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.LAUNCH_CLAIMED,
+                updated_at=claimed_at,
+                revision=assignment.revision + 1,
+            )
+            self._replace(connection, updated_attempt, attempt.revision)
+            self._replace(connection, updated_assignment, assignment.revision)
+            cursor = connection.execute(
+                "UPDATE pass_b_launch_claims SET state='LAUNCH_CLAIMED',updated_at=? "
+                "WHERE attempt_id=? AND state='RESERVED'",
+                (claimed_at, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("durable launch claim changed concurrently")
+        return updated_attempt
+
+    def mark_running(
+        self, attempt_id: str, external_execution_id: str, started_at: str
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            session = self._get(
+                connection, ProviderSessionRecord, assignment.session_id
+            )
+            if (
+                attempt.state != AttemptState.LAUNCH_CLAIMED
+                or assignment.state != AssignmentState.LAUNCH_CLAIMED
+                or session.active_assignments >= session.concurrency_limit
+            ):
+                raise PermissionError("attempt cannot cross the launch boundary")
+            updated_attempt = replace(
+                attempt,
+                state=AttemptState.RUNNING,
+                external_execution_id=external_execution_id,
+                started_at=started_at,
+                updated_at=started_at,
+                revision=attempt.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.RUNNING,
+                updated_at=started_at,
+                revision=assignment.revision + 1,
+            )
+            updated_session = replace(
+                session,
+                active_assignments=session.active_assignments + 1,
+                state="BUSY"
+                if session.active_assignments + 1 >= session.concurrency_limit
+                else session.state,
+                last_seen_at=started_at,
+                updated_at=started_at,
+                revision=session.revision + 1,
+            )
+            self._replace(connection, updated_attempt, attempt.revision)
+            self._replace(connection, updated_assignment, assignment.revision)
+            self._replace(connection, updated_session, session.revision)
+            cursor = connection.execute(
+                "UPDATE pass_b_launch_claims SET state='RUNNING',updated_at=? "
+                "WHERE attempt_id=? AND state='LAUNCH_CLAIMED'",
+                (started_at, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("launch boundary changed concurrently")
+        return updated_attempt
+
+    def claim_cancellation(
+        self, assignment_id: str, claimed_at: str
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT attempt_id FROM pass_b_launch_claims "
+                "WHERE assignment_id=? AND state='RUNNING'",
+                (assignment_id,),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("assignment has no cancelable running attempt")
+            attempt = self._get(
+                connection, AttemptRecord, str(row["attempt_id"])
+            )
+            assignment = self._get(
+                connection, AssignmentRecord, assignment_id
+            )
+            if (
+                attempt.state != AttemptState.RUNNING
+                or assignment.state != AssignmentState.RUNNING
+                or not attempt.external_execution_id
+            ):
+                raise PermissionError("running attempt cancellation claim changed")
+            updated_attempt = replace(
+                attempt,
+                state=AttemptState.CANCELLATION_CLAIMED,
+                updated_at=claimed_at,
+                revision=attempt.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.CANCELLATION_CLAIMED,
+                updated_at=claimed_at,
+                revision=assignment.revision + 1,
+            )
+            self._replace(connection, updated_attempt, attempt.revision)
+            self._replace(connection, updated_assignment, assignment.revision)
+        return updated_attempt
+
+    def complete_cancellation(
+        self, attempt_id: str, canceled_at: str
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            session = self._get(
+                connection, ProviderSessionRecord, assignment.session_id
+            )
+            if (
+                attempt.state != AttemptState.CANCELLATION_CLAIMED
+                or assignment.state != AssignmentState.CANCELLATION_CLAIMED
+            ):
+                raise PermissionError("cancellation claim changed concurrently")
+            remaining = max(0, session.active_assignments - 1)
+            updated_attempt = replace(
+                attempt,
+                state=AttemptState.CANCELED,
+                finished_at=canceled_at,
+                updated_at=canceled_at,
+                revision=attempt.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.CANCELED,
+                updated_at=canceled_at,
+                revision=assignment.revision + 1,
+            )
+            updated_session = replace(
+                session,
+                active_assignments=remaining,
+                state="BUSY"
+                if remaining >= session.concurrency_limit
+                else "READY",
+                last_seen_at=canceled_at,
+                updated_at=canceled_at,
+                revision=session.revision + 1,
+            )
+            self._replace(connection, updated_attempt, attempt.revision)
+            self._replace(connection, updated_assignment, assignment.revision)
+            self._replace(connection, updated_session, session.revision)
+            cursor = connection.execute(
+                "UPDATE pass_b_launch_claims SET state='CANCELED',updated_at=? "
+                "WHERE attempt_id=? AND state='RUNNING'",
+                (canceled_at, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("durable cancellation claim changed")
+            self._consume_usage(
+                connection, assignment.assignment_id, canceled_at
+            )
+        return updated_attempt
+
+    def complete_attempt(
+        self,
+        attempt_id: str,
+        evidence: EvidenceBundleRecord,
+        completed_at: str,
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            session = self._get(
+                connection, ProviderSessionRecord, assignment.session_id
+            )
+            if (
+                attempt.state != AttemptState.RUNNING
+                or assignment.state != AssignmentState.RUNNING
+                or evidence.attempt_id != attempt_id
+                or evidence.assignment_id != assignment.assignment_id
+                or evidence.state != EvidenceState.UNTRUSTED
+            ):
+                raise PermissionError("attempt completion binding is invalid")
+            self._insert(connection, evidence)
+            updated_attempt = replace(
+                attempt,
+                state=AttemptState.COMPLETED,
+                finished_at=completed_at,
+                updated_at=completed_at,
+                revision=attempt.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.REVIEW_REQUIRED,
+                updated_at=completed_at,
+                revision=assignment.revision + 1,
+            )
+            updated_session = replace(
+                session,
+                active_assignments=max(0, session.active_assignments - 1),
+                state="READY",
+                last_seen_at=completed_at,
+                updated_at=completed_at,
+                revision=session.revision + 1,
+            )
+            self._replace(connection, updated_attempt, attempt.revision)
+            self._replace(connection, updated_assignment, assignment.revision)
+            self._replace(connection, updated_session, session.revision)
+            connection.execute(
+                "UPDATE pass_b_launch_claims SET state='COMPLETED',updated_at=? "
+                "WHERE attempt_id=? AND state='RUNNING'",
+                (completed_at, attempt_id),
+            )
+            self._consume_usage(connection, assignment.assignment_id, completed_at)
+        return updated_attempt
+
+    def recover_interrupted_attempts(self, recovered_at: str) -> dict[str, int]:
+        result = {"prelaunch_released": 0, "uncertain": 0}
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            claims = connection.execute(
+                "SELECT attempt_id,state FROM pass_b_launch_claims "
+                "WHERE state IN "
+                "('RESERVED','LAUNCH_CLAIMED','RUNNING')"
+            ).fetchall()
+            for claim in claims:
+                attempt = self._get(
+                    connection, AttemptRecord, str(claim["attempt_id"])
+                )
+                assignment = self._get(
+                    connection, AssignmentRecord, attempt.assignment_id
+                )
+                state = str(claim["state"])
+                if state == AttemptState.RESERVED:
+                    self._replace(
+                        connection,
+                        replace(
+                            attempt,
+                            state=AttemptState.FAILED,
+                            finished_at=recovered_at,
+                            last_error="recovered before external launch",
+                            updated_at=recovered_at,
+                            revision=attempt.revision + 1,
+                        ),
+                        attempt.revision,
+                    )
+                    connection.execute(
+                        "UPDATE pass_b_launch_claims "
+                        "SET state='FAILED',updated_at=? WHERE attempt_id=?",
+                        (recovered_at, attempt.attempt_id),
+                    )
+                    result["prelaunch_released"] += 1
+                    continue
+                uncertain_attempt = replace(
+                    attempt,
+                    state=AttemptState.UNCERTAIN,
+                    last_error="external execution outcome is uncertain after restart",
+                    updated_at=recovered_at,
+                    revision=attempt.revision + 1,
+                )
+                uncertain_assignment = replace(
+                    assignment,
+                    state=AssignmentState.UNCERTAIN,
+                    updated_at=recovered_at,
+                    revision=assignment.revision + 1,
+                )
+                self._replace(connection, uncertain_attempt, attempt.revision)
+                self._replace(connection, uncertain_assignment, assignment.revision)
+                workspace_rows = connection.execute(
+                    "SELECT payload,payload_hash FROM pass_b_records "
+                    "WHERE kind=? AND state='ACTIVE'",
+                    (WorkspaceReservationRecord.KIND,),
+                ).fetchall()
+                for row in workspace_rows:
+                    workspace = self._decode(WorkspaceReservationRecord, row)
+                    if workspace.assignment_id == assignment.assignment_id:
+                        self._replace(
+                            connection,
+                            replace(
+                                workspace,
+                                state=ReservationState.UNCERTAIN,
+                                updated_at=recovered_at,
+                                revision=workspace.revision + 1,
+                            ),
+                            workspace.revision,
+                        )
+                write_rows = connection.execute(
+                    "SELECT payload,payload_hash FROM pass_b_records "
+                    "WHERE kind=? AND state='ACTIVE'",
+                    (WriteReservationRecord.KIND,),
+                ).fetchall()
+                for row in write_rows:
+                    write = self._decode(WriteReservationRecord, row)
+                    if write.assignment_id == assignment.assignment_id:
+                        self._replace(
+                            connection,
+                            replace(
+                                write,
+                                state=ReservationState.UNCERTAIN,
+                                updated_at=recovered_at,
+                                revision=write.revision + 1,
+                            ),
+                            write.revision,
+                        )
+                connection.execute(
+                    "UPDATE pass_b_launch_claims "
+                    "SET state='UNCERTAIN',updated_at=? WHERE attempt_id=?",
+                    (recovered_at, attempt.attempt_id),
+                )
+                connection.execute(
+                    "UPDATE pass_b_workspace_claims SET state='UNCERTAIN' "
+                    "WHERE assignment_id=? AND state='ACTIVE'",
+                    (assignment.assignment_id,),
+                )
+                connection.execute(
+                    "UPDATE pass_b_write_claims SET state='UNCERTAIN' "
+                    "WHERE assignment_id=? AND state='ACTIVE'",
+                    (assignment.assignment_id,),
+                )
+                result["uncertain"] += 1
+        return result
+
+    def usage_reservations(
+        self, assignment_id: str
+    ) -> builtins.list[dict[str, Any]]:
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM pass_b_usage_reservations "
+                "WHERE assignment_id=? ORDER BY reserved_at",
+                (assignment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def launch_claim(self, attempt_id: str) -> dict[str, Any]:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM pass_b_launch_claims WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"launch claim not found: {attempt_id}")
+        return dict(row)
+
+    def _active_workspace(
+        self, connection: sqlite3.Connection, assignment_id: str
+    ) -> WorkspaceReservationRecord:
+        rows = connection.execute(
+            "SELECT r.payload,r.payload_hash FROM pass_b_workspace_claims AS c "
+            "JOIN pass_b_records AS r "
+            "ON r.kind=? AND r.id=c.reservation_id "
+            "WHERE c.assignment_id=? AND c.state='ACTIVE'",
+            (WorkspaceReservationRecord.KIND, assignment_id),
+        ).fetchall()
+        if len(rows) != 1:
+            raise PermissionError("assignment needs one active workspace")
+        return self._decode(WorkspaceReservationRecord, rows[0])
+
+    def _consume_usage(
+        self,
+        connection: sqlite3.Connection,
+        assignment_id: str,
+        completed_at: str,
+    ) -> None:
+        row = connection.execute(
+            "SELECT reservation_id,pool_id,amount FROM pass_b_usage_reservations "
+            "WHERE assignment_id=? AND state='ACTIVE'",
+            (assignment_id,),
+        ).fetchone()
+        if row is None:
+            return
+        pool = self._get(connection, UsagePoolRecord, str(row["pool_id"]))
+        amount = float(row["amount"])
+        updated = replace(
+            pool,
+            reserved=max(0.0, pool.reserved - amount),
+            consumed=pool.consumed + amount,
+            updated_at=completed_at,
+            last_observed_at=completed_at,
+            revision=pool.revision + 1,
+        )
+        self._replace(connection, updated, pool.revision)
+        connection.execute(
+            "UPDATE pass_b_usage_reservations "
+            "SET state='CONSUMED',updated_at=? WHERE reservation_id=?",
+            (completed_at, str(row["reservation_id"])),
+        )
+
+    def _insert(
+        self, connection: sqlite3.Connection, record: PassBRecord
+    ) -> None:
+        payload = record.to_dict()
+        serialized, digest = _serialize(payload)
+        created_at = str(payload.get("created_at") or payload["updated_at"])
+        updated_at = str(payload.get("updated_at") or created_at)
+        project_id = payload.get("project_id")
+        state = str(payload.get("state") or "")
+        revision = int(payload["revision"])
+        try:
+            connection.execute(
+                "INSERT INTO pass_b_records("
+                "kind,id,project_id,state,revision,created_at,updated_at,"
+                "payload,payload_hash) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    record.KIND,
+                    record.record_id,
+                    project_id,
+                    state,
+                    revision,
+                    created_at,
+                    updated_at,
+                    serialized,
+                    digest,
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            raise PermissionError(
+                f"durable {record.KIND} identity already exists"
+            ) from error
+
+    def _replace(
+        self,
+        connection: sqlite3.Connection,
+        record: PassBRecord,
+        expected_revision: int,
+    ) -> None:
+        if record.to_dict()["revision"] != expected_revision + 1:
+            raise ValueError("replacement revision must advance exactly once")
+        current = connection.execute(
+            "SELECT payload_hash,revision FROM pass_b_records "
+            "WHERE kind=? AND id=?",
+            (record.KIND, record.record_id),
+        ).fetchone()
+        if current is None:
+            raise KeyError(f"{record.KIND} not found: {record.record_id}")
+        if int(current["revision"]) != expected_revision:
+            raise PermissionError("durable record changed concurrently")
+        payload = record.to_dict()
+        serialized, digest = _serialize(payload)
+        state = str(payload.get("state") or "")
+        updated_at = str(
+            payload.get("updated_at")
+            or payload.get("resumed_at")
+            or payload.get("resolved_at")
+            or payload.get("created_at")
+        )
+        cursor = connection.execute(
+            "UPDATE pass_b_records SET state=?,revision=?,updated_at=?,"
+            "payload=?,payload_hash=? "
+            "WHERE kind=? AND id=? AND revision=? AND payload_hash=?",
+            (
+                state,
+                expected_revision + 1,
+                updated_at,
+                serialized,
+                digest,
+                record.KIND,
+                record.record_id,
+                expected_revision,
+                str(current["payload_hash"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionError("durable record CAS was rejected")
+
+    def _get(
+        self, connection: sqlite3.Connection, record_type: type[R], record_id: str
+    ) -> R:
+        row = connection.execute(
+            "SELECT payload,payload_hash FROM pass_b_records "
+            "WHERE kind=? AND id=?",
+            (record_type.KIND, record_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"{record_type.KIND} not found: {record_id}")
+        return self._decode(record_type, row)
+
+    def _active_writes(
+        self,
+        connection: sqlite3.Connection,
+        workspace_reservation_id: str,
+    ) -> builtins.list[WriteReservationRecord]:
+        rows = connection.execute(
+            "SELECT payload,payload_hash FROM pass_b_records "
+            "WHERE kind=? AND state='ACTIVE'",
+            (WriteReservationRecord.KIND,),
+        ).fetchall()
+        return [
+            record
+            for row in rows
+            if (
+                record := self._decode(WriteReservationRecord, row)
+            ).workspace_reservation_id
+            == workspace_reservation_id
+        ]
+
+    @staticmethod
+    def _decode(record_type: type[R], row: sqlite3.Row) -> R:
+        serialized = str(row["payload"])
+        if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != str(
+            row["payload_hash"]
+        ):
+            raise RuntimeError("Pass B durable record failed integrity validation")
+        value = json.loads(serialized)
+        if not isinstance(value, dict):
+            raise RuntimeError("Pass B durable record is not an object")
+        return record_type.from_dict(cast(dict[str, Any], value))
+
+
+def canonical_workspace_path(path: Path) -> str:
+    return str(path.resolve()).replace("\\", "/").casefold()
+
+
+def canonical_scope(workspace_id: str, scope: str) -> str:
+    normalized = scope.replace("\\", "/").strip("/")
+    if not normalized or normalized == "." or ".." in normalized.split("/"):
+        raise ValueError("write scope must be a contained relative path")
+    return f"{workspace_id.casefold()}:{normalized.casefold()}"
+
+
+def _scope_overlap(left: str, right: str) -> bool:
+    return (
+        left == right
+        or left.startswith(right.rstrip("/") + "/")
+        or right.startswith(left.rstrip("/") + "/")
+    )
+
+
+def _serialize(payload: dict[str, Any]) -> tuple[str, str]:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return serialized, hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must be timezone aware")
+    return parsed
+
+
+def _now() -> str:
+    from datetime import UTC
+
+    return datetime.now(UTC).isoformat()
