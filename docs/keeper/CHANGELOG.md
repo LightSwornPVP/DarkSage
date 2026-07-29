@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+- Authorize restore against an integrity-checked immutable SQLite backup artifact,
+  including WAL-backed source state captured at backup time, and bind the signed
+  request to its artifact path and hash, backup operation ID, and source generation.
+- Preserve consumed one-time approvals, consumption bindings and timestamps, crossed
+  budget reservations, and related Executive attempt bindings monotonically when an
+  older backup is restored; ambiguous bindings fail closed and preserved identities
+  are recorded in the durable reconciliation evidence.
+- Add a signed, bounded, project-scoped KeeperAuthority reconciliation fence. Covered
+  attempt and launch-authority mutations are blocked until compare-and-confirm and
+  live replacement complete; expiry and interruption require explicit conservative
+  recovery. Executive schema 10, Authority schema 5, and Authority protocol 3 carry
+  the new maintenance and fence state.
+
 ## 0.5.9
 
 - Replace restore confirmation and reconciliation callbacks with exact typed

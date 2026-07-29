@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any, Callable
 
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 MAX_MESSAGE_BYTES = 1_048_576
 REQUEST_FIELDS = frozenset(
     {
@@ -42,6 +42,11 @@ class Operation(StrEnum):
     QUERY_STATE = "query_state"
     VERIFY_EVIDENCE = "verify_evidence"
     RECONCILE_EXECUTIVE_RESTORE = "reconcile_executive_restore"
+    BEGIN_EXECUTIVE_RESTORE_FENCE = "begin_executive_restore_fence"
+    CONFIRM_EXECUTIVE_RESTORE_FENCE = "confirm_executive_restore_fence"
+    COMPLETE_EXECUTIVE_RESTORE_FENCE = "complete_executive_restore_fence"
+    ABORT_EXECUTIVE_RESTORE_FENCE = "abort_executive_restore_fence"
+    RECOVER_EXECUTIVE_RESTORE_FENCE = "recover_executive_restore_fence"
     PAUSE_ATTEMPT = "pause_attempt"
     RESUME_ATTEMPT = "resume_attempt"
     CANCEL_ATTEMPT = "cancel_attempt"

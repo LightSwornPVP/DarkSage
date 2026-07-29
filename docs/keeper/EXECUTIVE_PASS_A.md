@@ -134,11 +134,13 @@ Executive schema version 6 adds the production/test repository-mode marker and
 the signed Founder capability entity. Schema version 8 records the database
 recovery identity and explicit recovery epoch wholly inside SQLite. Schema version
 9 adds the write generation, durable restore-maintenance state, one-use restore
-authorization consumption, and signed Authority reconciliation receipt. Authority
-schema version 4 adds the durable project-wide capability-consumption ledger.
-Existing hash-checked execution,
-review, late-result, one-time approval-consumption, and cumulative budget records
-remain intact. Project, charter, workflow, task, approval, execution, review, and
+authorization consumption, and signed Authority reconciliation receipt. Schema
+version 10 records the active Authority fence identity and expiry. Authority schema
+version 4 adds the durable project-wide capability-consumption ledger; schema
+version 5 adds project versions and signed restore-fence state. Authority protocol
+version 3 carries begin, confirm, complete, abort, and expired-fence recovery.
+Existing hash-checked execution, review, late-result, one-time approval-consumption,
+and cumulative budget records remain intact. Project, charter, workflow, task, approval, execution, review, and
 evidence ownership is checked at persistence boundaries. Project, charter, and
 task updates use exact compare-and-swap state; approved content and authenticated
 identity bindings cannot be rewritten. Migrations remain idempotent and do not
@@ -146,11 +148,14 @@ copy Authority signatures or protected state into the Executive database.
 SQLite is the sole live Executive commit boundary; no adjacent lineage append is
 required after a business transaction. Pass A supports multiple runtime writers
 through SQLite transactions, CAS, uniqueness constraints, and a shared OS
-transaction lock. Explicit restore requires an exact typed Founder authorization
-and production Authority client, takes the exclusive lock, validates a signed
-complete Authority snapshot twice, preserves approval and budget safety, pauses
-nonterminal projects, rechecks generation, and advances the in-database recovery
-epoch only in the validated staged replacement.
+transaction lock. Explicit restore first creates an immutable integrity-checked SQLite artifact and
+requires an exact typed Founder authorization over its hash, identity, backup
+operation and source generation. It takes the exclusive lock, captures and merges
+the live monotonic approval/budget safety ledger, opens a signed project-scoped
+Authority fence, validates the complete fenced snapshot, compare-and-confirms the
+unchanged Authority version, pauses nonterminal projects, rechecks generation, and
+advances the in-database recovery epoch only in the validated staged replacement.
+The fence remains held through replacement and is closed only afterward.
 Unkeyed local payload hashes are corruption/CAS aids only and never establish
 approval, provider identity, execution, review, or completion authority.
 

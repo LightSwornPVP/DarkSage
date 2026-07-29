@@ -20,7 +20,7 @@ from keeper.executive.founder_auth import (
 from keeper.executive.models import FounderApprovalChallenge
 
 
-RESTORE_SCHEMA_VERSION = 1
+RESTORE_SCHEMA_VERSION = 2
 RESTORE_AUTHORIZATION_LIFETIME = timedelta(minutes=2)
 RESTORE_APPROVAL_ACTION = "APPROVE_ACTION"
 
@@ -29,9 +29,12 @@ RESTORE_APPROVAL_ACTION = "APPROVE_ACTION"
 class RestoreRequest:
     schema_version: int
     operation_id: str
+    backup_operation_id: str
+    backup_artifact_path: str
     backup_sha256: str
     source_database_id: str
     source_recovery_epoch: int
+    source_generation: int
     target_database_id: str
     target_canonical_path: str
     target_recovery_epoch: int
@@ -113,15 +116,21 @@ def build_restore_request(
     cleaned_reason = reason.strip()
     if not cleaned_reason:
         raise ValueError("restore reason is required")
+    operation_id = uuid.uuid4().hex
+    backup_operation_id = uuid.uuid4().hex
+    artifact = _prepare_immutable_artifact(source, backup_operation_id)
     target_binding, target_projects = _database_restore_identity(target)
-    source_binding, source_projects = _database_restore_identity(source)
+    source_binding, source_projects = _database_restore_identity(artifact)
     now = datetime.now(UTC)
     return RestoreRequest(
         RESTORE_SCHEMA_VERSION,
-        uuid.uuid4().hex,
-        sha256_file(source),
+        operation_id,
+        backup_operation_id,
+        _canonical_path(artifact),
+        sha256_file(artifact),
         source_binding[0],
         source_binding[1],
+        source_binding[2],
         target_binding[0],
         _canonical_path(target),
         target_binding[1],
@@ -163,6 +172,54 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _prepare_immutable_artifact(source: Path, operation_id: str) -> Path:
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    artifact = source.with_name(
+        f".{source.name}.{operation_id}.keeper-restore.db"
+    ).resolve()
+    temporary = artifact.with_name(f".{artifact.name}.{uuid.uuid4().hex}.tmp")
+    if artifact.exists():
+        raise FileExistsError(artifact)
+    try:
+        _sqlite_backup(source, temporary)
+        _verify_sqlite_integrity(temporary)
+        os.replace(temporary, artifact)
+        return artifact
+    finally:
+        temporary.unlink(missing_ok=True)
+        Path(f"{temporary}-wal").unlink(missing_ok=True)
+        Path(f"{temporary}-shm").unlink(missing_ok=True)
+
+
+def _sqlite_backup(source: Path, destination: Path) -> None:
+    source_connection = sqlite3.connect(source)
+    destination_connection = sqlite3.connect(destination)
+    try:
+        source_connection.backup(destination_connection)
+        destination_connection.commit()
+    finally:
+        destination_connection.close()
+        source_connection.close()
+
+
+def _verify_sqlite_integrity(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        if [
+            str(row[0])
+            for row in connection.execute("PRAGMA integrity_check").fetchall()
+        ] != ["ok"]:
+            raise RuntimeError("restore artifact failed SQLite integrity validation")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("restore artifact failed foreign-key validation")
+    except sqlite3.DatabaseError as error:
+        raise RuntimeError("restore artifact is corrupt or unreadable") from error
+    finally:
+        connection.close()
 
 
 def _challenge(request: RestoreRequest) -> FounderApprovalChallenge:

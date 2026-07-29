@@ -124,6 +124,55 @@ class AuthorityServiceClient:
             Operation.RECONCILE_EXECUTIVE_RESTORE, dict(identity)
         )
 
+    def begin_executive_restore_fence(self, **identity: Any) -> dict[str, Any]:
+        return self.request(
+            Operation.BEGIN_EXECUTIVE_RESTORE_FENCE, dict(identity)
+        )
+
+    def confirm_executive_restore_fence(
+        self, fence_id: str, restore_operation_id: str
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.CONFIRM_EXECUTIVE_RESTORE_FENCE,
+            {
+                "fence_id": fence_id,
+                "restore_operation_id": restore_operation_id,
+            },
+        )
+
+    def complete_executive_restore_fence(
+        self, fence_id: str, restore_operation_id: str
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.COMPLETE_EXECUTIVE_RESTORE_FENCE,
+            {
+                "fence_id": fence_id,
+                "restore_operation_id": restore_operation_id,
+            },
+        )
+
+    def abort_executive_restore_fence(
+        self, fence_id: str, restore_operation_id: str
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.ABORT_EXECUTIVE_RESTORE_FENCE,
+            {
+                "fence_id": fence_id,
+                "restore_operation_id": restore_operation_id,
+            },
+        )
+
+    def recover_executive_restore_fence(
+        self, fence_id: str, restore_operation_id: str
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.RECOVER_EXECUTIVE_RESTORE_FENCE,
+            {
+                "fence_id": fence_id,
+                "restore_operation_id": restore_operation_id,
+            },
+        )
+
     def verify(self, purpose: str, record: object) -> bool:
         return bool(
             self.request(

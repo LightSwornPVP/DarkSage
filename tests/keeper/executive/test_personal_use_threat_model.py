@@ -95,7 +95,7 @@ def test_explicit_restore_pauses_projects_reconciles_and_advances_epoch(
     )
 
     epoch = store.restore_backup_for_test(
-        backup,
+        Path(authorization.request.backup_artifact_path),
         reason="Founder requested recovery",
         authorization=authorization,
         founder_authenticator=founder,
@@ -125,7 +125,7 @@ def test_failed_restore_reconciliation_leaves_live_state_unchanged(
 
     with pytest.raises(PermissionError, match="Authority restore"):
         store.restore_backup_for_test(
-            backup,
+            Path(authorization.request.backup_artifact_path),
             reason="failure injection",
             authorization=authorization,
             founder_authenticator=founder,

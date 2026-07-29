@@ -5,7 +5,7 @@ import json
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -32,7 +32,8 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.3.0"
+SERVICE_VERSION = "1.4.0"
+RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +181,21 @@ class AuthorityServiceCore:
             Operation.QUERY_STATE: self._query_state,
             Operation.RECONCILE_EXECUTIVE_RESTORE: (
                 self._reconcile_executive_restore
+            ),
+            Operation.BEGIN_EXECUTIVE_RESTORE_FENCE: (
+                self._begin_executive_restore_fence
+            ),
+            Operation.CONFIRM_EXECUTIVE_RESTORE_FENCE: (
+                self._confirm_executive_restore_fence
+            ),
+            Operation.COMPLETE_EXECUTIVE_RESTORE_FENCE: (
+                self._complete_executive_restore_fence
+            ),
+            Operation.ABORT_EXECUTIVE_RESTORE_FENCE: (
+                self._abort_executive_restore_fence
+            ),
+            Operation.RECOVER_EXECUTIVE_RESTORE_FENCE: (
+                self._recover_executive_restore_fence
             ),
             Operation.VERIFY_EVIDENCE: self._verify_evidence,
             Operation.PAUSE_ATTEMPT: self._pause_attempt,
@@ -962,6 +978,13 @@ class AuthorityServiceCore:
                 "kind": "provider_completion",
                 "schema_version": 2,
                 "attempt_id": attempt_id,
+                "project_id": attempt["project_id"],
+                "charter_id": attempt.get("charter_id"),
+                "charter_revision": attempt.get("charter_revision"),
+                "approval_id": attempt.get("approval_id"),
+                "budget_reservation_id": attempt.get("budget_reservation_id"),
+                "launch_authorization_id": attempt["launch_authorization_id"],
+                "authorization_generation": attempt["authorization_generation"],
                 "completion_challenge": attempt["completion_challenge"],
                 "keeper_run_id": attempt["keeper_run_id"],
                 "task_id": attempt["task_id"],
@@ -1070,6 +1093,112 @@ class AuthorityServiceCore:
         )
         return {"reconciliation": receipt}
 
+    def _begin_executive_restore_fence(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        identity = _validated_restore_fence_identity(payload)
+        now = datetime.now(UTC)
+        fence = self.store.begin_restore_fence(
+            f"restore-fence:{identity['restore_operation_id']}",
+            identity,
+            client_sid,
+            now.isoformat(),
+            (now + RESTORE_FENCE_LIFETIME).isoformat(),
+        )
+        signed = self.keys.sign(
+            "executive-restore-reconciliation-fence",
+            {
+                "schema_version": 1,
+                "kind": "executive-restore-reconciliation-fence",
+                "protocol_version": PROTOCOL_VERSION,
+                "service_key_id": self.keys.current_key_id,
+                **fence,
+            },
+        )
+        return {"fence": signed}
+
+    def _confirm_executive_restore_fence(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(payload, {"fence_id", "restore_operation_id"})
+        confirmation = self.store.confirm_restore_fence(
+            _text(payload["fence_id"], "restore fence ID"),
+            _text(payload["restore_operation_id"], "restore operation ID"),
+            client_sid,
+        )
+        signed = self.keys.sign(
+            "executive-restore-fence-confirmation",
+            {
+                "schema_version": 1,
+                "kind": "executive-restore-fence-confirmation",
+                "protocol_version": PROTOCOL_VERSION,
+                "service_key_id": self.keys.current_key_id,
+                **confirmation,
+            },
+        )
+        return {"confirmation": signed}
+
+    def _complete_executive_restore_fence(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        return self._finish_executive_restore_fence(
+            payload, client_sid, "COMPLETED"
+        )
+
+    def _abort_executive_restore_fence(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        return self._finish_executive_restore_fence(
+            payload, client_sid, "ABORTED"
+        )
+
+    def _finish_executive_restore_fence(
+        self, payload: dict[str, Any], client_sid: str, state: str
+    ) -> dict[str, Any]:
+        _exact(payload, {"fence_id", "restore_operation_id"})
+        outcome = self.store.finish_restore_fence(
+            _text(payload["fence_id"], "restore fence ID"),
+            _text(payload["restore_operation_id"], "restore operation ID"),
+            client_sid,
+            state,
+        )
+        return {
+            "outcome": self.keys.sign(
+                "executive-restore-fence-outcome",
+                {
+                    "schema_version": 1,
+                    "kind": "executive-restore-fence-outcome",
+                    "protocol_version": PROTOCOL_VERSION,
+                    "service_key_id": self.keys.current_key_id,
+                    "authorized_client_sid": client_sid,
+                    **outcome,
+                },
+            )
+        }
+
+    def _recover_executive_restore_fence(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(payload, {"fence_id", "restore_operation_id"})
+        outcome = self.store.recover_restore_fence(
+            _text(payload["fence_id"], "restore fence ID"),
+            _text(payload["restore_operation_id"], "restore operation ID"),
+            client_sid,
+        )
+        return {
+            "outcome": self.keys.sign(
+                "executive-restore-fence-outcome",
+                {
+                    "schema_version": 1,
+                    "kind": "executive-restore-fence-outcome",
+                    "protocol_version": PROTOCOL_VERSION,
+                    "service_key_id": self.keys.current_key_id,
+                    "authorized_client_sid": client_sid,
+                    **outcome,
+                },
+            )
+        }
+
     def _query_state(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
@@ -1100,6 +1229,9 @@ class AuthorityServiceCore:
                 "provider-start",
                 "provider-completion",
                 "executive-restore-reconciliation",
+                "executive-restore-reconciliation-fence",
+                "executive-restore-fence-confirmation",
+                "executive-restore-fence-outcome",
                 AUDIT_REPORT_PURPOSE,
             },
         )
@@ -1134,10 +1266,20 @@ class AuthorityServiceCore:
         if value.get("authorized_client_sid") != client_sid:
             raise PermissionError("provider attempt belongs to another client")
         cancel_provider = getattr(self.observer, "cancel_provider", None)
-        if callable(cancel_provider):
-            cancel_provider(attempt_id)
+
+        def cancel_effect() -> None:
+            if callable(cancel_provider):
+                cancel_provider(attempt_id)
+
         cancelled = {**value, "cancelled_at": _now()}
-        self.store.transition("attempts", attempt_id, state, "CANCELLED", cancelled)
+        self.store.transition(
+            "attempts",
+            attempt_id,
+            state,
+            "CANCELLED",
+            cancelled,
+            before_transition=cancel_effect,
+        )
         return {"attempt_id": attempt_id, "state": "CANCELLED"}
 
     def _transition_attempt(
@@ -1331,6 +1473,67 @@ def _object_id(result: dict[str, Any]) -> str | None:
         if isinstance(value, str):
             return value
     return None
+
+
+def _validated_restore_fence_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "restore_operation_id",
+        "backup_operation_id",
+        "backup_artifact_path",
+        "backup_sha256",
+        "source_database_id",
+        "source_recovery_epoch",
+        "source_generation",
+        "target_database_id",
+        "target_recovery_epoch",
+        "target_generation",
+        "project_scope",
+        "authorization_digest",
+    }
+    _exact(payload, fields)
+    scope = payload["project_scope"]
+    if (
+        not isinstance(scope, list)
+        or not all(isinstance(item, str) and item for item in scope)
+        or scope != sorted(set(scope))
+    ):
+        raise ValueError("Authority restore project scope is invalid")
+    return {
+        "restore_operation_id": _text(
+            payload["restore_operation_id"], "restore operation ID"
+        ),
+        "backup_operation_id": _text(
+            payload["backup_operation_id"], "backup operation ID"
+        ),
+        "backup_artifact_path": _text(
+            payload["backup_artifact_path"], "backup artifact path"
+        ),
+        "backup_sha256": _sha256_text(
+            payload["backup_sha256"], "backup SHA-256"
+        ),
+        "source_database_id": _text(
+            payload["source_database_id"], "source database ID"
+        ),
+        "source_recovery_epoch": _nonnegative_int(
+            payload["source_recovery_epoch"], "source recovery epoch"
+        ),
+        "source_generation": _nonnegative_int(
+            payload["source_generation"], "source generation"
+        ),
+        "target_database_id": _text(
+            payload["target_database_id"], "target database ID"
+        ),
+        "target_recovery_epoch": _nonnegative_int(
+            payload["target_recovery_epoch"], "target recovery epoch"
+        ),
+        "target_generation": _nonnegative_int(
+            payload["target_generation"], "target generation"
+        ),
+        "project_scope": scope,
+        "authorization_digest": _sha256_text(
+            payload["authorization_digest"], "authorization digest"
+        ),
+    }
 
 
 def _nonnegative_int(value: object, label: str) -> int:

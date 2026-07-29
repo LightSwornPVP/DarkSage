@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     )
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 LINEAGE_VERSION = 1
 LINEAGE_ZERO_HASH = "0" * 64
 ENTITY_TABLES = (
@@ -556,7 +556,8 @@ class KeeperStore:
                 "('ACTIVE','FAILED','COMPLETED')), "
                 "source_backup_sha256 TEXT NOT NULL, "
                 "expected_generation INTEGER NOT NULL, "
-                "started_at TEXT NOT NULL, finished_at TEXT)"
+                "started_at TEXT NOT NULL, finished_at TEXT, "
+                "authority_fence_id TEXT, authority_fence_expires_at TEXT)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS executive_restore_authorizations ("
@@ -593,6 +594,27 @@ class KeeperStore:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (9, _now()),
+                )
+            maintenance_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(executive_restore_maintenance)"
+                ).fetchall()
+            }
+            if "authority_fence_id" not in maintenance_columns:
+                connection.execute(
+                    "ALTER TABLE executive_restore_maintenance "
+                    "ADD COLUMN authority_fence_id TEXT"
+                )
+            if "authority_fence_expires_at" not in maintenance_columns:
+                connection.execute(
+                    "ALTER TABLE executive_restore_maintenance "
+                    "ADD COLUMN authority_fence_expires_at TEXT"
+                )
+            if current < 10:
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (10, _now()),
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS executive_repository_lineage ("

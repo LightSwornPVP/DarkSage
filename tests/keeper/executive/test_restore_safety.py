@@ -85,8 +85,9 @@ def _restore(
     reason: str = "Founder restore",
     hooks: TestRestoreHooks | None = None,
 ) -> int:
+    del backup
     return store.restore_backup_for_test(
-        backup,
+        Path(authorization.request.backup_artifact_path),
         reason=reason,
         authorization=authorization,
         founder_authenticator=founder,
@@ -337,9 +338,9 @@ def test_omitted_authority_attempt_or_terminal_state_is_rejected(
     def omit(
         request: Request, result: dict[str, Any]
     ) -> dict[str, Any]:
-        if request.operation != Operation.RECONCILE_EXECUTIVE_RESTORE:
+        if request.operation != Operation.BEGIN_EXECUTIVE_RESTORE_FENCE:
             return result
-        receipt = dict(result["reconciliation"])
+        receipt = dict(result["fence"])
         receipt["attempts"] = []
         receipt["state_digest"] = hashlib.sha256(
             json.dumps(
@@ -353,7 +354,7 @@ def test_omitted_authority_attempt_or_terminal_state_is_rejected(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        return {"reconciliation": receipt}
+        return {"fence": receipt}
 
     authority = TestAuthorityServiceClient(
         lambda request: omit(request, core.dispatch(request, SID))
@@ -391,9 +392,9 @@ def test_omitted_authority_revocation_is_rejected(tmp_path: Path) -> None:
     def omit(
         request: Request, result: dict[str, Any]
     ) -> dict[str, Any]:
-        if request.operation != Operation.RECONCILE_EXECUTIVE_RESTORE:
+        if request.operation != Operation.BEGIN_EXECUTIVE_RESTORE_FENCE:
             return result
-        receipt = dict(result["reconciliation"])
+        receipt = dict(result["fence"])
         receipt["launch_authorizations"] = []
         receipt["state_digest"] = hashlib.sha256(
             json.dumps(
@@ -406,8 +407,8 @@ def test_omitted_authority_revocation_is_rejected(tmp_path: Path) -> None:
             ).encode("utf-8")
         ).hexdigest()
         return {
-            "reconciliation": core.keys.sign(
-                "executive-restore-reconciliation", receipt
+            "fence": core.keys.sign(
+                "executive-restore-reconciliation-fence", receipt
             )
         }
 
@@ -479,8 +480,19 @@ def test_approval_consumption_and_crossed_budget_are_preserved(
     insert_executive_fixture(
         store, "executive_projects", "project-restore", _project()
     )
+    insert_executive_fixture(
+        store,
+        "project_charters",
+        "charter-1",
+        {"charter_id": "charter-1", "project_id": "project-restore", "revision": 1},
+    )
     approval: dict[str, object] = {
         "approval_id": "approval-restore",
+        "project_id": "project-restore",
+        "charter_id": "charter-1",
+        "charter_revision": 1,
+        "action_id": "action-restore",
+        "task_id": "task-restore",
         "kind": "ONE_TIME",
         "consumed_at": utc_now(),
     }
@@ -690,6 +702,8 @@ def test_interrupted_maintenance_requires_explicit_conservative_recovery(
         assert generation is not None
         connection.execute(
             "INSERT INTO executive_restore_maintenance "
+            "(singleton,operation_id,state,source_backup_sha256,"
+            "expected_generation,started_at,finished_at) "
             "VALUES(1,?,'ACTIVE',?,?,?,NULL) "
             "ON CONFLICT(singleton) DO UPDATE SET "
             "operation_id=excluded.operation_id,state='ACTIVE',"
@@ -770,9 +784,10 @@ def test_corrupt_backup_after_authorization_preserves_live_state(
     tmp_path: Path,
 ) -> None:
     store, backup, founder, _core, authority, authorization = _fixture(tmp_path)
-    connection = sqlite3.connect(backup)
+    artifact = Path(authorization.request.backup_artifact_path)
+    connection = sqlite3.connect(artifact)
     connection.close()
-    backup.write_bytes(b"corrupt")
+    artifact.write_bytes(b"corrupt")
     with pytest.raises(PermissionError, match="backup"):
         _restore(store, backup, founder, authorization, authority)
     assert store.get("settings", "live-only") == {"generation": 2}

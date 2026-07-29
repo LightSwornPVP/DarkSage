@@ -18,56 +18,74 @@ normal startup action. It accepts only an exact
 `ProductionRestoreAuthorization`, an exact
 `ProductionFounderAuthenticator`, and an exact
 `ProductionAuthorityServiceClient`; arbitrary confirmation or reconciliation
-callbacks are not accepted. The authorization binds the authenticated Founder SID,
-restore operation ID, backup SHA-256 and recovery identity, target canonical path,
-database ID, recovery epoch and write generation, complete project scope, reason,
-issue time, expiry, and one-use consumption identity. Tests use a separate exact
-test-only entry point and proof types.
+callbacks are not accepted. Preparation first uses SQLite backup semantics to copy
+the selected source, including committed WAL state, into a unique immutable logical
+artifact, closes the backup handles, and validates SQLite integrity and foreign keys.
+The authorization binds the authenticated Founder SID, restore operation ID, backup
+operation ID, canonical artifact path and SHA-256, source database ID, recovery epoch
+and write generation, target canonical path, database ID, recovery epoch and write
+generation, complete project scope, reason, issue time, expiry, and one-use
+consumption identity. Later supported writes to the original source cannot enter the
+authorized artifact. Tests use a separate exact test-only entry point and proof
+types.
 
 The enforced sequence is:
 
-1. Acquire the bounded OS-level exclusive database maintenance lock. Supported
-   connections hold a shared lock for their full transaction, so a writer that
-   already started must finish before restore can proceed and a new writer is
-   rejected before it can commit.
-2. Recheck the target database ID, recovery epoch, write generation, production
-   mode, and authorization replay tables, then record an `ACTIVE` maintenance
-   operation inside SQLite.
-3. Stage, migrate, and integrity-check the exact authorized backup without changing
-   live business state.
-4. Request a KeeperAuthority-signed, project-scoped reconciliation receipt bound to
-   the operation, backup, source and target recovery identities, generation, service
-   key, protocol, and client SID. The receipt contains the complete current attempt
-   and launch-authorization state, including completion, cancellation, and
-   revocation.
-5. Validate every Authority attempt against its restored Executive attempt and
-   preserve one-time approval consumption and any budget reservation. A crossed
-   launch boundary promotes a restored reservation to `CROSSED`; a newer terminal
-   result is recorded as `UNCERTAIN` pending normal authenticated import, so it is
-   represented but cannot cause a retry. Missing or conflicting Executive safety
-   state rejects the restore.
-6. Fetch and validate a second receipt immediately before replacement. Any changed
-   Authority state, live generation, recovery identity, or maintenance lease aborts.
-7. Pause every nonterminal project with
-   `RESTORE_RECONCILIATION_REQUIRED`, consume the authorization, persist the signed
-   receipt and Executive safety assessment, advance the recovery epoch and write
-   generation, and populate `authority_reconciled_at` in the staged transaction.
-8. Recheck the live boundary once more and replace the live database through the
-   SQLite backup API while still holding the exclusive maintenance lock.
+1. Acquire bounded exclusive locks for the target database and immutable artifact.
+   Supported target connections hold the shared lock for their full transaction, so
+   an active writer finishes first and a new writer cannot commit during restore.
+2. Recheck the target database ID, recovery epoch, write generation, production mode,
+   and authorization replay tables; capture the complete live monotonic safety ledger;
+   and record an `ACTIVE` maintenance operation inside SQLite.
+3. Revalidate the artifact path, hash, database identity, recovery epoch, source write
+   generation, and production mode before and after staging, then migrate and
+   integrity-check the staged database without changing live business state.
+4. Open a bounded KeeperAuthority-signed project-scope fence tied to the restore and
+   backup operation IDs, Founder-authorization digest, artifact identity/hash, source
+   and target identities/generations, service key, protocol, requesting SID, Authority
+   project versions, and complete attempt and launch-authorization snapshot.
+5. Merge the live safety ledger into the staged database. Consumed one-time approvals,
+   consumption timestamps and bindings, crossed budget state, immutable budget amount
+   and scope, and safety-bound attempts are preserved even when absent from the older
+   backup. Newer live facts win; conflicting identity, amount, project, charter, task,
+   action, approval, budget, or attempt bindings reject restore. Preserved IDs and
+   before/after ledger digests are written into durable reconciliation evidence.
+6. Reconcile every fenced Authority attempt and launch authorization. New terminal
+   truth becomes `UNCERTAIN` and non-retry-safe. Missing or conflicting authenticated
+   Authority state rejects restore.
+7. Compare-and-confirm the still-active fence immediately before replacement. Covered
+   Authority cancellation, completion, revocation, attempt reservation, claim, start,
+   or related launch-authority mutation is blocked while the fence is active; any
+   digest/version mismatch or expiry aborts.
+8. Pause every nonterminal project with `RESTORE_RECONCILIATION_REQUIRED`, consume the
+   authorization, persist the signed fence and confirmation plus Executive safety
+   evidence, advance the recovery epoch and generation, and complete the staged
+   transaction.
+9. Recheck the live boundary, replace live content through the SQLite backup API while
+   holding the target lock and Authority fence, verify integrity, and only then mark
+   the Authority fence `COMPLETED`.
 
-Validation, staging, integrity, Authority, or generation failure leaves the live
-business state and recovery epoch unchanged. A handled failure records a failed
-maintenance outcome and releases writers. Process termination after the durable
-`ACTIVE` record leaves the database conservatively blocked.
-`KeeperStore.recover_stale_restore(operation_id)` acquires the same exclusive lock,
-requires the exact operation ID and unchanged write generation, verifies SQLite
-integrity, and only then marks the interrupted lease failed; it never completes a
-restore or changes business state.
+Failure before replacement preserves live business state, recovery epoch, approval
+consumptions, budgets, and Authority lifecycle state. A handled failure records a
+failed Executive maintenance outcome and aborts its active Authority fence. Process
+termination can leave either an Executive `ACTIVE` maintenance record or an
+Authority `ACTIVE` fence. Executive recovery requires the exact operation ID,
+unchanged generation, exclusive lock, and integrity check. Authority recovery is a
+separate explicit signed operation. The fence ID is deterministically derived from
+the durable restore operation ID, so it remains recoverable even if the begin-fence
+response is lost. Recovery is allowed only after fence expiry, marks the fence
+`EXPIRED`, and never completes the restore; until then covered mutations fail closed.
 
 The empty `.keeper-lock` file carries only an operating-system advisory byte lock;
 it contains no state and is not a second database-plus-file commit protocol. Manual
 same-user replacement of the database outside this workflow remains outside the
 Keeper 1.0 personal-use threat model.
+
+The source candidate uses Authority protocol 3 and schema 5. This repair does not
+install, restart, or update the Windows service. A separately authorized release or
+installation step must deploy the matching KeeperAuthority build before production
+restore can use the fence operations; an older installed service fails the protocol
+identity check rather than falling back to unfenced restore.
 
 Pass A continues to support multiple normal Executive runtime writers through
 SQLite transactions, CAS, uniqueness constraints, and the shared lock. Restore is

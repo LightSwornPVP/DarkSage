@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 
 
 AUTHORITY_RECONCILIATION_PURPOSE = "executive-restore-reconciliation"
+AUTHORITY_FENCE_PURPOSE = "executive-restore-reconciliation-fence"
+AUTHORITY_FENCE_CONFIRMATION_PURPOSE = "executive-restore-fence-confirmation"
+AUTHORITY_FENCE_OUTCOME_PURPOSE = "executive-restore-fence-outcome"
 AUTHORITY_RECONCILIATION_SCHEMA_VERSION = 1
 TERMINAL_AUTHORITY_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
@@ -144,11 +147,11 @@ def _restore(
     production: bool,
 ) -> int:
     source = backup.resolve()
+    request = authorization.request
     if source == store.path:
         raise ValueError("restore source must differ from live database")
     if not source.is_file():
         raise FileNotFoundError(source)
-    request = authorization.request
     _validate_authorization_shape(
         store, source, reason, authorization, founder_identity
     )
@@ -158,7 +161,12 @@ def _restore(
     staged = type(store)(staged_path)
     replaced = False
     maintenance_started = False
-    with DatabaseFileLock(store.path, "exclusive", timeout_seconds=5):
+    fence: dict[str, Any] | None = None
+    authorization_digest = restore_authorization_digest(authorization)
+    with (
+        DatabaseFileLock(store.path, "exclusive", timeout_seconds=5),
+        DatabaseFileLock(source, "exclusive", timeout_seconds=5),
+    ):
         try:
             with _connection(store.path) as live:
                 live.execute("BEGIN IMMEDIATE")
@@ -167,10 +175,7 @@ def _restore(
                 if live.execute(
                     "SELECT 1 FROM executive_restore_authorizations "
                     "WHERE operation_id=? OR authorization_digest=?",
-                    (
-                        request.operation_id,
-                        restore_authorization_digest(authorization),
-                    ),
+                    (request.operation_id, authorization_digest),
                 ).fetchone():
                     raise PermissionError("restore authorization was already consumed")
                 active = live.execute(
@@ -181,16 +186,19 @@ def _restore(
                     raise RuntimeError(
                         "an active or interrupted restore requires explicit recovery"
                     )
+                live_safety = _capture_live_safety_ledger(live, request)
                 live.execute(
                     "INSERT INTO executive_restore_maintenance("
                     "singleton,operation_id,state,source_backup_sha256,"
-                    "expected_generation,started_at,finished_at"
-                    ") VALUES(1,?,'ACTIVE',?,?,?,NULL) "
+                    "expected_generation,started_at,finished_at,"
+                    "authority_fence_id,authority_fence_expires_at"
+                    ") VALUES(1,?,'ACTIVE',?,?,?,NULL,NULL,NULL) "
                     "ON CONFLICT(singleton) DO UPDATE SET "
                     "operation_id=excluded.operation_id,state='ACTIVE',"
                     "source_backup_sha256=excluded.source_backup_sha256,"
                     "expected_generation=excluded.expected_generation,"
-                    "started_at=excluded.started_at,finished_at=NULL",
+                    "started_at=excluded.started_at,finished_at=NULL,"
+                    "authority_fence_id=NULL,authority_fence_expires_at=NULL",
                     (
                         request.operation_id,
                         request.backup_sha256,
@@ -205,40 +213,58 @@ def _restore(
             before_hash = sha256_file(source)
             if before_hash != request.backup_sha256:
                 raise PermissionError("restore backup identity changed after authorization")
+            _validate_artifact_identity(source, request)
             store._sqlite_backup(source, staged_path)
             if sha256_file(source) != before_hash:
                 raise PermissionError("restore backup changed while it was staged")
+            _validate_artifact_identity(source, request)
             staged.migrate()
+            staged.verify_integrity()
 
             diagnostics = authority.diagnostics()
             if production:
                 diagnostics = cast(
                     ProductionAuthorityServiceClient, authority
                 ).require_live_identity()
-            first = _authority_reconciliation(authority, diagnostics, request)
-            safety = _reconcile_staged(staged_path, request, first)
+            fence = _begin_authority_fence(
+                authority, diagnostics, request, authorization_digest
+            )
+            with _connection(store.path) as live:
+                live.execute("BEGIN IMMEDIATE")
+                _validate_live_boundary(live, request)
+                live.execute(
+                    "UPDATE executive_restore_maintenance SET "
+                    "authority_fence_id=?,authority_fence_expires_at=? "
+                    "WHERE singleton=1 AND operation_id=? AND state='ACTIVE'",
+                    (
+                        fence["fence_id"],
+                        fence["expires_at"],
+                        request.operation_id,
+                    ),
+                )
+            safety = _reconcile_staged(
+                staged_path, request, fence, live_safety
+            )
 
             if hooks is not None and hooks.before_final_generation_check is not None:
                 hooks.before_final_generation_check()
-            second = _authority_reconciliation(authority, diagnostics, request)
-            if first["state_digest"] != second["state_digest"]:
-                raise RuntimeError(
-                    "Authority state changed during restore reconciliation"
-                )
+            confirmation = _confirm_authority_fence(
+                authority, diagnostics, request, fence
+            )
 
             with _connection(store.path) as live:
                 _validate_live_boundary(live, request)
 
-            reconciled_at = str(second["reconciled_at"])
-            receipt_digest = _digest(second)
-            authorization_digest = restore_authorization_digest(authorization)
+            reconciled_at = str(confirmation["confirmed_at"])
+            receipt = {"fence": fence, "confirmation": confirmation}
+            receipt_digest = _digest(receipt)
             recovery_epoch = request.target_recovery_epoch + 1
             with _connection(staged_path) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 _validate_source_identity(connection, request)
                 store._pause_projects_for_restore(connection, reconciled_at)
                 reconciliation_payload = {
-                    "authority_receipt": second,
+                    "authority_receipt": receipt,
                     "executive_safety": safety,
                 }
                 serialized = _serialized(reconciliation_payload)
@@ -247,8 +273,8 @@ def _restore(
                     (
                         request.operation_id,
                         receipt_digest,
-                        second["service_key_id"],
-                        second["service_key_version"],
+                        fence["service_key_id"],
+                        fence["service_key_version"],
                         reconciled_at,
                         serialized,
                         _sha256(serialized.encode("utf-8")),
@@ -291,19 +317,25 @@ def _restore(
                 connection.execute(
                     "INSERT INTO executive_restore_maintenance("
                     "singleton,operation_id,state,source_backup_sha256,"
-                    "expected_generation,started_at,finished_at"
-                    ") VALUES(1,?,'COMPLETED',?,?,?,?) "
+                    "expected_generation,started_at,finished_at,"
+                    "authority_fence_id,authority_fence_expires_at"
+                    ") VALUES(1,?,'COMPLETED',?,?,?,?,?,?) "
                     "ON CONFLICT(singleton) DO UPDATE SET "
                     "operation_id=excluded.operation_id,state='COMPLETED',"
                     "source_backup_sha256=excluded.source_backup_sha256,"
                     "expected_generation=excluded.expected_generation,"
-                    "started_at=excluded.started_at,finished_at=excluded.finished_at",
+                    "started_at=excluded.started_at,"
+                    "finished_at=excluded.finished_at,"
+                    "authority_fence_id=excluded.authority_fence_id,"
+                    "authority_fence_expires_at=excluded.authority_fence_expires_at",
                     (
                         request.operation_id,
                         request.backup_sha256,
                         request.target_generation,
                         request.requested_at,
                         reconciled_at,
+                        fence["fence_id"],
+                        fence["expires_at"],
                     ),
                 )
             staged.verify_integrity()
@@ -314,10 +346,29 @@ def _restore(
             store._sqlite_backup(staged_path, store.path)
             replaced = True
             store.verify_integrity()
+            _finish_authority_fence(
+                authority, diagnostics, request, fence, "COMPLETED"
+            )
             return recovery_epoch
-        except BaseException:
+        except BaseException as error:
+            cleanup_errors: list[BaseException] = []
+            if fence is not None and not replaced:
+                try:
+                    _finish_authority_fence(
+                        authority, diagnostics, request, fence, "ABORTED"
+                    )
+                except BaseException as fence_error:
+                    cleanup_errors.append(fence_error)
             if maintenance_started and not replaced:
-                _mark_restore_failed(store.path, request.operation_id)
+                try:
+                    _mark_restore_failed(store.path, request.operation_id)
+                except BaseException as maintenance_error:
+                    cleanup_errors.append(maintenance_error)
+            if cleanup_errors:
+                raise BaseExceptionGroup(
+                    "restore failed and conservative cleanup was incomplete",
+                    [error, *cleanup_errors],
+                )
             raise
         finally:
             for candidate in (
@@ -328,7 +379,6 @@ def _restore(
                 staged_path.with_suffix(".verified"),
             ):
                 candidate.unlink(missing_ok=True)
-
 
 def _validate_authorization_shape(
     store: KeeperStore,
@@ -342,9 +392,13 @@ def _validate_authorization_shape(
     now = datetime.now(UTC)
     if request.backup_sha256 != sha256_file(backup):
         raise PermissionError("restore backup identity changed after authorization")
+    _validate_artifact_identity(backup, request)
     if (
         request.schema_version != RESTORE_SCHEMA_VERSION
         or len(request.operation_id) != 32
+        or len(request.backup_operation_id) != 32
+        or request.backup_artifact_path
+        != os.path.normcase(str(backup.resolve()))
         or request.target_canonical_path
         != os.path.normcase(str(store.path.resolve()))
         or request.reason != reason.strip()
@@ -358,6 +412,31 @@ def _validate_authorization_shape(
         or authorization.confirmation.principal_sid != founder_identity
     ):
         raise PermissionError("restore authorization binding is invalid or stale")
+
+
+def _validate_artifact_identity(path: Path, request: RestoreRequest) -> None:
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute(
+            "SELECT r.database_id,r.recovery_epoch,w.generation,m.mode "
+            "FROM executive_recovery_state AS r "
+            "JOIN executive_write_state AS w ON w.singleton=r.singleton "
+            "JOIN executive_repository_mode AS m ON m.singleton=r.singleton "
+            "WHERE r.singleton=1"
+        ).fetchone()
+        if (
+            row is None
+            or row["mode"] != "PRODUCTION"
+            or row["database_id"] != request.source_database_id
+            or int(row["recovery_epoch"]) != request.source_recovery_epoch
+            or int(row["generation"]) != request.source_generation
+        ):
+            raise PermissionError("restore artifact identity or generation changed")
+    except sqlite3.DatabaseError as error:
+        raise RuntimeError("restore artifact identity is unreadable") from error
+    finally:
+        connection.close()
 
 
 def _validate_target_identity(
@@ -376,85 +455,556 @@ def _validate_target_identity(
         raise PermissionError("restore target recovery identity is stale")
 
 
-def _authority_reconciliation(
+def _begin_authority_fence(
     authority: ProductionAuthorityServiceClient | TestAuthorityServiceClient,
     diagnostics: dict[str, Any],
     request: RestoreRequest,
+    authorization_digest: str,
 ) -> dict[str, Any]:
-    result = authority.reconcile_executive_restore(
+    result = authority.begin_executive_restore_fence(
         restore_operation_id=request.operation_id,
+        backup_operation_id=request.backup_operation_id,
+        backup_artifact_path=request.backup_artifact_path,
         backup_sha256=request.backup_sha256,
         source_database_id=request.source_database_id,
         source_recovery_epoch=request.source_recovery_epoch,
+        source_generation=request.source_generation,
         target_database_id=request.target_database_id,
         target_recovery_epoch=request.target_recovery_epoch,
         target_generation=request.target_generation,
         project_scope=list(request.project_scope),
+        authorization_digest=authorization_digest,
     )
-    receipt = result.get("reconciliation")
+    fence = result.get("fence")
     fields = {
         "schema_version",
         "kind",
         "restore_operation_id",
+        "backup_operation_id",
+        "backup_artifact_path",
         "backup_sha256",
         "source_database_id",
         "source_recovery_epoch",
+        "source_generation",
         "target_database_id",
         "target_recovery_epoch",
         "target_generation",
         "project_scope",
-        "protocol_version",
-        "service_key_id",
-        "service_key_version",
+        "authorization_digest",
+        "fence_id",
         "authorized_client_sid",
         "attempts",
         "launch_authorizations",
+        "project_versions",
         "state_digest",
-        "reconciled_at",
+        "version_digest",
+        "issued_at",
+        "expires_at",
+        "protocol_version",
+        "service_key_id",
+        "service_key_version",
+        "authority_schema_version",
+        "authority_key_id",
+        "authenticated_writer_proof",
+    }
+    state = {
+        "attempts": fence.get("attempts") if isinstance(fence, dict) else None,
+        "launch_authorizations": (
+            fence.get("launch_authorizations")
+            if isinstance(fence, dict)
+            else None
+        ),
+    }
+    if (
+        not isinstance(fence, dict)
+        or set(fence) != fields
+        or fence.get("schema_version") != AUTHORITY_RECONCILIATION_SCHEMA_VERSION
+        or fence.get("kind") != AUTHORITY_FENCE_PURPOSE
+        or fence.get("restore_operation_id") != request.operation_id
+        or fence.get("backup_operation_id") != request.backup_operation_id
+        or fence.get("backup_artifact_path") != request.backup_artifact_path
+        or fence.get("backup_sha256") != request.backup_sha256
+        or fence.get("source_database_id") != request.source_database_id
+        or fence.get("source_recovery_epoch") != request.source_recovery_epoch
+        or fence.get("source_generation") != request.source_generation
+        or fence.get("target_database_id") != request.target_database_id
+        or fence.get("target_recovery_epoch") != request.target_recovery_epoch
+        or fence.get("target_generation") != request.target_generation
+        or fence.get("project_scope") != list(request.project_scope)
+        or fence.get("authorization_digest") != authorization_digest
+        or fence.get("protocol_version") != PROTOCOL_VERSION
+        or fence.get("service_key_id") != diagnostics.get("service_key_id")
+        or fence.get("service_key_version")
+        != diagnostics.get("service_key_version")
+        or fence.get("authorized_client_sid") != diagnostics.get("client_sid")
+        or not isinstance(fence.get("fence_id"), str)
+        or not isinstance(fence.get("attempts"), list)
+        or not isinstance(fence.get("launch_authorizations"), list)
+        or not isinstance(fence.get("project_versions"), dict)
+        or fence.get("state_digest") != _digest(state)
+        or fence.get("version_digest") != _digest(fence.get("project_versions"))
+        or datetime.fromisoformat(str(fence.get("issued_at"))) > datetime.now(UTC)
+        or datetime.fromisoformat(str(fence.get("expires_at"))) <= datetime.now(UTC)
+        or not authority.verify(AUTHORITY_FENCE_PURPOSE, fence)
+    ):
+        raise PermissionError("Authority restore fence evidence is invalid")
+    return fence
+
+
+def _confirm_authority_fence(
+    authority: ProductionAuthorityServiceClient | TestAuthorityServiceClient,
+    diagnostics: dict[str, Any],
+    request: RestoreRequest,
+    fence: dict[str, Any],
+) -> dict[str, Any]:
+    result = authority.confirm_executive_restore_fence(
+        str(fence["fence_id"]), request.operation_id
+    )
+    confirmation = result.get("confirmation")
+    fields = {
+        "schema_version",
+        "kind",
+        "protocol_version",
+        "service_key_id",
+        "fence_id",
+        "restore_operation_id",
+        "authorized_client_sid",
+        "state_digest",
+        "version_digest",
+        "authorization_digest",
+        "backup_sha256",
+        "project_scope",
+        "issued_at",
+        "expires_at",
+        "confirmed_at",
+        "service_key_version",
         "authority_schema_version",
         "authority_key_id",
         "authenticated_writer_proof",
     }
     if (
-        not isinstance(receipt, dict)
-        or set(receipt) != fields
-        or receipt.get("schema_version")
+        not isinstance(confirmation, dict)
+        or set(confirmation) != fields
+        or confirmation.get("schema_version")
         != AUTHORITY_RECONCILIATION_SCHEMA_VERSION
-        or receipt.get("kind") != AUTHORITY_RECONCILIATION_PURPOSE
-        or receipt.get("restore_operation_id") != request.operation_id
-        or receipt.get("backup_sha256") != request.backup_sha256
-        or receipt.get("source_database_id") != request.source_database_id
-        or receipt.get("source_recovery_epoch") != request.source_recovery_epoch
-        or receipt.get("target_database_id") != request.target_database_id
-        or receipt.get("target_recovery_epoch") != request.target_recovery_epoch
-        or receipt.get("target_generation") != request.target_generation
-        or receipt.get("project_scope") != list(request.project_scope)
-        or receipt.get("protocol_version") != PROTOCOL_VERSION
-        or receipt.get("service_key_id") != diagnostics.get("service_key_id")
-        or receipt.get("service_key_version")
+        or confirmation.get("kind") != AUTHORITY_FENCE_CONFIRMATION_PURPOSE
+        or confirmation.get("protocol_version") != PROTOCOL_VERSION
+        or confirmation.get("service_key_id") != diagnostics.get("service_key_id")
+        or confirmation.get("service_key_version")
         != diagnostics.get("service_key_version")
-        or receipt.get("authorized_client_sid") != diagnostics.get("client_sid")
-        or not isinstance(receipt.get("attempts"), list)
-        or not isinstance(receipt.get("launch_authorizations"), list)
-        or receipt.get("state_digest")
-        != _digest(
-            {
-                "attempts": receipt.get("attempts"),
-                "launch_authorizations": receipt.get("launch_authorizations"),
-            }
-        )
-        or datetime.fromisoformat(str(receipt.get("reconciled_at")))
+        or confirmation.get("authorized_client_sid")
+        != diagnostics.get("client_sid")
+        or confirmation.get("fence_id") != fence.get("fence_id")
+        or confirmation.get("restore_operation_id") != request.operation_id
+        or confirmation.get("state_digest") != fence.get("state_digest")
+        or confirmation.get("version_digest") != fence.get("version_digest")
+        or confirmation.get("authorization_digest")
+        != fence.get("authorization_digest")
+        or confirmation.get("backup_sha256") != request.backup_sha256
+        or confirmation.get("project_scope") != list(request.project_scope)
+        or confirmation.get("issued_at") != fence.get("issued_at")
+        or confirmation.get("expires_at") != fence.get("expires_at")
+        or datetime.fromisoformat(str(confirmation.get("confirmed_at")))
         > datetime.now(UTC)
-        or not authority.verify(AUTHORITY_RECONCILIATION_PURPOSE, receipt)
+        or datetime.fromisoformat(str(confirmation.get("expires_at")))
+        <= datetime.now(UTC)
+        or not authority.verify(
+            AUTHORITY_FENCE_CONFIRMATION_PURPOSE, confirmation
+        )
     ):
-        raise PermissionError("Authority restore reconciliation evidence is invalid")
-    return receipt
+        raise PermissionError("Authority restore fence confirmation is invalid")
+    return confirmation
+
+
+def _finish_authority_fence(
+    authority: ProductionAuthorityServiceClient | TestAuthorityServiceClient,
+    diagnostics: dict[str, Any],
+    request: RestoreRequest,
+    fence: dict[str, Any],
+    state: str,
+) -> dict[str, Any]:
+    if state == "COMPLETED":
+        result = authority.complete_executive_restore_fence(
+            str(fence["fence_id"]), request.operation_id
+        )
+    elif state == "ABORTED":
+        result = authority.abort_executive_restore_fence(
+            str(fence["fence_id"]), request.operation_id
+        )
+    else:
+        raise ValueError("Authority restore fence outcome is invalid")
+    outcome = result.get("outcome")
+    fields = {
+        "schema_version",
+        "kind",
+        "protocol_version",
+        "service_key_id",
+        "authorized_client_sid",
+        "fence_id",
+        "restore_operation_id",
+        "state",
+        "finished_at",
+        "service_key_version",
+        "authority_schema_version",
+        "authority_key_id",
+        "authenticated_writer_proof",
+    }
+    if (
+        not isinstance(outcome, dict)
+        or set(outcome) != fields
+        or outcome.get("schema_version")
+        != AUTHORITY_RECONCILIATION_SCHEMA_VERSION
+        or outcome.get("kind") != AUTHORITY_FENCE_OUTCOME_PURPOSE
+        or outcome.get("protocol_version") != PROTOCOL_VERSION
+        or outcome.get("service_key_id") != diagnostics.get("service_key_id")
+        or outcome.get("service_key_version")
+        != diagnostics.get("service_key_version")
+        or outcome.get("authorized_client_sid") != diagnostics.get("client_sid")
+        or outcome.get("fence_id") != fence.get("fence_id")
+        or outcome.get("restore_operation_id") != request.operation_id
+        or outcome.get("state") != state
+        or not authority.verify(AUTHORITY_FENCE_OUTCOME_PURPOSE, outcome)
+    ):
+        raise PermissionError("Authority restore fence outcome is invalid")
+    return outcome
+
+def _capture_live_safety_ledger(
+    connection: sqlite3.Connection, request: RestoreRequest
+) -> dict[str, Any]:
+    return _read_safety_ledger(connection, set(request.project_scope))
+
+
+def _read_safety_ledger(
+    connection: sqlite3.Connection, project_scope: set[str]
+) -> dict[str, Any]:
+    consumptions = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT approval_id,project_id,charter_id,charter_revision,"
+            "action_id,task_id,consumed_at "
+            "FROM executive_approval_consumptions ORDER BY approval_id"
+        ).fetchall()
+        if row["project_id"] in project_scope
+    ]
+    budgets = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT reservation_id,project_id,charter_id,charter_revision,"
+            "approval_id,action_id,task_id,amount_minor,currency,state,reserved_at "
+            "FROM executive_budget_reservations ORDER BY reservation_id"
+        ).fetchall()
+        if row["project_id"] in project_scope
+    ]
+    required_approvals = {
+        str(item["approval_id"]) for item in [*consumptions, *budgets]
+    }
+    approvals: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    for table, destination in (
+        ("executive_approvals", approvals),
+        ("executive_execution_attempts", attempts),
+    ):
+        rows = connection.execute(
+            f'SELECT id,schema_version,created_at,updated_at,payload,payload_hash '
+            f'FROM "{table}" ORDER BY id'
+        ).fetchall()
+        for row in rows:
+            serialized = str(row["payload"])
+            if _sha256(serialized.encode("utf-8")) != row["payload_hash"]:
+                raise RuntimeError(f"{table} safety record integrity failed")
+            payload = json.loads(serialized)
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{table} safety record is malformed")
+            if payload.get("project_id") not in project_scope:
+                continue
+            if table == "executive_approvals":
+                if (
+                    row["id"] not in required_approvals
+                    and payload.get("consumed_at") is None
+                    and payload.get("revoked_at") is None
+                ):
+                    continue
+            elif (
+                payload.get("approval_id") not in required_approvals
+                and payload.get("budget_reservation_id")
+                not in {item["reservation_id"] for item in budgets}
+            ):
+                continue
+            destination.append(
+                {
+                    "id": str(row["id"]),
+                    "schema_version": int(row["schema_version"]),
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                    "payload": payload,
+                    "payload_hash": str(row["payload_hash"]),
+                }
+            )
+    approval_by_id = {item["id"]: item["payload"] for item in approvals}
+    for consumption in consumptions:
+        approval = approval_by_id.get(consumption["approval_id"])
+        if (
+            approval is None
+            or approval.get("kind") != "ONE_TIME"
+            or approval.get("consumed_at") is None
+            or approval.get("project_id") != consumption["project_id"]
+            or approval.get("charter_id") != consumption["charter_id"]
+            or approval.get("charter_revision")
+            != consumption["charter_revision"]
+        ):
+            raise PermissionError("live approval consumption safety ledger is ambiguous")
+    for budget in budgets:
+        approval = approval_by_id.get(budget["approval_id"])
+        if (
+            approval is None
+            or approval.get("project_id") != budget["project_id"]
+            or approval.get("charter_id") != budget["charter_id"]
+            or approval.get("charter_revision") != budget["charter_revision"]
+            or budget["state"] not in {"RESERVED", "CROSSED", "RELEASED"}
+        ):
+            raise PermissionError("live budget safety ledger is ambiguous")
+    value: dict[str, Any] = {
+        "project_scope": sorted(project_scope),
+        "approvals": approvals,
+        "consumptions": consumptions,
+        "budgets": budgets,
+        "attempt_bindings": attempts,
+    }
+    value["digest"] = _digest(value)
+    return value
+
+
+def _merge_live_safety_ledger(
+    connection: sqlite3.Connection, live: dict[str, Any]
+) -> dict[str, Any]:
+    unsigned = {key: value for key, value in live.items() if key != "digest"}
+    if live.get("digest") != _digest(unsigned):
+        raise PermissionError("live Executive safety ledger digest is invalid")
+    scope_value = live.get("project_scope")
+    approvals = live.get("approvals")
+    consumptions = live.get("consumptions")
+    budgets = live.get("budgets")
+    attempts = live.get("attempt_bindings")
+    if (
+        not isinstance(scope_value, list)
+        or not isinstance(approvals, list)
+        or not isinstance(consumptions, list)
+        or not isinstance(budgets, list)
+        or not isinstance(attempts, list)
+    ):
+        raise PermissionError("live Executive safety ledger is malformed")
+    try:
+        for approval_row in approvals:
+            if not isinstance(approval_row, dict):
+                raise PermissionError("live approval safety row is malformed")
+            _merge_approval_safety(connection, approval_row)
+        for consumption in consumptions:
+            if not isinstance(consumption, dict):
+                raise PermissionError("live approval consumption is malformed")
+            existing = connection.execute(
+                "SELECT project_id,charter_id,charter_revision,action_id,task_id,"
+                "consumed_at FROM executive_approval_consumptions "
+                "WHERE approval_id=?",
+                (consumption["approval_id"],),
+            ).fetchone()
+            expected = tuple(
+                consumption[key]
+                for key in (
+                    "project_id",
+                    "charter_id",
+                    "charter_revision",
+                    "action_id",
+                    "task_id",
+                    "consumed_at",
+                )
+            )
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO executive_approval_consumptions "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (consumption["approval_id"], *expected),
+                )
+            elif tuple(existing)[:5] != expected[:5]:
+                raise PermissionError(
+                    "approval consumption conflicts with restored safety state"
+                )
+            elif existing["consumed_at"] != consumption["consumed_at"]:
+                connection.execute(
+                    "UPDATE executive_approval_consumptions SET consumed_at=? "
+                    "WHERE approval_id=?",
+                    (consumption["consumed_at"], consumption["approval_id"]),
+                )
+        for budget in budgets:
+            if not isinstance(budget, dict):
+                raise PermissionError("live budget reservation is malformed")
+            _merge_budget_safety(connection, budget)
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                raise PermissionError("live attempt safety binding is malformed")
+            staged = _entity(
+                connection, "executive_execution_attempts", str(attempt["id"])
+            )
+            live_payload = attempt.get("payload")
+            if not isinstance(live_payload, dict):
+                raise PermissionError("live attempt safety payload is malformed")
+            if staged is None:
+                for table, field in (
+                    ("executive_projects", "project_id"),
+                    ("project_charters", "charter_id"),
+                    ("executive_tasks", "task_id"),
+                ):
+                    parent_id = live_payload.get(field)
+                    if not isinstance(parent_id, str) or _entity(
+                        connection, table, parent_id
+                    ) is None:
+                        raise PermissionError(
+                            "restored state omits a live safety-attempt parent"
+                        )
+                serialized = _serialized(live_payload)
+                connection.execute(
+                    'INSERT INTO "executive_execution_attempts" VALUES(?,?,?,?,?,?)',
+                    (
+                        str(attempt["id"]),
+                        int(attempt["schema_version"]),
+                        str(attempt["created_at"]),
+                        str(attempt["updated_at"]),
+                        serialized,
+                        _sha256(serialized.encode("utf-8")),
+                    ),
+                )
+                staged = live_payload
+            for field in (
+                "project_id",
+                "charter_id",
+                "charter_revision",
+                "task_id",
+                "action_id",
+                "approval_id",
+                "budget_reservation_id",
+                "authority_attempt_id",
+            ):
+                if staged.get(field) != live_payload.get(field):
+                    raise PermissionError(
+                        "execution attempt conflicts with live safety binding"
+                    )
+    except sqlite3.IntegrityError as error:
+        raise PermissionError(
+            "live Executive safety ledger cannot be merged unambiguously"
+        ) from error
+    merged = _read_safety_ledger(connection, set(scope_value))
+    return {
+        "captured_digest": live["digest"],
+        "merged_digest": merged["digest"],
+        "approval_count": len(merged["approvals"]),
+        "consumption_count": len(merged["consumptions"]),
+        "budget_count": len(merged["budgets"]),
+        "attempt_binding_count": len(merged["attempt_bindings"]),
+        "approval_ids": sorted(item["id"] for item in merged["approvals"]),
+        "consumption_ids": sorted(
+            item["approval_id"] for item in merged["consumptions"]
+        ),
+        "budget_ids": sorted(
+            item["reservation_id"] for item in merged["budgets"]
+        ),
+        "attempt_ids": sorted(
+            item["id"] for item in merged["attempt_bindings"]
+        ),
+    }
+
+
+def _merge_approval_safety(
+    connection: sqlite3.Connection, live_row: dict[str, Any]
+) -> None:
+    identifier = str(live_row["id"])
+    live_payload = live_row.get("payload")
+    if not isinstance(live_payload, dict):
+        raise PermissionError("live approval safety payload is malformed")
+    project = _entity(connection, "executive_projects", str(live_payload["project_id"]))
+    charter = _entity(connection, "project_charters", str(live_payload["charter_id"]))
+    if project is None or charter is None:
+        raise PermissionError("restored state omits an approval safety parent")
+    row = connection.execute(
+        'SELECT schema_version,created_at,payload FROM "executive_approvals" '
+        "WHERE id=?",
+        (identifier,),
+    ).fetchone()
+    if row is None:
+        serialized = _serialized(live_payload)
+        connection.execute(
+            'INSERT INTO "executive_approvals" VALUES(?,?,?,?,?,?)',
+            (
+                identifier,
+                live_row["schema_version"],
+                live_row["created_at"],
+                live_row["updated_at"],
+                serialized,
+                _sha256(serialized.encode("utf-8")),
+            ),
+        )
+        return
+    staged_payload = json.loads(str(row["payload"]))
+    if not isinstance(staged_payload, dict):
+        raise PermissionError("restored approval safety payload is malformed")
+    monotonic = {"consumed_at", "revoked_at"}
+    if (
+        int(row["schema_version"]) != int(live_row["schema_version"])
+        or str(row["created_at"]) != str(live_row["created_at"])
+        or {key: value for key, value in staged_payload.items() if key not in monotonic}
+        != {key: value for key, value in live_payload.items() if key not in monotonic}
+    ):
+        raise PermissionError("approval safety binding conflicts with restored state")
+    merged = dict(staged_payload)
+    for field in monotonic:
+        if live_payload.get(field) is not None:
+            merged[field] = live_payload[field]
+    _update_entity(connection, "executive_approvals", identifier, merged)
+
+
+def _merge_budget_safety(
+    connection: sqlite3.Connection, live: dict[str, Any]
+) -> None:
+    fields = (
+        "project_id",
+        "charter_id",
+        "charter_revision",
+        "approval_id",
+        "action_id",
+        "task_id",
+        "amount_minor",
+        "currency",
+        "reserved_at",
+    )
+    row = connection.execute(
+        "SELECT project_id,charter_id,charter_revision,approval_id,action_id,"
+        "task_id,amount_minor,currency,state,reserved_at "
+        "FROM executive_budget_reservations WHERE reservation_id=?",
+        (live["reservation_id"],),
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO executive_budget_reservations VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                live["reservation_id"],
+                *(live[field] for field in fields[:-1]),
+                live["state"],
+                live["reserved_at"],
+            ),
+        )
+        return
+    if tuple(row[field] for field in fields) != tuple(live[field] for field in fields):
+        raise PermissionError("budget safety binding conflicts with restored state")
+    state = "CROSSED" if "CROSSED" in {row["state"], live["state"]} else live["state"]
+    connection.execute(
+        "UPDATE executive_budget_reservations SET state=? WHERE reservation_id=?",
+        (state, live["reservation_id"]),
+    )
 
 
 def _reconcile_staged(
     path: Path,
     request: RestoreRequest,
     receipt: dict[str, Any],
+    live_safety: dict[str, Any],
 ) -> dict[str, Any]:
     checked_attempts: list[dict[str, Any]] = []
     with _connection(path) as connection:
@@ -463,6 +1013,7 @@ def _reconcile_staged(
         projects = _project_scope(connection)
         if not projects.issubset(set(request.project_scope)):
             raise PermissionError("restored project scope exceeds Founder authorization")
+        safety_ledger = _merge_live_safety_ledger(connection, live_safety)
         launch_authorizations = _authority_launch_authorizations(receipt, request)
         for authority_attempt in receipt["attempts"]:
             if not isinstance(authority_attempt, dict):
@@ -544,8 +1095,8 @@ def _reconcile_staged(
                         "state": "UNCERTAIN",
                         "completion_digest": authority_digest,
                         "authority_terminal_state": service_state,
-                        "authority_reconciled_at": receipt["reconciled_at"],
-                        "updated_at": receipt["reconciled_at"],
+                        "authority_reconciled_at": receipt["issued_at"],
+                        "updated_at": receipt["issued_at"],
                     }
                     _update_entity(
                         connection,
@@ -557,7 +1108,7 @@ def _reconcile_staged(
                         connection,
                         str(authority_attempt["task_id"]),
                         attempt_id,
-                        receipt["reconciled_at"],
+                        receipt["issued_at"],
                     )
             checked_attempts.append(
                 {
@@ -570,6 +1121,7 @@ def _reconcile_staged(
             "attempts": checked_attempts,
             "project_scope": list(request.project_scope),
             "launch_authorization_count": len(receipt["launch_authorizations"]),
+            "live_safety_ledger": safety_ledger,
         }
 
 
@@ -685,8 +1237,10 @@ def _validate_source_identity(
     connection: sqlite3.Connection, request: RestoreRequest
 ) -> None:
     row = connection.execute(
-        "SELECT database_id,recovery_epoch FROM executive_recovery_state "
-        "WHERE singleton=1"
+        "SELECT r.database_id,r.recovery_epoch,w.generation "
+        "FROM executive_recovery_state AS r "
+        "JOIN executive_write_state AS w ON w.singleton=r.singleton "
+        "WHERE r.singleton=1"
     ).fetchone()
     mode = connection.execute(
         "SELECT mode FROM executive_repository_mode WHERE singleton=1"
@@ -697,6 +1251,7 @@ def _validate_source_identity(
         or mode["mode"] != "PRODUCTION"
         or row["database_id"] != request.source_database_id
         or int(row["recovery_epoch"]) != request.source_recovery_epoch
+        or int(row["generation"]) != request.source_generation
     ):
         raise PermissionError("staged backup recovery identity is invalid")
 

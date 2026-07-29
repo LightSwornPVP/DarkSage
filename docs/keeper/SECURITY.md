@@ -83,31 +83,51 @@ failed creation rolls back both generation and consumption.
 
 ## Restore authorization and reconciliation
 
-Production restore does not accept callback success as authority. It verifies an
-exact Windows Founder confirmation whose signed challenge digest covers the restore
-operation ID, backup SHA-256 and source recovery identity, target database path, ID,
-epoch and generation, complete project scope, reason, and two-minute lifetime. A
-successful restore consumes the authorization identity in SQLite; replay and stale
-target identity fail closed. Production rejects all test proof, authenticator, and
-Authority-client concrete types.
+Production restore does not accept callback success as authority. Before requesting
+Founder confirmation, Keeper finalizes a unique logical SQLite artifact with the
+SQLite backup API, thereby incorporating committed WAL content, closes its handles,
+and validates integrity and foreign keys. The exact Windows Founder confirmation
+covers the restore and backup operation IDs, canonical artifact path and SHA-256,
+source database ID, recovery epoch and write generation, target path/identity/epoch/
+generation, complete project scope, reason, and two-minute lifetime. A successful
+restore consumes the authorization identity in SQLite; replay, artifact mutation,
+source-identity mismatch, and stale target identity fail closed. Production rejects
+all test proof, authenticator, and Authority-client concrete types.
 
-KeeperAuthority enumerates the complete current attempt and project-launch state for
-the authorized project scope and signs that snapshot with its service key. The
-Executive validates the protocol, service key, client SID, operation and persistence
-identities, snapshot digest, and signature twice: during staged reconciliation and
-immediately before replacement. Omitted or altered attempts, completions,
-cancellations, or revocations invalidate the proof. Executive-only approval
-consumption and budget reservations are checked locally against every Authority
-attempt and included in the durable reconciliation assessment. New terminal truth
-that has not yet completed normal artifact import is retained as non-retry-safe
-`UNCERTAIN` state.
+Before staging, the Executive captures the current project-scoped approval and budget
+safety ledger independently of the backup and Authority attempt list. One-time
+approval consumption, its timestamp and project/charter/action/task binding, crossed
+budget state, immutable amount/currency and binding, and related attempt identity are
+monotonic. They are merged into the staged database, with newer live facts winning;
+an ambiguous mismatch aborts. Preserved IDs and ledger digests are included in the
+durable restore reconciliation record, so restart retains the same replay and budget
+boundaries.
+
+KeeperAuthority atomically opens a signed, bounded project-scope fence containing the
+complete attempt and launch-authorization state plus monotonic project versions. The
+fence is bound to the Founder-authorization digest, artifact, source and target
+identities, service key, requesting SID, and restore operation. Queries remain
+available, but covered reservations, claims, starts, completion, cancellation, and
+launch revocation are blocked while the fence is active. The Executive validates and
+reconciles that snapshot, then obtains a signed compare-and-confirm with the same
+state/version digest immediately before replacement. Omitted or altered attempts,
+terminal results, cancellations, or revocations invalidate the proof. New terminal
+truth is retained as non-retry-safe `UNCERTAIN` state.
+
+The target exclusive lock and Authority fence remain held through the SQLite live
+replacement. The fence is completed only after replacement and integrity verification.
+Failure before replacement aborts the fence and preserves live business state and
+recovery epoch. The deterministic fence ID is recoverable from the durable restore
+operation ID even if the begin response is lost. An interrupted active fence blocks
+covered changes after expiry until an explicit operation-bound Authority recovery
+marks it `EXPIRED`; recovery never completes the restore. There is no unfenced third-snapshot fallback.
 
 Every supported database connection holds a shared OS advisory lock for its full
 transaction. Restore holds the exclusive form from initial identity validation
-through the SQLite replacement and records an in-database maintenance lease. This
+through replacement and records in-database maintenance and fence identity. This
 prevents an acknowledged supported write from being overwritten. A stale active
-lease blocks supported connections until explicit integrity- and generation-checked
-recovery. The lock file contains no authority or commit metadata.
+maintenance record blocks supported connections until explicit integrity- and
+generation-checked recovery. The lock file contains no authority or commit metadata.
 
 ## Authenticated lifecycle authority
 

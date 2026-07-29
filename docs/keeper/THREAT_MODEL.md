@@ -143,21 +143,34 @@ transactions, schema constraints, compare-and-swap updates, durable attempt IDs,
 unique bindings, one-use approvals, budget reservations, and restart
 reconciliation protect supported operation.
 
-There is no database-commit-then-lineage-file-append protocol. Backups are atomic
-SQLite snapshots outside the business transaction path. Restore requires a fresh,
-one-use, Windows-authenticated Founder proof bound to the exact backup, target
-database and generation, project scope, operation, reason, and lifetime. It stages
-and checks the backup, then validates a KeeperAuthority-signed complete project-scope
-snapshot twice before recording the reconciliation receipt and advancing the
-in-database recovery epoch. Arbitrary callbacks and test proofs are not production
-authority.
+There is no database-commit-then-lineage-file-append protocol. Backup uses SQLite
+snapshot semantics outside the business transaction path. Restore authorization is
+not taken over the mutable main database file: Keeper first creates and validates an
+immutable logical artifact that includes committed WAL state. The fresh one-use
+Windows-authenticated Founder proof binds its canonical path and SHA-256, database ID,
+recovery epoch, source write generation, backup and restore operation IDs, target
+identity/generation, project scope, reason, and lifetime. Artifact mutation or
+identity/generation drift fails closed. Arbitrary callbacks and test proofs are not
+production authority.
+
+Restore captures the complete current Executive approval/budget safety ledger before
+staging. One-time consumption, consumption timestamps and bindings, crossed budget
+state, immutable reservation scope/amount, and associated attempt bindings are
+monotonic across an older restore. Newer live facts are merged into the staged
+snapshot and conflicting bindings reject; preserved identities and digests are
+recorded durably.
 
 KeeperAuthority remains authoritative for provider attempts, launches,
-cancellation, revocation, and completion. Missing or conflicting Authority-linked
+cancellation, revocation, and completion. It opens a bounded signed project-scope
+fence containing the complete state and monotonic project versions. Covered lifecycle
+mutations are blocked while the fence is active. Restore reconciles the fenced state,
+obtains a signed digest/version confirmation immediately before replacement, keeps
+the fence through replacement, and completes it only after integrity verification.
+Expiry, interruption, or mismatch fails conservatively; explicit expired-fence
+recovery cannot complete the restore. Missing or conflicting Authority-linked
 Executive state rejects restore. Newer terminal Authority truth is durably
-represented as non-retry-safe uncertainty pending normal authenticated import;
-one-use approvals and crossed-launch budget reservations cannot disappear. Normal
-startup fails closed on genuine SQLite or foreign-key corruption.
+represented as non-retry-safe uncertainty pending normal authenticated import.
+Normal startup fails closed on genuine SQLite or foreign-key corruption.
 
 ## Supported concurrency
 

@@ -6,10 +6,10 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
-SERVICE_SCHEMA_VERSION = 4
+SERVICE_SCHEMA_VERSION = 5
 _EXPECTED_TABLES = {
     "attempts",
     "audit_log",
@@ -19,6 +19,8 @@ _EXPECTED_TABLES = {
     "service_meta",
     "launch_authorizations",
     "founder_capability_consumptions",
+    "authority_project_versions",
+    "restore_reconciliation_fences",
 }
 
 
@@ -121,6 +123,28 @@ class AuthorityStore:
                     UNIQUE(project_id, approval_digest),
                     UNIQUE(project_id, challenge_proof_digest)
                 );
+                CREATE TABLE IF NOT EXISTS authority_project_versions(
+                    project_id TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL CHECK(version>=0),
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS restore_reconciliation_fences(
+                    fence_id TEXT PRIMARY KEY,
+                    restore_operation_id TEXT NOT NULL UNIQUE,
+                    client_sid TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN
+                        ('ACTIVE','COMPLETED','ABORTED','EXPIRED')),
+                    project_scope TEXT NOT NULL,
+                    state_digest TEXT NOT NULL,
+                    version_digest TEXT NOT NULL,
+                    authorization_digest TEXT NOT NULL,
+                    backup_sha256 TEXT NOT NULL,
+                    issued_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS audit_log(
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id TEXT NOT NULL UNIQUE,
@@ -169,7 +193,7 @@ class AuthorityStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    UPDATE service_meta SET value='4' WHERE key='schema_version';
+                    UPDATE service_meta SET value='5' WHERE key='schema_version';
                     """
                 )
             elif int(row["value"]) == 2:
@@ -185,12 +209,12 @@ class AuthorityStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    UPDATE service_meta SET value='4' WHERE key='schema_version';
+                    UPDATE service_meta SET value='5' WHERE key='schema_version';
                     """
                 )
-            elif int(row["value"]) == 3:
+            elif int(row["value"]) in {3, 4}:
                 connection.execute(
-                    "UPDATE service_meta SET value='4' WHERE key='schema_version'"
+                    "UPDATE service_meta SET value='5' WHERE key='schema_version'"
                 )
             elif int(row["value"]) != SERVICE_SCHEMA_VERSION:
                 raise RuntimeError("authority service schema is incompatible")
@@ -311,6 +335,13 @@ class AuthorityStore:
         try:
             with self.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                project_id = (
+                    _payload_project_id(payload)
+                    if table in {"attempts", "launch_authorizations"}
+                    else None
+                )
+                if project_id is not None:
+                    self._assert_projects_unfenced(connection, {project_id})
                 if table == "registrations":
                     connection.execute(
                         "INSERT INTO registrations VALUES(?,?,?,?,?,?)",
@@ -362,6 +393,8 @@ class AuthorityStore:
                     )
                 else:
                     raise ValueError("unsupported authority table")
+                if project_id is not None:
+                    self._bump_project_version(connection, project_id)
         except sqlite3.IntegrityError as error:
             raise PermissionError(
                 f"authority {table} identity is already reserved"
@@ -395,6 +428,8 @@ class AuthorityStore:
         expected_state: str,
         state: str,
         payload: dict[str, Any],
+        *,
+        before_transition: Callable[[], None] | None = None,
     ) -> None:
         if table not in {
             "registrations", "qualifications", "attempts",
@@ -404,6 +439,32 @@ class AuthorityStore:
         serialized, digest = _serialize(payload)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            project_id: str | None = None
+            if table in {"attempts", "launch_authorizations"}:
+                current = connection.execute(
+                    f"SELECT payload,payload_hash FROM {table} WHERE id=?",
+                    (identifier,),
+                ).fetchone()
+                if current is None:
+                    raise PermissionError(
+                        f"authority {table} lifecycle transition was rejected"
+                    )
+                current_serialized = str(current["payload"])
+                if (
+                    hashlib.sha256(current_serialized.encode("utf-8")).hexdigest()
+                    != current["payload_hash"]
+                ):
+                    raise RuntimeError(f"authority {table} record integrity failed")
+                current_payload = json.loads(current_serialized)
+                if not isinstance(current_payload, dict):
+                    raise RuntimeError(f"authority {table} record is malformed")
+                project_id = _payload_project_id(current_payload)
+                replacement_project = payload.get("project_id")
+                if replacement_project is not None and replacement_project != project_id:
+                    raise PermissionError("Authority project identity cannot change")
+                self._assert_projects_unfenced(connection, {project_id})
+            if before_transition is not None:
+                before_transition()
             cursor = connection.execute(
                 f"UPDATE {table} SET state=?,payload=?,payload_hash=?,updated_at=? "
                 "WHERE id=? AND state=?",
@@ -413,6 +474,8 @@ class AuthorityStore:
                 raise PermissionError(
                     f"authority {table} lifecycle transition was rejected"
                 )
+            if project_id is not None:
+                self._bump_project_version(connection, project_id)
 
     def list_records(self, table: str) -> list[dict[str, Any]]:
         if table not in {
@@ -445,6 +508,8 @@ class AuthorityStore:
         timestamp = _now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            project_id = _payload_project_id(payload)
+            self._assert_projects_unfenced(connection, {project_id})
             row = connection.execute(
                 "SELECT state,generation,client_sid,payload,payload_hash "
                 "FROM launch_authorizations WHERE id=?",
@@ -536,6 +601,7 @@ class AuthorityStore:
                         serialized, digest, timestamp, timestamp,
                     ),
                 )
+                self._bump_project_version(connection, project_id)
             except sqlite3.IntegrityError as error:
                 raise PermissionError(
                     "Founder capability or approval identity was already used"
@@ -554,6 +620,8 @@ class AuthorityStore:
         canceled: list[str] = []
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            project_id = _payload_project_id(payload)
+            self._assert_projects_unfenced(connection, {project_id})
             cursor = connection.execute(
                 "UPDATE launch_authorizations SET state='REVOKED',payload=?,"
                 "payload_hash=?,updated_at=? WHERE id=? AND state='ACTIVE' "
@@ -582,6 +650,7 @@ class AuthorityStore:
                         (timestamp, row["id"], row["payload_hash"]),
                     )
                     canceled.append(str(row["id"]))
+            self._bump_project_version(connection, project_id)
         return tuple(canceled)
 
     def claim_attempt_with_launch_authority(
@@ -595,6 +664,8 @@ class AuthorityStore:
         serialized, digest = _serialize(claim)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            project_id = _payload_project_id(claim)
+            self._assert_projects_unfenced(connection, {project_id})
             authorization = connection.execute(
                 "SELECT state,generation,client_sid,payload FROM "
                 "launch_authorizations WHERE id=?",
@@ -621,6 +692,248 @@ class AuthorityStore:
             )
             if cursor.rowcount != 1:
                 raise PermissionError("provider launch is not reserved")
+            self._bump_project_version(connection, project_id)
+
+    def begin_restore_fence(
+        self,
+        fence_id: str,
+        identity: dict[str, Any],
+        client_sid: str,
+        issued_at: str,
+        expires_at: str,
+    ) -> dict[str, Any]:
+        scope_value = identity.get("project_scope")
+        if not isinstance(scope_value, list) or not all(
+            isinstance(item, str) and item for item in scope_value
+        ):
+            raise ValueError("Authority restore fence scope is invalid")
+        project_scope = set(scope_value)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_projects_unfenced(connection, project_scope)
+            snapshot = self._restore_snapshot(connection, project_scope)
+            payload = {
+                **identity,
+                "fence_id": fence_id,
+                "authorized_client_sid": client_sid,
+                **snapshot,
+                "issued_at": issued_at,
+                "expires_at": expires_at,
+            }
+            serialized, digest = _serialize(payload)
+            connection.execute(
+                "INSERT INTO restore_reconciliation_fences VALUES("
+                "?,?,?,'ACTIVE',?,?,?,?,?,?,?,?,?,?)",
+                (
+                    fence_id,
+                    identity["restore_operation_id"],
+                    client_sid,
+                    json.dumps(scope_value, separators=(",", ":")),
+                    snapshot["state_digest"],
+                    snapshot["version_digest"],
+                    identity["authorization_digest"],
+                    identity["backup_sha256"],
+                    issued_at,
+                    expires_at,
+                    issued_at,
+                    serialized,
+                    digest,
+                ),
+            )
+        return payload
+
+    def confirm_restore_fence(
+        self, fence_id: str, restore_operation_id: str, client_sid: str
+    ) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row, payload = self._active_fence(
+                connection, fence_id, restore_operation_id, client_sid
+            )
+            if datetime.fromisoformat(str(row["expires_at"])) <= datetime.now(UTC):
+                raise PermissionError("Authority restore fence expired")
+            scope = set(json.loads(str(row["project_scope"])))
+            snapshot = self._restore_snapshot(connection, scope)
+            if (
+                snapshot["state_digest"] != row["state_digest"]
+                or snapshot["version_digest"] != row["version_digest"]
+            ):
+                raise PermissionError("Authority changed during fenced restore")
+            return {
+                "fence_id": fence_id,
+                "restore_operation_id": restore_operation_id,
+                "authorized_client_sid": client_sid,
+                "state_digest": row["state_digest"],
+                "version_digest": row["version_digest"],
+                "authorization_digest": row["authorization_digest"],
+                "backup_sha256": row["backup_sha256"],
+                "project_scope": payload["project_scope"],
+                "issued_at": row["issued_at"],
+                "expires_at": row["expires_at"],
+                "confirmed_at": now,
+            }
+
+    def finish_restore_fence(
+        self,
+        fence_id: str,
+        restore_operation_id: str,
+        client_sid: str,
+        state: str,
+    ) -> dict[str, Any]:
+        if state not in {"COMPLETED", "ABORTED"}:
+            raise ValueError("Authority restore fence outcome is invalid")
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row, _payload = self._active_fence(
+                connection, fence_id, restore_operation_id, client_sid
+            )
+            if (
+                state == "COMPLETED"
+                and datetime.fromisoformat(str(row["expires_at"]))
+                <= datetime.now(UTC)
+            ):
+                raise PermissionError("Authority restore fence expired")
+            connection.execute(
+                "UPDATE restore_reconciliation_fences SET state=?,updated_at=? "
+                "WHERE fence_id=? AND state='ACTIVE'",
+                (state, now, fence_id),
+            )
+        return {
+            "fence_id": fence_id,
+            "restore_operation_id": restore_operation_id,
+            "state": state,
+            "finished_at": now,
+        }
+
+    def recover_restore_fence(
+        self, fence_id: str, restore_operation_id: str, client_sid: str
+    ) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row, _payload = self._active_fence(
+                connection, fence_id, restore_operation_id, client_sid
+            )
+            if datetime.fromisoformat(str(row["expires_at"])) > datetime.now(UTC):
+                raise PermissionError("active Authority restore fence has not expired")
+            connection.execute(
+                "UPDATE restore_reconciliation_fences SET state='EXPIRED',updated_at=? "
+                "WHERE fence_id=? AND state='ACTIVE'",
+                (now, fence_id),
+            )
+        return {
+            "fence_id": fence_id,
+            "restore_operation_id": restore_operation_id,
+            "state": "EXPIRED",
+            "recovered_at": now,
+        }
+
+    @staticmethod
+    def _active_fence(
+        connection: sqlite3.Connection,
+        fence_id: str,
+        restore_operation_id: str,
+        client_sid: str,
+    ) -> tuple[sqlite3.Row, dict[str, Any]]:
+        row = connection.execute(
+            "SELECT * FROM restore_reconciliation_fences "
+            "WHERE fence_id=? AND restore_operation_id=? AND client_sid=? "
+            "AND state='ACTIVE'",
+            (fence_id, restore_operation_id, client_sid),
+        ).fetchone()
+        if row is None:
+            raise PermissionError("Authority restore fence is unavailable")
+        serialized = str(row["payload"])
+        if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != row["payload_hash"]:
+            raise RuntimeError("Authority restore fence integrity failed")
+        payload = json.loads(serialized)
+        if not isinstance(payload, dict):
+            raise RuntimeError("Authority restore fence is malformed")
+        return row, payload
+
+    @staticmethod
+    def _restore_snapshot(
+        connection: sqlite3.Connection, project_scope: set[str]
+    ) -> dict[str, Any]:
+        attempts = AuthorityStore._records_in_connection(
+            connection, "attempts", project_scope
+        )
+        authorizations = AuthorityStore._records_in_connection(
+            connection, "launch_authorizations", project_scope
+        )
+        versions = {
+            project_id: (
+                int(row["version"])
+                if (
+                    row := connection.execute(
+                        "SELECT version FROM authority_project_versions "
+                        "WHERE project_id=?",
+                        (project_id,),
+                    ).fetchone()
+                ) is not None
+                else 0
+            )
+            for project_id in sorted(project_scope)
+        }
+        state = {
+            "attempts": attempts,
+            "launch_authorizations": authorizations,
+        }
+        return {
+            **state,
+            "project_versions": versions,
+            "state_digest": _canonical_digest(state),
+            "version_digest": _canonical_digest(versions),
+        }
+
+    @staticmethod
+    def _records_in_connection(
+        connection: sqlite3.Connection, table: str, project_scope: set[str]
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            f"SELECT id,state,payload,payload_hash FROM {table} ORDER BY id"
+        ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            serialized = str(row["payload"])
+            if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != row["payload_hash"]:
+                raise RuntimeError(f"authority {table} record integrity failed")
+            value = json.loads(serialized)
+            if not isinstance(value, dict):
+                raise RuntimeError(f"authority {table} record is malformed")
+            if value.get("project_id") in project_scope:
+                records.append({**value, "service_state": str(row["state"])})
+        return records
+
+    @staticmethod
+    def _assert_projects_unfenced(
+        connection: sqlite3.Connection, project_ids: set[str]
+    ) -> None:
+        if not project_ids:
+            return
+        for row in connection.execute(
+            "SELECT project_scope FROM restore_reconciliation_fences "
+            "WHERE state='ACTIVE'"
+        ).fetchall():
+            scope = json.loads(str(row["project_scope"]))
+            if isinstance(scope, list) and project_ids.intersection(scope):
+                raise PermissionError(
+                    "Authority project state is fenced for Executive restore"
+                )
+
+    @staticmethod
+    def _bump_project_version(
+        connection: sqlite3.Connection, project_id: str
+    ) -> None:
+        timestamp = _now()
+        connection.execute(
+            "INSERT INTO authority_project_versions VALUES(?,1,?) "
+            "ON CONFLICT(project_id) DO UPDATE SET "
+            "version=version+1,updated_at=excluded.updated_at",
+            (project_id, timestamp),
+        )
 
     def audit(
         self,
@@ -704,6 +1017,19 @@ class AuthorityStore:
         with self.connect() as source, sqlite3.connect(destination) as target:
             source.backup(target)
         return destination
+
+
+def _payload_project_id(payload: dict[str, Any]) -> str:
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        raise ValueError("Authority project identity is invalid")
+    return project_id
+
+
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _serialize(payload: dict[str, Any]) -> tuple[str, str]:

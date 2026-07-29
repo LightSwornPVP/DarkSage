@@ -24,13 +24,18 @@
 - Cross-process reroute reservation and storage races are covered directly. A
   dedicated separate-process test driving complete `WorkflowCoordinator.retry()`
   winner launch and loser exception handling remains deferred.
-- An interrupted restore that leaves an `ACTIVE` maintenance record intentionally
-  blocks supported database access until the Founder runs exact-operation,
-  integrity- and generation-checked stale-maintenance recovery. There is no automatic
-  lease expiry.
-- The signed restore reconciliation is one project-scoped Authority response and is
+- An interrupted restore that leaves an Executive `ACTIVE` maintenance record
+  intentionally blocks supported database access until the Founder runs
+  exact-operation, integrity- and generation-checked recovery. An interrupted
+  KeeperAuthority fence separately blocks covered project mutations until its bounded
+  expiry and explicit operation-bound recovery; neither recovery path completes the
+  restore automatically.
+- The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
-  attempt histories require a future paged signed-snapshot protocol.
+  attempt histories require a future paged signed-snapshot/fence protocol.
+- This source candidate requires KeeperAuthority protocol 3 and schema 5. The repair
+  does not install or restart the Windows service; the currently installed older
+  service must be upgraded only by a separately authorized installation/release step.
 - Keeper 1.0 is a personal-use, single-Founder product. It does not claim to
   resist arbitrary code already executing in its trusted Executive interpreter,
   a malicious local administrator, manual same-user database replacement, or

@@ -68,7 +68,7 @@ def test_schema_two_partial_launch_migration_is_restart_safe(
             "WHERE type='table' AND name='launch_authorizations'"
         ).fetchone()
     assert schema_version is not None
-    assert schema_version["value"] == "4"
+    assert schema_version["value"] == "5"
     assert launch_table is not None
 
 
