@@ -105,6 +105,16 @@ class EvidenceState(StrEnum):
     REJECTED = "REJECTED"
 
 
+class EvidenceReferenceKind(StrEnum):
+    LOCAL_PROTECTED_ARTIFACT = "LOCAL_PROTECTED_ARTIFACT"
+    REMOTE_STRUCTURED_EVIDENCE = "REMOTE_STRUCTURED_EVIDENCE"
+
+
+class EvidenceReferenceState(StrEnum):
+    VALIDATED = "VALIDATED"
+    REJECTED = "REJECTED"
+
+
 class ReservationMode(StrEnum):
     READ_ONLY = "READ_ONLY"
     WRITE = "WRITE"
@@ -135,6 +145,7 @@ class DelegatedModeState(StrEnum):
 
 
 class PresentationMode(StrEnum):
+    HIDDEN = "HIDDEN"
     COMPACT = "COMPACT"
     CONVERSATION = "CONVERSATION"
     ANALYST = "ANALYST"

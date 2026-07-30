@@ -43,7 +43,7 @@ from keeper.pass_b.models import (
 
 
 R = TypeVar("R", bound=PassBRecord)
-PASS_B_SCHEMA_VERSION = 3
+PASS_B_SCHEMA_VERSION = 4
 
 
 class PassBRepository:
@@ -170,6 +170,13 @@ class PassBRepository:
                 connection.execute(
                     "INSERT INTO pass_b_schema_migrations(version,applied_at) "
                     "VALUES(3,?)",
+                    (_now(),),
+                )
+
+            if current < 4:
+                connection.execute(
+                    "INSERT INTO pass_b_schema_migrations(version,applied_at) "
+                    "VALUES(4,?)",
                     (_now(),),
                 )
 

@@ -16,6 +16,7 @@ from keeper.pass_b.models import (
     ConversationMessageRecord,
     DelegatedModeGrantRecord,
     EvidenceBundleRecord,
+    EvidenceReferenceRecord,
     PauseReasonRecord,
     PresentationStateRecord,
     ProviderAccountRecord,
@@ -78,6 +79,9 @@ class ControlRoomService:
         evidence = self.repository.list(
             EvidenceBundleRecord, project_id=project_id
         )
+        evidence_references = self.repository.list(
+            EvidenceReferenceRecord, project_id=project_id
+        )
         workspaces = self.repository.list(
             WorkspaceReservationRecord, project_id=project_id
         )
@@ -104,6 +108,11 @@ class ControlRoomService:
             for item in reconcile_delegated_grants(
                 self.repository, project_status=self.project_status
             )
+            if project_id is None or item.project_id == project_id
+        ]
+        grant_history = [
+            item
+            for item in self.repository.list(DelegatedModeGrantRecord)
             if project_id is None or item.project_id == project_id
         ]
         uncertain = [
@@ -180,6 +189,9 @@ class ControlRoomService:
                 "recent_evidence": [
                     item.to_dict() for item in evidence[-10:]
                 ],
+                "recent_evidence_references": [
+                    item.to_dict() for item in evidence_references[-10:]
+                ],
                 "recent_reviews": [
                     item.to_dict() for item in reviews[-10:]
                 ],
@@ -214,6 +226,7 @@ class ControlRoomService:
                 ],
                 "evidence": [item.to_dict() for item in evidence],
                 "reviews": [item.to_dict() for item in reviews],
+                "evidence_references": [item.to_dict() for item in evidence_references],
             },
             providers={
                 "providers": [item.to_dict() for item in providers],
@@ -225,6 +238,9 @@ class ControlRoomService:
                 "authority": self.authority_health(),
                 "delegated_mode": [
                     item.to_dict() for item in active_delegation
+                ],
+                "delegated_mode_history": [
+                    item.to_dict() for item in grant_history
                 ],
                 "uncertain_assignments": [
                     item.to_dict() for item in uncertain

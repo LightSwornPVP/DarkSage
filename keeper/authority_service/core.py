@@ -1265,22 +1265,35 @@ class AuthorityServiceCore:
             raise PermissionError("provider attempt cannot be cancelled")
         if value.get("authorized_client_sid") != client_sid:
             raise PermissionError("provider attempt belongs to another client")
-        cancel_provider = getattr(self.observer, "cancel_provider", None)
-
-        def cancel_effect() -> None:
-            if callable(cancel_provider):
-                cancel_provider(attempt_id)
-
-        cancelled = {**value, "cancelled_at": _now()}
+        cancellation_intent_id = f"cancellation-intent:{uuid.uuid4().hex}"
+        claimed = {
+            **value,
+            "cancellation_intent_id": cancellation_intent_id,
+            "cancellation_requested_at": _now(),
+        }
         self.store.transition(
             "attempts",
             attempt_id,
             state,
+            "CANCELLATION_CLAIMED",
+            claimed,
+        )
+        cancel_provider = getattr(self.observer, "cancel_provider", None)
+        if callable(cancel_provider):
+            cancel_provider(attempt_id)
+        cancelled = {**claimed, "cancelled_at": _now()}
+        self.store.transition(
+            "attempts",
+            attempt_id,
+            "CANCELLATION_CLAIMED",
             "CANCELLED",
             cancelled,
-            before_transition=cancel_effect,
         )
-        return {"attempt_id": attempt_id, "state": "CANCELLED"}
+        return {
+            "attempt_id": attempt_id,
+            "state": "CANCELLED",
+            "cancellation_intent_id": cancellation_intent_id,
+        }
 
     def _transition_attempt(
         self,

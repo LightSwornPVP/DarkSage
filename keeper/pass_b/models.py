@@ -11,6 +11,8 @@ from keeper.pass_b.enums import (
     AttemptState,
     CostMode,
     DelegatedModeState,
+    EvidenceReferenceKind,
+    EvidenceReferenceState,
     EvidenceState,
     HealthState,
     PauseCode,
@@ -443,6 +445,58 @@ class EvidenceBundleRecord(PassBRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceReferenceRecord(PassBRecord):
+    evidence_reference_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    workflow_id: str
+    work_item_id: str
+    assignment_id: str
+    source_kind: str
+    source_identity: str
+    canonical_source_path: str | None
+    source_evidence_bundle_id: str | None
+    sha256: str
+    size_bytes: int
+    state: str
+    validation_error: str | None
+    created_at: str
+    validated_at: str | None
+    updated_at: str
+    revision: int
+
+    KIND = "evidence_reference"
+    ID_FIELD = "evidence_reference_id"
+
+    def __post_init__(self) -> None:
+        kind = EvidenceReferenceKind(self.source_kind)
+        EvidenceReferenceState(self.state)
+        if len(self.sha256) != 64 or any(
+            item not in "0123456789abcdef" for item in self.sha256
+        ):
+            raise ValueError("evidence reference digest is invalid")
+        if self.size_bytes < 0:
+            raise ValueError("evidence reference size is invalid")
+        if (
+            kind == EvidenceReferenceKind.LOCAL_PROTECTED_ARTIFACT
+            and not self.canonical_source_path
+        ):
+            raise ValueError("local evidence reference requires a source path")
+        if (
+            kind == EvidenceReferenceKind.REMOTE_STRUCTURED_EVIDENCE
+            and self.canonical_source_path is not None
+        ):
+            raise ValueError("remote evidence reference cannot expose a local path")
+        if self.charter_revision < 1 or not self.source_identity:
+            raise ValueError("evidence reference binding is invalid")
+        _timestamp(self.created_at, "created_at")
+        _optional_timestamp(self.validated_at, "validated_at")
+        _timestamp(self.updated_at, "updated_at")
+        _positive_revision(self.revision)
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceReservationRecord(PassBRecord):
     workspace_reservation_id: str
     project_id: str
@@ -635,12 +689,32 @@ class PresentationStateRecord(PassBRecord):
     ambient_effect: str
     updated_at: str
     revision: int
+    avatar_asset_identity: str = "sage-default"
+    activity_state: str = "LISTENING"
+    mood: str = "CALM"
+    interruption_state: str = "IDLE"
+    authority_effect: str = "NONE"
 
     KIND = "presentation_state"
     ID_FIELD = "presentation_state_id"
+    DEFAULTS = {
+        "avatar_asset_identity": "sage-default",
+        "activity_state": "LISTENING",
+        "mood": "CALM",
+        "interruption_state": "IDLE",
+        "authority_effect": "NONE",
+    }
 
     def __post_init__(self) -> None:
         PresentationMode(self.mode)
+        if self.activity_state not in {"SPEAKING", "LISTENING", "THINKING"}:
+            raise ValueError("Sage activity state is invalid")
+        if self.interruption_state not in {"IDLE", "INTERRUPTED"}:
+            raise ValueError("Sage interruption state is invalid")
+        if self.authority_effect != "NONE":
+            raise ValueError("Sage presentation cannot have authority effect")
+        if not self.avatar_asset_identity or not self.mood:
+            raise ValueError("Sage presentation identity is incomplete")
         if not math.isfinite(self.intensity) or not (
             0 <= self.intensity <= 1
         ):
@@ -660,6 +734,7 @@ PASS_B_RECORD_TYPES: tuple[type[PassBRecord], ...] = (
     AttemptRecord,
     ReviewRecord,
     EvidenceBundleRecord,
+    EvidenceReferenceRecord,
     WorkspaceReservationRecord,
     WriteReservationRecord,
     PauseReasonRecord,

@@ -6,6 +6,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -76,6 +77,10 @@ class _Observer:
     def __init__(self, executable: Path) -> None:
         self.executable = executable.resolve()
         self.evidence_digest = hashlib.sha256(b"evidence").hexdigest()
+        self.cancel_entered = Event()
+        self.cancel_release = Event()
+        self.cancel_release.set()
+        self.cancelled_attempts: list[str] = []
 
     def qualify(
         self, registration: dict[str, Any], challenge: str
@@ -119,6 +124,13 @@ class _Observer:
             "completed",
             datetime.now(UTC).isoformat(),
         )
+
+
+    def cancel_provider(self, attempt_id: str) -> None:
+        self.cancelled_attempts.append(attempt_id)
+        self.cancel_entered.set()
+        if not self.cancel_release.wait(timeout=5):
+            raise TimeoutError("test cancellation was not released")
 
 
 def _service(tmp_path: Path) -> tuple[AuthorityServiceCore, AuthorityServiceClient]:
@@ -221,6 +233,73 @@ def test_service_constructs_qualification_and_completion_records(
     finalized = client.finalize_completion(attempt_id)
     assert finalized["completion"]["terminal_disposition"] == "COMPLETED"
     assert core.keys.verify("provider-completion", finalized["completion"])
+
+
+def test_cancel_claim_precedes_side_effect_and_blocks_stale_resume(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    executable = tmp_path / "controlled-provider.exe"
+    registration_id = str(
+        client.register_provider("codex", executable)["registration_id"]
+    )
+    client.qualify_provider(registration_id)
+    reserved = client.reserve_attempt(
+        **_launch_authority(client, "cancel-race-project"),
+        registration_id=registration_id,
+        keeper_run_id="cancel-race-run",
+        task_id="cancel-race-task",
+        stage_id="author_execution",
+        role="builder",
+        attempt_number=1,
+        provider_run_id="cancel-race-provider-run",
+        provider_instance_id="instance",
+        evidence_path=str((tmp_path / "evidence" / "run.json").resolve()),
+        prompt_path=str((tmp_path / "evidence" / "prompt.md").resolve()),
+        stdout_path=str((tmp_path / "evidence" / "stdout.log").resolve()),
+        stderr_path=str((tmp_path / "evidence" / "stderr.log").resolve()),
+        workspace=str((tmp_path / "workspace").resolve()),
+        timeout_seconds=30,
+        reasoning_level="medium",
+        environment={},
+    )
+    attempt_id = str(reserved["attempt_id"])
+    client.record_provider_start(attempt_id, 6611)
+    core.dispatch(
+        Request.create(
+            Operation.PAUSE_ATTEMPT,
+            {"attempt_id": attempt_id},
+        ),
+        "S-1-5-21-1000",
+    )
+    observer = cast(_Observer, core.observer)
+    observer.cancel_release.clear()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(client.cancel_attempt, attempt_id)
+        assert observer.cancel_entered.wait(timeout=5)
+        try:
+            claimed = core.store.get("attempts", attempt_id)
+            assert claimed is not None
+            assert claimed["service_state"] == "CANCELLATION_CLAIMED"
+            assert str(claimed["cancellation_intent_id"]).startswith(
+                "cancellation-intent:"
+            )
+            with pytest.raises(PermissionError, match="transition was rejected"):
+                core.dispatch(
+                    Request.create(
+                        Operation.RESUME_ATTEMPT,
+                        {"attempt_id": attempt_id},
+                    ),
+                    "S-1-5-21-1000",
+                )
+        finally:
+            observer.cancel_release.set()
+        result = future.result(timeout=5)
+    assert result["state"] == "CANCELLED"
+    assert observer.cancelled_attempts == [attempt_id]
+    final = core.store.get("attempts", attempt_id)
+    assert final is not None
+    assert final["service_state"] == "CANCELLED"
 
 
 def test_service_rejects_arbitrary_signing_and_duplicate_launch(

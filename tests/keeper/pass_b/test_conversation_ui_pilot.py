@@ -192,6 +192,7 @@ def test_darksage_pilot_completes_with_independent_roles(
     assert report["duplicate_launch_count"] == 0
     assert report["production_rejected_test_reset_verifier"] is True
     assert report["pilot_evidence_read_only_reference"] is True
+    assert report["pilot_evidence_reference_id"]
     assert report["pilot_evidence_writer_rejected"] is True
     assert report["pilot_evidence_reference_preserved"] is True
     assert report["reviewer_workspace_isolated"] is True

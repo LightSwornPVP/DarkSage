@@ -493,6 +493,12 @@ def run_darksage_pilot(
         },
         independence_key="reviewer-independence",
     )
+    pilot_evidence_reference_record = (
+        application.orchestration.create_local_evidence_reference(
+            review_assignment.assignment_id,
+            pilot_evidence_artifact,
+        )
+    )
     boundary_item = application.orchestration.create_work_item(
         project_id=project.project_id,
         charter_id=charter.charter_id,
@@ -566,14 +572,11 @@ def run_darksage_pilot(
         authority_attempt_id=reviewer_authority_attempt,
         global_context={"charter_revision": charter.revision},
         task_context={
-            "implementation_evidence": (
-                implementation_evidence.evidence_bundle_id
-            ),
-            "pilot_evidence_reference": {
-                "path": pilot_evidence_reference,
-                "sha256": pilot_evidence_digest,
-            },
+            "implementation_evidence": implementation_evidence.evidence_bundle_id,
         },
+        evidence_reference_ids=(
+            pilot_evidence_reference_record.evidence_reference_id,
+        ),
         side_effect_class="READ_ONLY_REVIEW",
     )
     review_evidence = application.orchestration.validate_evidence(
@@ -915,6 +918,9 @@ def run_darksage_pilot(
         ),
         "pilot_evidence_writer_rejected": pilot_evidence_writer_rejected,
         "pilot_evidence_reference": pilot_evidence_reference,
+        "pilot_evidence_reference_id": (
+            pilot_evidence_reference_record.evidence_reference_id
+        ),
         "pilot_evidence_reference_digest": pilot_evidence_digest,
         "pilot_evidence_reference_preserved": (
             pilot_evidence_reference_preserved

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from keeper.app.service import KeeperApplication
+from keeper.ui.desktop import KeeperProductDesktop
 
 
 class KeeperViewModel:
@@ -658,7 +659,7 @@ def main(arguments: list[str] | None = None) -> int:
     if options.ui_smoke:
         application.finish_setup()
         try:
-            desktop = KeeperDesktop(application)
+            desktop = KeeperProductDesktop(application)
         except Exception as error:
             if error.__class__.__name__ == "TclError":
                 print(
@@ -673,24 +674,24 @@ def main(arguments: list[str] | None = None) -> int:
             raise
         desktop.root.update_idletasks()
         desktop.root.update()
-        tabs = desktop.notebook.tabs()  # type: ignore[no-untyped-call]
-        if len(tabs) < 9:
+        pages = desktop.navigation_pages
+        if len(pages) != 8:
             desktop.root.destroy()
-            raise RuntimeError("Keeper desktop smoke did not render all workflow tabs")
-        desktop.notebook.select(tabs[3])  # type: ignore[no-untyped-call]
+            raise RuntimeError("Keeper desktop smoke did not render all pages")
+        desktop._show_page("Workflow")
         desktop.root.update()
-        selected_tab = str(desktop.notebook.select())  # type: ignore[no-untyped-call]
+        selected_page = str(desktop.page_title.cget("text"))
         desktop.refresh_button.invoke()
         desktop.root.update_idletasks()
         desktop.root.update()
-        if desktop.status.get() != "Dashboard refreshed":
+        if desktop.status.get() != "Durable state refreshed":
             desktop.root.destroy()
             raise RuntimeError("Keeper desktop smoke button callback did not update status")
         evidence = {
             "ui_smoke": "passed",
             "executable": sys.executable,
-            "rendered_tabs": len(tabs),
-            "selected_tab": selected_tab,
+            "rendered_pages": len(pages),
+            "selected_page": selected_page,
             "button_callback": "Refresh",
             "status_update": desktop.status.get(),
             "root_viewable": bool(desktop.root.winfo_viewable()),
@@ -702,7 +703,7 @@ def main(arguments: list[str] | None = None) -> int:
         desktop.root.destroy()
         print(json.dumps({**evidence, "evidence_path": str(evidence_path)}))
         return 0
-    KeeperDesktop(application).run()
+    KeeperProductDesktop(application).run()
     return 0
 
 

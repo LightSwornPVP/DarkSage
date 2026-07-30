@@ -7,12 +7,14 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, NoReturn, cast
 
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
     AttemptState,
+    EvidenceReferenceKind,
+    EvidenceReferenceState,
     EvidenceState,
     PauseCode,
     ReservationMode,
@@ -25,6 +27,7 @@ from keeper.pass_b.models import (
     AssignmentRecord,
     AttemptRecord,
     EvidenceBundleRecord,
+    EvidenceReferenceRecord,
     PauseReasonRecord,
     ProviderAccountRecord,
     ProviderRecord,
@@ -49,6 +52,7 @@ from keeper.pass_b.providers import (
 )
 from keeper.pass_b.repository import (
     PassBRepository,
+    canonical_evidence_reference_path,
     canonical_scope,
     canonical_workspace_path,
 )
@@ -467,6 +471,181 @@ class OrchestrationService:
             observed_at=observation.observed_at,
         )
 
+    def create_local_evidence_reference(
+        self,
+        assignment_id: str,
+        source_path: Path,
+        *,
+        source_evidence_bundle_id: str | None = None,
+    ) -> EvidenceReferenceRecord:
+        workflow, work_item, assignment = (
+            self.repository.assignment_launch_binding(assignment_id)
+        )
+        resolved = source_path.resolve(strict=True)
+        canonical_path = canonical_evidence_reference_path(resolved)
+        if not resolved.is_file():
+            raise PermissionError("evidence reference must be a regular file")
+        content = resolved.read_bytes()
+        self._validate_reference_source_bundle(
+            assignment,
+            source_evidence_bundle_id,
+        )
+        now = self._now()
+        record = EvidenceReferenceRecord(
+            evidence_reference_id=uuid.uuid4().hex,
+            project_id=assignment.project_id,
+            charter_id=assignment.charter_id,
+            charter_revision=assignment.charter_revision,
+            workflow_id=workflow.workflow_id,
+            work_item_id=work_item.work_item_id,
+            assignment_id=assignment.assignment_id,
+            source_kind=EvidenceReferenceKind.LOCAL_PROTECTED_ARTIFACT,
+            source_identity=canonical_path,
+            canonical_source_path=canonical_path,
+            source_evidence_bundle_id=source_evidence_bundle_id,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            state=EvidenceReferenceState.VALIDATED,
+            validation_error=None,
+            created_at=now,
+            validated_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        self.repository.insert(record)
+        return record
+
+    def create_remote_evidence_reference(
+        self,
+        assignment_id: str,
+        *,
+        source_identity: str,
+        sha256: str,
+        size_bytes: int,
+        source_evidence_bundle_id: str | None = None,
+    ) -> EvidenceReferenceRecord:
+        workflow, work_item, assignment = (
+            self.repository.assignment_launch_binding(assignment_id)
+        )
+        self._validate_reference_source_bundle(
+            assignment,
+            source_evidence_bundle_id,
+        )
+        now = self._now()
+        record = EvidenceReferenceRecord(
+            evidence_reference_id=uuid.uuid4().hex,
+            project_id=assignment.project_id,
+            charter_id=assignment.charter_id,
+            charter_revision=assignment.charter_revision,
+            workflow_id=workflow.workflow_id,
+            work_item_id=work_item.work_item_id,
+            assignment_id=assignment.assignment_id,
+            source_kind=EvidenceReferenceKind.REMOTE_STRUCTURED_EVIDENCE,
+            source_identity=source_identity,
+            canonical_source_path=None,
+            source_evidence_bundle_id=source_evidence_bundle_id,
+            sha256=sha256.casefold(),
+            size_bytes=size_bytes,
+            state=EvidenceReferenceState.VALIDATED,
+            validation_error=None,
+            created_at=now,
+            validated_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        self.repository.insert(record)
+        return record
+
+    def validate_evidence_reference(
+        self,
+        evidence_reference_id: str,
+        assignment_id: str,
+    ) -> EvidenceReferenceRecord:
+        record = self.repository.get(
+            EvidenceReferenceRecord, evidence_reference_id
+        )
+        workflow, work_item, assignment = (
+            self.repository.assignment_launch_binding(assignment_id)
+        )
+        expected_binding = (
+            assignment.project_id,
+            assignment.charter_id,
+            assignment.charter_revision,
+            workflow.workflow_id,
+            work_item.work_item_id,
+            assignment.assignment_id,
+        )
+        actual_binding = (
+            record.project_id,
+            record.charter_id,
+            record.charter_revision,
+            record.workflow_id,
+            record.work_item_id,
+            record.assignment_id,
+        )
+        if actual_binding != expected_binding:
+            raise PermissionError(
+                "evidence reference does not match assignment context"
+            )
+        if record.state != EvidenceReferenceState.VALIDATED:
+            raise PermissionError("evidence reference is not validated")
+        self._validate_reference_source_bundle(
+            assignment,
+            record.source_evidence_bundle_id,
+        )
+        if (
+            record.source_kind
+            == EvidenceReferenceKind.LOCAL_PROTECTED_ARTIFACT
+        ):
+            try:
+                source_path = Path(cast(str, record.canonical_source_path))
+                canonical_path = canonical_evidence_reference_path(source_path)
+                content = source_path.read_bytes()
+            except (OSError, PermissionError, RuntimeError) as error:
+                self._reject_evidence_reference(record, str(error))
+            if (
+                canonical_path != record.canonical_source_path
+                or len(content) != record.size_bytes
+                or hashlib.sha256(content).hexdigest() != record.sha256
+            ):
+                self._reject_evidence_reference(
+                    record, "evidence reference content changed"
+                )
+        return record
+
+    def _validate_reference_source_bundle(
+        self,
+        assignment: AssignmentRecord,
+        evidence_bundle_id: str | None,
+    ) -> None:
+        if evidence_bundle_id is None:
+            return
+        evidence = self.repository.get(
+            EvidenceBundleRecord, evidence_bundle_id
+        )
+        if (
+            evidence.project_id != assignment.project_id
+            or evidence.state != EvidenceState.VALIDATED
+        ):
+            raise PermissionError(
+                "evidence reference source bundle is not valid for project"
+            )
+
+    def _reject_evidence_reference(
+        self,
+        record: EvidenceReferenceRecord,
+        detail: str,
+    ) -> NoReturn:
+        rejected = replace(
+            record,
+            state=EvidenceReferenceState.REJECTED,
+            validation_error=detail,
+            updated_at=self._now(),
+            revision=record.revision + 1,
+        )
+        self.repository.replace(rejected, expected_revision=record.revision)
+        raise PermissionError(detail)
+
     def run_assignment(
         self,
         assignment_id: str,
@@ -475,11 +654,23 @@ class OrchestrationService:
         authority_attempt_id: str,
         global_context: dict[str, object],
         task_context: dict[str, object],
+        evidence_reference_ids: tuple[str, ...] = (),
         side_effect_class: str = "REVERSIBLE_WORKSPACE_WRITE",
         after_launch_claim: Callable[[], None] | None = None,
     ) -> EvidenceBundleRecord:
         workflow, work_item, assignment = (
             self.repository.assignment_launch_binding(assignment_id)
+        )
+        if any(
+            "evidence_reference" in key.casefold()
+            for key in task_context
+        ):
+            raise PermissionError(
+                "raw evidence references are prohibited; use durable IDs"
+            )
+        references = tuple(
+            self.validate_evidence_reference(item, assignment_id)
+            for item in evidence_reference_ids
         )
         adapter = self.adapters.get(assignment.provider_id)
         if adapter is None:
@@ -571,13 +762,22 @@ class OrchestrationService:
             raise PermissionError(
                 "launch workspace became unsafe before adapter invocation"
             )
+        references = tuple(
+            self.validate_evidence_reference(item, assignment_id)
+            for item in evidence_reference_ids
+        )
+        adapter_task_context = dict(task_context)
+        if references:
+            adapter_task_context["keeper_evidence_references"] = [
+                item.to_dict() for item in references
+            ]
         request = assignment_to_adapter(
             assignment,
             claimed.attempt_id,
             authority_attempt_id,
             workspace_path,
             global_context=dict(global_context),
-            task_context=dict(task_context),
+            task_context=adapter_task_context,
         )
         try:
             result = self.launch_authority.launch(

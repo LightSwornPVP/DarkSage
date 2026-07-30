@@ -870,7 +870,6 @@ def test_isolated_reviewer_consumes_explicit_reference(tmp_path: Path) -> None:
     artifact = evidence_run / "evidence.json"
     artifact.write_bytes(b'{"evidence":true}\n')
     before = (artifact.read_bytes(), artifact.stat().st_mtime_ns)
-    reference = canonical_evidence_reference_path(artifact)
     reviewer = _assignment(
         service,
         provider,
@@ -878,6 +877,11 @@ def test_isolated_reviewer_consumes_explicit_reference(tmp_path: Path) -> None:
         sessions[0],
         role=AssignmentRole.REVIEWER,
     )
+    reference = service.create_local_evidence_reference(
+        reviewer.assignment_id,
+        artifact,
+    )
+    assert reference.canonical_source_path is not None
     workspace = tmp_path / "isolated-reviewer"
     _, authority_id = _launch_ready(
         service, reviewer, workspace, "isolated-reviewer"
@@ -887,11 +891,96 @@ def test_isolated_reviewer_consumes_explicit_reference(tmp_path: Path) -> None:
         workspace,
         authority_attempt_id=authority_id,
         global_context={},
-        task_context={"evidence_reference": reference},
+        task_context={},
+        evidence_reference_ids=(reference.evidence_reference_id,),
     )
     assert result.assignment_id == reviewer.assignment_id
     assert adapter.health()["launched"] == 1
     assert (artifact.read_bytes(), artifact.stat().st_mtime_ns) == before
+
+
+def test_changed_typed_reference_rejects_before_adapter(tmp_path: Path) -> None:
+    _, service, _, provider, account, _, sessions, adapter = _stack(tmp_path)
+    _, _, evidence_run = _protected_tree(tmp_path)
+    artifact = evidence_run / "evidence.json"
+    artifact.write_bytes(b'{"evidence":true}\n')
+    reviewer = _assignment(
+        service,
+        provider,
+        account,
+        sessions[0],
+        role=AssignmentRole.REVIEWER,
+    )
+    reference = service.create_local_evidence_reference(
+        reviewer.assignment_id,
+        artifact,
+    )
+    workspace = tmp_path / "changed-reference-reviewer"
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "changed-reference-reviewer"
+    )
+    artifact.write_bytes(b'{"evidence":"changed"}\n')
+    with pytest.raises(PermissionError, match="content changed"):
+        service.run_assignment(
+            reviewer.assignment_id,
+            workspace,
+            authority_attempt_id=authority_id,
+            global_context={},
+            task_context={},
+            evidence_reference_ids=(reference.evidence_reference_id,),
+        )
+    rejected = service.repository.get(
+        type(reference), reference.evidence_reference_id
+    )
+    assert rejected.state == "REJECTED"
+    assert adapter.health()["launched"] == 0
+
+
+def test_raw_reference_dictionary_rejects_before_adapter(tmp_path: Path) -> None:
+    _, service, _, provider, account, _, sessions, adapter = _stack(tmp_path)
+    reviewer = _assignment(
+        service,
+        provider,
+        account,
+        sessions[0],
+        role=AssignmentRole.REVIEWER,
+    )
+    workspace = tmp_path / "raw-reference-reviewer"
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "raw-reference-reviewer"
+    )
+    with pytest.raises(PermissionError, match="durable IDs"):
+        service.run_assignment(
+            reviewer.assignment_id,
+            workspace,
+            authority_attempt_id=authority_id,
+            global_context={},
+            task_context={"evidence_reference": {"path": "untrusted"}},
+        )
+    assert adapter.health()["launched"] == 0
+
+
+def test_remote_structured_reference_is_typed_and_bound(tmp_path: Path) -> None:
+    _, service, _, provider, account, _, sessions, _ = _stack(tmp_path)
+    reviewer = _assignment(
+        service,
+        provider,
+        account,
+        sessions[0],
+        role=AssignmentRole.REVIEWER,
+    )
+    reference = service.create_remote_evidence_reference(
+        reviewer.assignment_id,
+        source_identity="provider-object:review-input-1",
+        sha256=hashlib.sha256(b"remote evidence").hexdigest(),
+        size_bytes=len(b"remote evidence"),
+    )
+    validated = service.validate_evidence_reference(
+        reference.evidence_reference_id,
+        reviewer.assignment_id,
+    )
+    assert validated.source_kind == "REMOTE_STRUCTURED_EVIDENCE"
+    assert validated.canonical_source_path is None
 
 
 @pytest.mark.parametrize("fragment", ("pilot-invocations", "pw"))
