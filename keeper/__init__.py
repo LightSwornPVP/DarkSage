@@ -1,3 +1,6 @@
 """Local development workflow orchestration."""
 
-__version__ = "0.1.0"
+from keeper.version import VERSION
+
+
+__version__ = VERSION

@@ -37,6 +37,7 @@ class ProductViewModel:
     provider_cards: tuple[dict[str, Any], ...]
     usage_cards: tuple[dict[str, Any], ...]
     evidence_cards: tuple[dict[str, Any], ...]
+    evidence_reference_cards: tuple[dict[str, Any], ...]
     review_cards: tuple[dict[str, Any], ...]
     safety_rows: tuple[dict[str, Any], ...]
     right_rail: tuple[tuple[str, str], ...]
@@ -60,7 +61,9 @@ def build_product_view(
 
     authority = _mapping(safety.get("authority"))
     authority_state = str(authority.get("state", "NOT_CONFIGURED"))
-    composition = _composition_label(authority_state)
+    composition = str(
+        authority.get("composition") or _composition_label(authority_state)
+    )
     proposal = _mapping(conversation.get("charter_proposal"))
     intake = _mapping(proposal.get("intake"))
     project_id = _optional_text(
@@ -199,6 +202,23 @@ def build_product_view(
         }
         for item in _rows(project.get("evidence"))
     )
+    evidence_reference_cards = tuple(
+        {
+            "reference_id": item.get("evidence_reference_id"),
+            "classification": item.get("source_kind"),
+            "source_producer": item.get("producer_assignment_id"),
+            "reviewed_assignment": item.get("review_target_assignment_id"),
+            "digest": item.get("sha256"),
+            "size_bytes": item.get("size_bytes"),
+            "validation_state": item.get("state", "UNVALIDATED"),
+            "review_state": (
+                f"CONSUMED:{item.get('consumed_by_review_id')}"
+                if item.get("consumed_by_review_id")
+                else "AVAILABLE"
+            ),
+        }
+        for item in _rows(project.get("evidence_references"))
+    )
     review_cards = tuple(
         {
             "review_id": item.get("review_id"),
@@ -217,7 +237,7 @@ def build_product_view(
     safety_rows = (
         {
             "label": "KeeperAuthority",
-            "value": authority_state,
+            "value": _authority_summary(authority),
             "detail": authority,
         },
         {
@@ -266,6 +286,7 @@ def build_product_view(
         "intensity": sage.get("intensity", 0.25),
         "interruption_state": sage.get("interruption_state", "IDLE"),
         "mode": sage.get("mode", "CONVERSATION"),
+        "visible": str(sage.get("mode", "CONVERSATION")) != "HIDDEN",
         "authority_effect": "NONE",
     }
     return ProductViewModel(
@@ -280,6 +301,7 @@ def build_product_view(
         provider_cards=provider_cards,
         usage_cards=usage_cards,
         evidence_cards=evidence_cards,
+        evidence_reference_cards=evidence_reference_cards,
         review_cards=review_cards,
         safety_rows=safety_rows,
         right_rail=right_rail,
@@ -312,6 +334,25 @@ def _composition_label(authority_state: str) -> str:
     if authority_state == "READY":
         return "PRODUCTION"
     return "NOT_CONFIGURED"
+
+
+def _authority_summary(authority: dict[str, Any]) -> str:
+    state = str(authority.get("state", "NOT_CONFIGURED"))
+    parts = [state]
+    for label, field in (
+        ("service", "service_version"),
+        ("protocol", "protocol_version"),
+        ("schema", "schema_version"),
+        ("identity", "identity_state"),
+        ("provenance", "provenance_state"),
+        ("checked", "last_checked_at"),
+    ):
+        value = authority.get(field)
+        if value is not None:
+            parts.append(f"{label} {value}")
+    if authority.get("error"):
+        parts.append(f"reason {authority['error']}")
+    return " | ".join(parts)
 
 
 def _charter_summary(proposal: dict[str, Any]) -> str:

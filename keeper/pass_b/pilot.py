@@ -497,6 +497,9 @@ def run_darksage_pilot(
         application.orchestration.create_local_evidence_reference(
             review_assignment.assignment_id,
             pilot_evidence_artifact,
+            source_evidence_bundle_id=(
+                implementation_evidence.evidence_bundle_id
+            ),
         )
     )
     boundary_item = application.orchestration.create_work_item(
@@ -596,6 +599,9 @@ def run_darksage_pilot(
         implementation_evidence.evidence_bundle_id,
         review_assignment.assignment_id,
         review_evidence.evidence_bundle_id,
+        evidence_reference_id=(
+            pilot_evidence_reference_record.evidence_reference_id
+        ),
     )
     independent_review, _, _ = application.orchestration.decide_review(
         independent_review.review_id

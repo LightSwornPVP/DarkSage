@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, NoReturn, cast
+from typing import Any, Callable, NoReturn, TypedDict, cast
 
 from keeper.pass_b.enums import (
     AssignmentRole,
@@ -61,6 +62,17 @@ from keeper.pass_b.usage_authority import (
     UsageResetObservation,
     UsageResetVerifier,
 )
+
+
+class _EvidenceLineageFields(TypedDict):
+    source_project_id: str
+    source_charter_id: str
+    source_charter_revision: int
+    source_workflow_id: str
+    source_work_item_id: str
+    producer_assignment_id: str
+    producer_attempt_id: str
+    review_target_assignment_id: str
 
 
 Clock = Callable[[], datetime]
@@ -486,7 +498,7 @@ class OrchestrationService:
         if not resolved.is_file():
             raise PermissionError("evidence reference must be a regular file")
         content = resolved.read_bytes()
-        self._validate_reference_source_bundle(
+        lineage = self._validate_reference_source_bundle(
             assignment,
             source_evidence_bundle_id,
         )
@@ -511,6 +523,7 @@ class OrchestrationService:
             validated_at=now,
             updated_at=now,
             revision=1,
+            **self._reference_lineage_fields(assignment, lineage),
         )
         self.repository.insert(record)
         return record
@@ -527,7 +540,7 @@ class OrchestrationService:
         workflow, work_item, assignment = (
             self.repository.assignment_launch_binding(assignment_id)
         )
-        self._validate_reference_source_bundle(
+        lineage = self._validate_reference_source_bundle(
             assignment,
             source_evidence_bundle_id,
         )
@@ -552,6 +565,7 @@ class OrchestrationService:
             validated_at=now,
             updated_at=now,
             revision=1,
+            **self._reference_lineage_fields(assignment, lineage),
         )
         self.repository.insert(record)
         return record
@@ -560,6 +574,9 @@ class OrchestrationService:
         self,
         evidence_reference_id: str,
         assignment_id: str,
+        *,
+        expected_source_evidence_bundle_id: str | None = None,
+        review_id: str | None = None,
     ) -> EvidenceReferenceRecord:
         record = self.repository.get(
             EvidenceReferenceRecord, evidence_reference_id
@@ -589,10 +606,34 @@ class OrchestrationService:
             )
         if record.state != EvidenceReferenceState.VALIDATED:
             raise PermissionError("evidence reference is not validated")
-        self._validate_reference_source_bundle(
+        if (
+            record.consumed_by_review_id is not None
+            and record.consumed_by_review_id != review_id
+        ):
+            raise PermissionError("evidence reference was already consumed")
+        if (
+            expected_source_evidence_bundle_id is not None
+            and record.source_evidence_bundle_id
+            != expected_source_evidence_bundle_id
+        ):
+            raise PermissionError(
+                "evidence reference does not match reviewed evidence"
+            )
+        lineage = self._validate_reference_source_bundle(
             assignment,
             record.source_evidence_bundle_id,
         )
+        if self._reference_lineage_fields(assignment, lineage) != {
+            "source_project_id": record.source_project_id,
+            "source_charter_id": record.source_charter_id,
+            "source_charter_revision": record.source_charter_revision,
+            "source_workflow_id": record.source_workflow_id,
+            "source_work_item_id": record.source_work_item_id,
+            "producer_assignment_id": record.producer_assignment_id,
+            "producer_attempt_id": record.producer_attempt_id,
+            "review_target_assignment_id": record.review_target_assignment_id,
+        }:
+            raise PermissionError("evidence reference source lineage changed")
         if (
             record.source_kind
             == EvidenceReferenceKind.LOCAL_PROTECTED_ARTIFACT
@@ -617,19 +658,109 @@ class OrchestrationService:
         self,
         assignment: AssignmentRecord,
         evidence_bundle_id: str | None,
-    ) -> None:
+    ) -> tuple[
+        EvidenceBundleRecord,
+        AssignmentRecord,
+        AttemptRecord,
+        WorkItemRecord,
+        WorkflowRecord,
+    ] | None:
         if evidence_bundle_id is None:
-            return
+            if (
+                assignment.role == AssignmentRole.REVIEWER
+                or assignment.usage_policy.get("review_of_assignment_id")
+                is not None
+            ):
+                raise PermissionError(
+                    "review evidence reference requires an exact source bundle"
+                )
+            return None
         evidence = self.repository.get(
             EvidenceBundleRecord, evidence_bundle_id
+        )
+        producer = self.repository.get(
+            AssignmentRecord, evidence.assignment_id
+        )
+        producer_attempt = self.repository.get(
+            AttemptRecord, evidence.attempt_id
+        )
+        producer_work_item = self.repository.get(
+            WorkItemRecord, producer.work_item_id
+        )
+        producer_workflow = self.repository.get(
+            WorkflowRecord, producer.workflow_id
+        )
+        review_target = assignment.usage_policy.get(
+            "review_of_assignment_id"
         )
         if (
             evidence.project_id != assignment.project_id
             or evidence.state != EvidenceState.VALIDATED
+            or evidence.assignment_id != producer.assignment_id
+            or evidence.attempt_id != producer_attempt.attempt_id
+            or producer_attempt.assignment_id != producer.assignment_id
+            or producer_attempt.state != AttemptState.COMPLETED
+            or review_target != producer.assignment_id
+            or producer.project_id != assignment.project_id
+            or producer.charter_id != assignment.charter_id
+            or producer.charter_revision != assignment.charter_revision
+            or producer.workflow_id != assignment.workflow_id
+            or producer_work_item.project_id != producer.project_id
+            or producer_work_item.charter_id != producer.charter_id
+            or producer_work_item.charter_revision
+            != producer.charter_revision
+            or producer_work_item.workflow_id != producer.workflow_id
+            or producer_workflow.project_id != producer.project_id
+            or producer_workflow.charter_id != producer.charter_id
+            or producer_workflow.charter_revision
+            != producer.charter_revision
         ):
             raise PermissionError(
-                "evidence reference source bundle is not valid for project"
+                "evidence reference source lineage is invalid"
             )
+        return (
+            evidence,
+            producer,
+            producer_attempt,
+            producer_work_item,
+            producer_workflow,
+        )
+
+    @staticmethod
+    def _reference_lineage_fields(
+        assignment: AssignmentRecord,
+        lineage: tuple[
+            EvidenceBundleRecord,
+            AssignmentRecord,
+            AttemptRecord,
+            WorkItemRecord,
+            WorkflowRecord,
+        ] | None,
+    ) -> _EvidenceLineageFields:
+        if lineage is None:
+            return {
+                "source_project_id": "",
+                "source_charter_id": "",
+                "source_charter_revision": 0,
+                "source_workflow_id": "",
+                "source_work_item_id": "",
+                "producer_assignment_id": "",
+                "producer_attempt_id": "",
+                "review_target_assignment_id": "",
+            }
+        evidence, producer, producer_attempt, work_item, workflow = lineage
+        return {
+            "source_project_id": evidence.project_id,
+            "source_charter_id": producer.charter_id,
+            "source_charter_revision": producer.charter_revision,
+            "source_workflow_id": workflow.workflow_id,
+            "source_work_item_id": work_item.work_item_id,
+            "producer_assignment_id": producer.assignment_id,
+            "producer_attempt_id": producer_attempt.attempt_id,
+            "review_target_assignment_id": str(
+                assignment.usage_policy["review_of_assignment_id"]
+            ),
+        }
 
     def _reject_evidence_reference(
         self,
@@ -699,6 +830,11 @@ class OrchestrationService:
             raise PermissionError(
                 "launch workspace does not match the durable reservation"
             )
+        (
+            delivery_context,
+            delivery_files,
+            delivery_manifest_digest,
+        ) = self._prepare_evidence_delivery(references, workspace_path)
         provider = self.repository.get(
             ProviderRecord, assignment.provider_id
         )
@@ -766,11 +902,19 @@ class OrchestrationService:
             self.validate_evidence_reference(item, assignment_id)
             for item in evidence_reference_ids
         )
+        self._verify_evidence_delivery(
+            delivery_files,
+            workspace_path,
+            delivery_manifest_digest,
+        )
         adapter_task_context = dict(task_context)
         if references:
-            adapter_task_context["keeper_evidence_references"] = [
-                item.to_dict() for item in references
-            ]
+            adapter_task_context["keeper_evidence_references"] = list(
+                delivery_context
+            )
+            adapter_task_context["keeper_evidence_manifest"] = (
+                ".keeper-input/evidence-references.json"
+            )
         request = assignment_to_adapter(
             assignment,
             claimed.attempt_id,
@@ -786,6 +930,13 @@ class OrchestrationService:
         except BaseException:
             # The durable claim deliberately remains ambiguous for restart recovery.
             raise
+        self._verify_evidence_delivery(
+            delivery_files,
+            workspace_path,
+            delivery_manifest_digest,
+        )
+        for item in evidence_reference_ids:
+            self.validate_evidence_reference(item, assignment_id)
         if (
             result.usage is not None
             and (
@@ -806,6 +957,161 @@ class OrchestrationService:
             running.attempt_id, evidence, self._now()
         )
         return evidence
+
+    def _prepare_evidence_delivery(
+        self,
+        references: tuple[EvidenceReferenceRecord, ...],
+        workspace_path: Path,
+    ) -> tuple[
+        tuple[dict[str, object], ...],
+        dict[str, tuple[Path, str, int]],
+        str | None,
+    ]:
+        if not references:
+            return (), {}, None
+        canonical_workspace_path(workspace_path)
+        workspace = workspace_path.resolve(strict=True)
+        delivery_root = workspace / ".keeper-input"
+        try:
+            delivery_root.mkdir(mode=0o700, exist_ok=False)
+        except OSError as error:
+            raise PermissionError(
+                "trusted evidence-delivery directory is unavailable"
+            ) from error
+        context: list[dict[str, object]] = []
+        copied: dict[str, tuple[Path, str, int]] = {}
+        for reference in references:
+            item: dict[str, object] = {
+                "reference_id": reference.evidence_reference_id,
+                "reference_revision": reference.revision,
+                "classification": reference.source_kind,
+                "source_identity": (
+                    reference.source_identity
+                    if reference.source_kind
+                    == EvidenceReferenceKind.REMOTE_STRUCTURED_EVIDENCE
+                    else f"protected:{reference.evidence_reference_id}"
+                ),
+                "project_id": reference.project_id,
+                "charter_id": reference.charter_id,
+                "charter_revision": reference.charter_revision,
+                "workflow_id": reference.workflow_id,
+                "work_item_id": reference.work_item_id,
+                "producer_assignment_id": reference.producer_assignment_id,
+                "producer_attempt_id": reference.producer_attempt_id,
+                "reviewed_assignment_id": (
+                    reference.review_target_assignment_id
+                ),
+                "sha256": reference.sha256,
+                "size_bytes": reference.size_bytes,
+                "validated_at": reference.validated_at,
+                "local_or_remote": (
+                    "LOCAL"
+                    if reference.source_kind
+                    == EvidenceReferenceKind.LOCAL_PROTECTED_ARTIFACT
+                    else "REMOTE"
+                ),
+            }
+            if (
+                reference.source_kind
+                == EvidenceReferenceKind.LOCAL_PROTECTED_ARTIFACT
+            ):
+                source = Path(cast(str, reference.canonical_source_path))
+                content = source.read_bytes()
+                if (
+                    len(content) != reference.size_bytes
+                    or hashlib.sha256(content).hexdigest()
+                    != reference.sha256
+                ):
+                    raise PermissionError(
+                        "local evidence changed before trusted delivery"
+                    )
+                destination = (
+                    delivery_root
+                    / f"{reference.evidence_reference_id}.evidence"
+                )
+                try:
+                    descriptor = os.open(
+                        destination,
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                        0o400,
+                    )
+                    with os.fdopen(descriptor, "wb") as stream:
+                        stream.write(content)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except OSError as error:
+                    raise PermissionError(
+                        "immutable evidence review copy could not be created"
+                    ) from error
+                relative = destination.relative_to(workspace).as_posix()
+                item["review_copy"] = relative
+                copied[reference.evidence_reference_id] = (
+                    destination,
+                    reference.sha256,
+                    reference.size_bytes,
+                )
+            context.append(item)
+        manifest = delivery_root / "evidence-references.json"
+        manifest_bytes = json.dumps(
+            context,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            descriptor = os.open(
+                manifest,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o400,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(manifest_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as error:
+            raise PermissionError(
+                "structured evidence-delivery manifest could not be created"
+            ) from error
+        return (
+            tuple(context),
+            copied,
+            hashlib.sha256(manifest_bytes).hexdigest(),
+        )
+
+    @staticmethod
+    def _verify_evidence_delivery(
+        copied: dict[str, tuple[Path, str, int]],
+        workspace_path: Path,
+        manifest_digest: str | None,
+    ) -> None:
+        if manifest_digest is None:
+            return
+        canonical_workspace_path(workspace_path)
+        workspace = workspace_path.resolve(strict=True)
+        manifest = workspace / ".keeper-input" / "evidence-references.json"
+        try:
+            manifest_content = manifest.read_bytes()
+        except OSError as error:
+            raise PermissionError(
+                "trusted evidence-delivery manifest is unavailable"
+            ) from error
+        if hashlib.sha256(manifest_content).hexdigest() != manifest_digest:
+            raise PermissionError(
+                "trusted evidence-delivery manifest was modified"
+            )
+        for destination, digest, size in copied.values():
+            try:
+                content = destination.read_bytes()
+            except OSError as error:
+                raise PermissionError(
+                    "immutable evidence review copy is unavailable"
+                ) from error
+            if (
+                len(content) != size
+                or hashlib.sha256(content).hexdigest() != digest
+            ):
+                raise PermissionError(
+                    "immutable evidence review copy was modified"
+                )
 
     def cancel_assignment(self, assignment_id: str) -> AttemptRecord:
         assignment = self.repository.get(AssignmentRecord, assignment_id)
@@ -912,6 +1218,8 @@ class OrchestrationService:
         evidence_id: str,
         reviewer_assignment_id: str,
         reviewer_evidence_id: str,
+        *,
+        evidence_reference_id: str | None = None,
     ) -> ReviewRecord:
         evidence = self.repository.get(EvidenceBundleRecord, evidence_id)
         producer = self.repository.get(
@@ -951,6 +1259,15 @@ class OrchestrationService:
         ):
             raise PermissionError("review independence or evidence is invalid")
         now = self._now()
+        reference = (
+            self.validate_evidence_reference(
+                evidence_reference_id,
+                reviewer_assignment_id,
+                expected_source_evidence_bundle_id=evidence_id,
+            )
+            if evidence_reference_id is not None
+            else None
+        )
         review = ReviewRecord(
             review_id=uuid.uuid4().hex,
             project_id=producer.project_id,
@@ -967,14 +1284,39 @@ class OrchestrationService:
             producer_evidence_bundle_id=evidence.evidence_bundle_id,
             reviewer_attempt_id=reviewer_attempt.attempt_id,
             reviewer_evidence_bundle_id=reviewer_evidence.evidence_bundle_id,
+            consumed_evidence_reference_id=(
+                reference.evidence_reference_id
+                if reference is not None
+                else None
+            ),
+            consumed_evidence_reference_revision=(
+                reference.revision + 1 if reference is not None else None
+            ),
         )
-        self.repository.insert(review)
+        if reference is None:
+            self.repository.insert(review)
+        else:
+            self.repository.insert_review_with_reference(
+                review,
+                reference,
+                consumed_at=now,
+            )
         return review
 
     def decide_review(
         self,
         review_id: str,
     ) -> tuple[ReviewRecord, AssignmentRecord, WorkItemRecord]:
+        review = self.repository.get(ReviewRecord, review_id)
+        if review.consumed_evidence_reference_id is not None:
+            self.validate_evidence_reference(
+                review.consumed_evidence_reference_id,
+                review.reviewer_assignment_id,
+                expected_source_evidence_bundle_id=(
+                    review.producer_evidence_bundle_id
+                ),
+                review_id=review.review_id,
+            )
         return self.repository.decide_review(
             review_id,
             decided_at=self._now(),

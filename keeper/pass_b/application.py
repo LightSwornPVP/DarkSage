@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.authority_service.client import ProductionAuthorityServiceClient
@@ -44,6 +44,10 @@ from keeper.pass_b.usage_authority import (
 )
 
 
+class AuthorityHealthClient(Protocol):
+    def require_live_identity(self) -> dict[str, Any]: ...
+
+
 class PassBApplication:
     """Conversation-first Pass B application composition."""
 
@@ -53,6 +57,7 @@ class PassBApplication:
         *,
         executive: ConversationExecutive | None = None,
         authority_client: ProductionAuthorityServiceClient | None = None,
+        authority_health_client: AuthorityHealthClient | None = None,
         usage_reset_verifier: UsageResetVerifier | None = None,
         _test_launch_authority: LaunchAuthority | None = None,
     ) -> None:
@@ -67,6 +72,9 @@ class PassBApplication:
         )
         self.executive = executive or KeeperExecutive(self.store.path)
         self.authority_client = authority_client
+        self.authority_health_client = (
+            authority_health_client or authority_client
+        )
         self.project_status: ProjectStatusReader = lambda project_id: _project_status(
             self.executive, project_id
         )
@@ -270,7 +278,7 @@ class PassBApplication:
     def diagnostics(self) -> dict[str, Any]:
         return {
             "data_directory": str(self.data_directory),
-            "pass_b_schema_version": 4,
+            "pass_b_schema_version": 5,
             "authority": self._authority_health(),
             "launch_authority_configured": (
                 self.authority_client is not None
@@ -285,23 +293,68 @@ class PassBApplication:
         }
 
     def _authority_health(self) -> dict[str, Any]:
-        client = self.authority_client
+        client = self.authority_health_client
+        checked_at = _now()
         if client is None:
             if self._test_authority_configured:
                 return {
                     "state": "TEST_COMPOSITION",
                     "production_validation": False,
+                    "composition": "TEST_COMPOSITION",
+                    "last_checked_at": checked_at,
                 }
-            return {"state": "NOT_CONFIGURED"}
+            return {
+                "state": "NOT_CONFIGURED",
+                "composition": "NOT_CONFIGURED",
+                "last_checked_at": checked_at,
+            }
         try:
             value = client.require_live_identity()
-        except (OSError, PermissionError, RuntimeError, TimeoutError) as error:
-            return {"state": "UNAVAILABLE", "error": str(error)}
+        except Exception as error:
+            return {
+                "state": "UNAVAILABLE",
+                "composition": (
+                    "PRODUCTION"
+                    if self.authority_client is not None
+                    else "PRODUCTION_HEALTH_ONLY"
+                ),
+                "last_checked_at": checked_at,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        if (
+            not isinstance(value, dict)
+            or (
+                not isinstance(value.get("protocol_version"), (str, int))
+                or isinstance(value.get("protocol_version"), bool)
+            )
+            or value.get("observer_available") is not True
+        ):
+            return {
+                "state": "UNAVAILABLE",
+                "composition": (
+                    "PRODUCTION"
+                    if self.authority_client is not None
+                    else "PRODUCTION_HEALTH_ONLY"
+                ),
+                "last_checked_at": checked_at,
+                "error": "RuntimeError: malformed KeeperAuthority identity",
+            }
         return {
             "state": "READY",
             "service_version": value.get("service_version"),
             "protocol_version": value.get("protocol_version"),
+            "schema_version": value.get("schema_version"),
             "service_key_id": value.get("service_key_id"),
+            "identity_state": (
+                "VERIFIED" if value.get("service_key_id") else "AVAILABLE"
+            ),
+            "provenance_state": value.get("provenance_state", "NOT_REPORTED"),
+            "composition": (
+                "PRODUCTION"
+                if self.authority_client is not None
+                else "PRODUCTION_HEALTH_ONLY"
+            ),
+            "last_checked_at": checked_at,
         }
 
     def _ensure_presentation_state(self) -> None:

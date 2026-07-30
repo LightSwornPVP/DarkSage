@@ -248,6 +248,7 @@ class ExecutiveAuthorityLaunchGate:
         adapter: ProviderAdapter,
     ) -> AdapterResult:
         del adapter
+        self._validate_production_evidence_delivery(request)
         result = self._authority.execute_provider(
             authorization.authority_attempt_id
         )
@@ -332,6 +333,119 @@ class ExecutiveAuthorityLaunchGate:
             usage=None,
             session_resume_token=None,
         )
+
+    @staticmethod
+    def _validate_production_evidence_delivery(
+        request: AdapterAssignment,
+    ) -> None:
+        raw_references = request.task_context.get(
+            "keeper_evidence_references"
+        )
+        if raw_references is None:
+            return
+        if (
+            not isinstance(raw_references, list)
+            or not raw_references
+            or any(not isinstance(item, dict) for item in raw_references)
+        ):
+            raise PermissionError(
+                "production evidence context is not structured"
+            )
+        manifest_value = request.task_context.get(
+            "keeper_evidence_manifest"
+        )
+        if manifest_value != ".keeper-input/evidence-references.json":
+            raise PermissionError(
+                "production evidence manifest identity is invalid"
+            )
+        workspace = request.workspace.resolve(strict=True)
+        manifest = (workspace / str(manifest_value)).resolve(strict=True)
+        try:
+            manifest.relative_to(workspace)
+        except ValueError as error:
+            raise PermissionError(
+                "production evidence manifest escapes the workspace"
+            ) from error
+        try:
+            manifest_json = json.loads(
+                manifest.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise PermissionError(
+                "production evidence manifest is unavailable"
+            ) from error
+        if manifest_json != raw_references:
+            raise PermissionError(
+                "production evidence manifest does not match task context"
+            )
+        allowed_fields = {
+            "reference_id",
+            "reference_revision",
+            "classification",
+            "source_identity",
+            "project_id",
+            "charter_id",
+            "charter_revision",
+            "workflow_id",
+            "work_item_id",
+            "producer_assignment_id",
+            "producer_attempt_id",
+            "reviewed_assignment_id",
+            "sha256",
+            "size_bytes",
+            "validated_at",
+            "local_or_remote",
+            "review_copy",
+        }
+        for item in raw_references:
+            if set(item) - allowed_fields:
+                raise PermissionError(
+                    "production evidence context exposes unsupported fields"
+                )
+            if (
+                item.get("project_id") != request.project_id
+                or item.get("charter_id") != request.charter_id
+                or item.get("charter_revision")
+                != request.charter_revision
+                or not isinstance(item.get("reference_revision"), int)
+                or not isinstance(item.get("sha256"), str)
+                or len(str(item.get("sha256"))) != 64
+                or not isinstance(item.get("size_bytes"), int)
+                or int(item.get("size_bytes", -1)) < 0
+            ):
+                raise PermissionError(
+                    "production evidence context binding is invalid"
+                )
+            if item.get("local_or_remote") == "REMOTE":
+                if "review_copy" in item:
+                    raise PermissionError(
+                        "remote evidence context cannot expose a file"
+                    )
+                continue
+            relative = item.get("review_copy")
+            if (
+                item.get("local_or_remote") != "LOCAL"
+                or not isinstance(relative, str)
+            ):
+                raise PermissionError(
+                    "local evidence review copy is missing"
+                )
+            copied = (workspace / relative).resolve(strict=True)
+            try:
+                copied.relative_to(workspace)
+            except ValueError as error:
+                raise PermissionError(
+                    "evidence review copy escapes the workspace"
+                ) from error
+            content = copied.read_bytes()
+            if (
+                len(content) != item["size_bytes"]
+                or hashlib.sha256(content).hexdigest()
+                != item["sha256"]
+            ):
+                raise PermissionError(
+                    "evidence review copy digest is invalid"
+                )
 
     def _active_charter(
         self, assignment: AssignmentRecord

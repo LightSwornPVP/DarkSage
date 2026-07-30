@@ -388,6 +388,8 @@ class ReviewRecord(PassBRecord):
     producer_evidence_bundle_id: str = ""
     reviewer_attempt_id: str = ""
     reviewer_evidence_bundle_id: str = ""
+    consumed_evidence_reference_id: str | None = None
+    consumed_evidence_reference_revision: int | None = None
 
     KIND = "review"
     ID_FIELD = "review_id"
@@ -396,6 +398,8 @@ class ReviewRecord(PassBRecord):
         "producer_evidence_bundle_id": "legacy-unbound",
         "reviewer_attempt_id": "legacy-unbound",
         "reviewer_evidence_bundle_id": "legacy-unbound",
+        "consumed_evidence_reference_id": None,
+        "consumed_evidence_reference_revision": None,
     }
 
     def __post_init__(self) -> None:
@@ -408,6 +412,15 @@ class ReviewRecord(PassBRecord):
             raise ValueError(
                 "review requires producer and reviewer execution evidence"
             )
+        if (self.consumed_evidence_reference_id is None) != (
+            self.consumed_evidence_reference_revision is None
+        ):
+            raise ValueError("review evidence-reference binding is incomplete")
+        if (
+            self.consumed_evidence_reference_revision is not None
+            and self.consumed_evidence_reference_revision < 1
+        ):
+            raise ValueError("review evidence-reference revision is invalid")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -465,9 +478,31 @@ class EvidenceReferenceRecord(PassBRecord):
     validated_at: str | None
     updated_at: str
     revision: int
+    source_project_id: str = ""
+    source_charter_id: str = ""
+    source_charter_revision: int = 0
+    source_workflow_id: str = ""
+    source_work_item_id: str = ""
+    producer_assignment_id: str = ""
+    producer_attempt_id: str = ""
+    review_target_assignment_id: str = ""
+    consumed_by_review_id: str | None = None
+    consumed_at: str | None = None
 
     KIND = "evidence_reference"
     ID_FIELD = "evidence_reference_id"
+    DEFAULTS = {
+        "source_project_id": "",
+        "source_charter_id": "",
+        "source_charter_revision": 0,
+        "source_workflow_id": "",
+        "source_work_item_id": "",
+        "producer_assignment_id": "",
+        "producer_attempt_id": "",
+        "review_target_assignment_id": "",
+        "consumed_by_review_id": None,
+        "consumed_at": None,
+    }
 
     def __post_init__(self) -> None:
         kind = EvidenceReferenceKind(self.source_kind)
@@ -490,8 +525,24 @@ class EvidenceReferenceRecord(PassBRecord):
             raise ValueError("remote evidence reference cannot expose a local path")
         if self.charter_revision < 1 or not self.source_identity:
             raise ValueError("evidence reference binding is invalid")
+        lineage = (
+            self.source_project_id,
+            self.source_charter_id,
+            self.source_workflow_id,
+            self.source_work_item_id,
+            self.producer_assignment_id,
+            self.producer_attempt_id,
+            self.review_target_assignment_id,
+        )
+        if any(lineage) and (
+            not all(lineage) or self.source_charter_revision < 1
+        ):
+            raise ValueError("evidence reference source lineage is incomplete")
+        if self.consumed_by_review_id and not self.consumed_at:
+            raise ValueError("consumed evidence reference needs a timestamp")
         _timestamp(self.created_at, "created_at")
         _optional_timestamp(self.validated_at, "validated_at")
+        _optional_timestamp(self.consumed_at, "consumed_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
 

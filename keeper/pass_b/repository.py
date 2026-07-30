@@ -16,6 +16,7 @@ from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
     AttemptState,
+    EvidenceReferenceState,
     EvidenceState,
     ReservationMode,
     ReservationState,
@@ -27,6 +28,7 @@ from keeper.pass_b.models import (
     AssignmentRecord,
     AttemptRecord,
     EvidenceBundleRecord,
+    EvidenceReferenceRecord,
     PassBRecord,
     PauseReasonRecord,
     ProviderAccountRecord,
@@ -43,7 +45,7 @@ from keeper.pass_b.models import (
 
 
 R = TypeVar("R", bound=PassBRecord)
-PASS_B_SCHEMA_VERSION = 4
+PASS_B_SCHEMA_VERSION = 5
 
 
 class PassBRepository:
@@ -179,11 +181,53 @@ class PassBRepository:
                     "VALUES(4,?)",
                     (_now(),),
                 )
+            if current < 5:
+                connection.execute(
+                    "INSERT INTO pass_b_schema_migrations(version,applied_at) "
+                    "VALUES(5,?)",
+                    (_now(),),
+                )
 
     def insert(self, record: PassBRecord) -> None:
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._insert(connection, record)
+
+    def insert_review_with_reference(
+        self,
+        review: ReviewRecord,
+        reference: EvidenceReferenceRecord,
+        *,
+        consumed_at: str,
+    ) -> EvidenceReferenceRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get(
+                connection,
+                EvidenceReferenceRecord,
+                reference.evidence_reference_id,
+            )
+            if (
+                current.revision != reference.revision
+                or current.state != EvidenceReferenceState.VALIDATED
+                or current.consumed_by_review_id is not None
+                or current.assignment_id != review.reviewer_assignment_id
+                or current.source_evidence_bundle_id
+                != review.producer_evidence_bundle_id
+            ):
+                raise PermissionError(
+                    "evidence reference cannot be consumed for review"
+                )
+            consumed = replace(
+                current,
+                consumed_by_review_id=review.review_id,
+                consumed_at=consumed_at,
+                updated_at=consumed_at,
+                revision=current.revision + 1,
+            )
+            self._replace(connection, consumed, current.revision)
+            self._insert(connection, review)
+        return consumed
 
     def replace(self, record: R, *, expected_revision: int) -> R:
         with self.store.connect() as connection:
@@ -1000,6 +1044,15 @@ class PassBRepository:
                 EvidenceBundleRecord,
                 review.reviewer_evidence_bundle_id,
             )
+            reference = (
+                self._get(
+                    connection,
+                    EvidenceReferenceRecord,
+                    review.consumed_evidence_reference_id,
+                )
+                if review.consumed_evidence_reference_id is not None
+                else None
+            )
             if (
                 review.state != ReviewState.PENDING
                 or review.disposition
@@ -1037,6 +1090,35 @@ class PassBRepository:
                 or work_item.project_id != assignment.project_id
                 or work_item.charter_id != assignment.charter_id
                 or work_item.charter_revision != assignment.charter_revision
+                or (
+                    reference is not None
+                    and (
+                        review.consumed_evidence_reference_revision is None
+                        or reference.revision
+                        != review.consumed_evidence_reference_revision
+                        or reference.consumed_by_review_id != review.review_id
+                        or reference.assignment_id
+                        != reviewer_assignment.assignment_id
+                        or reference.review_target_assignment_id
+                        != assignment.assignment_id
+                        or reference.producer_assignment_id
+                        != assignment.assignment_id
+                        or reference.producer_attempt_id
+                        != producer_evidence.attempt_id
+                        or reference.source_evidence_bundle_id
+                        != producer_evidence.evidence_bundle_id
+                        or reference.source_project_id
+                        != assignment.project_id
+                        or reference.source_workflow_id
+                        != assignment.workflow_id
+                        or reference.source_work_item_id
+                        != assignment.work_item_id
+                        or reference.source_charter_id
+                        != assignment.charter_id
+                        or reference.source_charter_revision
+                        != assignment.charter_revision
+                    )
+                )
             ):
                 raise PermissionError("review decision binding changed")
             review_state = ReviewState(review.disposition)

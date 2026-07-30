@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.pass_b.application import PassBApplication
+from keeper.pass_b.repository import validate_protected_workspace_tree
 from keeper.ui.theme import THEME, configure_ttk
 from keeper.ui.view_models import SETUP_STEPS, ProductViewModel, build_product_view
 
@@ -51,11 +55,31 @@ class ProductSetupController:
 
     def _validate(self) -> None:
         if self.step == "storage":
-            target = Path(self.evidence_directory).resolve()
+            selected = Path(self.evidence_directory)
+            validate_protected_workspace_tree(selected, require_exists=False)
+            target = selected.resolve()
             target.mkdir(parents=True, exist_ok=True)
-            probe = target / ".keeper-write-test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink()
+            validate_protected_workspace_tree(target)
+            probe: Path | None = None
+            try:
+                descriptor, probe_name = tempfile.mkstemp(
+                    prefix=".keeper-write-probe-",
+                    suffix=".tmp",
+                    dir=target,
+                )
+                probe = Path(probe_name)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(b"keeper-write-probe")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if probe.read_bytes() != b"keeper-write-probe":
+                    raise OSError("evidence-directory write probe failed")
+            finally:
+                if probe is not None:
+                    try:
+                        probe.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         if self.step == "repository" and self.repository:
             self.application.git.inspect(Path(self.repository))
 
@@ -66,13 +90,17 @@ class KeeperProductDesktop:
     def __init__(
         self, application: Any, *,
         pass_b_application: PassBApplication | None = None,
+        authority_health_client: Any | None = None,
     ) -> None:
         import tkinter as tk
         from tkinter import ttk
 
         self.tk, self.ttk = tk, ttk
         self.application = application
-        self.pass_b = pass_b_application or PassBApplication(application.data_directory)
+        self.pass_b = pass_b_application or _desktop_pass_b_application(
+            application.data_directory,
+            authority_health_client=authority_health_client,
+        )
         self.project_id: str | None = None
         self.developer_details_enabled = False
         self.root = tk.Tk()
@@ -316,7 +344,23 @@ class KeeperProductDesktop:
         for label, value in view.right_rail:
             if label in self.rail_values:
                 self.rail_values[label].set(value)
-        sage = view.sage
+        self._render_sage(view.sage)
+        self.status.set("Durable state refreshed")
+
+    def _render_sage(self, sage: dict[str, Any]) -> None:
+        if not bool(sage.get("visible")):
+            self.sage_label.pack_forget()
+            self.sage_detail.pack_forget()
+            return
+        if not self.sage_label.winfo_manager():
+            self.sage_label.pack(
+                anchor="w", padx=14, before=self.refresh_button
+            )
+        if not self.sage_detail.winfo_manager():
+            self.sage_detail.pack(
+                anchor="w", padx=14, pady=(2, 8),
+                before=self.refresh_button,
+            )
         self.sage_label.configure(
             text=f"Sage ? {str(sage['mode']).casefold()} ? "
             f"{str(sage['activity_state']).casefold()}"
@@ -325,7 +369,6 @@ class KeeperProductDesktop:
             text=f"{sage['expression']} ? {sage['mood']} ? "
             "presentation only ? authority effect NONE"
         )
-        self.status.set("Durable state refreshed")
 
     def _render_timeline(self, widget: Any, view: ProductViewModel) -> None:
         widget.configure(state="normal")
@@ -460,6 +503,24 @@ class KeeperProductDesktop:
         ]
         if len(reviews) == 1:
             reviews.append("No validated review results yet")
+        reviews.extend(
+            [
+                "",
+                "TYPED EVIDENCE REFERENCES",
+                *[
+                    (
+                        f"{card['reference_id']}: {card['classification']} | "
+                        f"producer {card['source_producer'] or 'Unknown'} | "
+                        f"reviewed {card['reviewed_assignment'] or 'Unknown'} | "
+                        f"sha256 {card['digest']} | {card['size_bytes']} bytes | "
+                        f"{card['validation_state']} | {card['review_state']}"
+                    )
+                    for card in view.evidence_reference_cards
+                ],
+            ]
+        )
+        if not view.evidence_reference_cards:
+            reviews.append("No typed evidence references yet")
         self._set_text(self.review_text, "\n".join(reviews))
 
     def _render_safety(self, view: ProductViewModel) -> None:
@@ -706,3 +767,17 @@ class KeeperProductDesktop:
             navigation, text="Finish", style="Accent.TButton", command=finish,
         ).pack(side="right")
         render()
+
+
+def _desktop_pass_b_application(
+    data_directory: Path,
+    *,
+    authority_health_client: Any | None = None,
+) -> PassBApplication:
+    health_client = authority_health_client
+    if health_client is None:
+        health_client = ProductionAuthorityServiceClient(timeout_seconds=0.25)
+    return PassBApplication(
+        data_directory,
+        authority_health_client=health_client,
+    )
