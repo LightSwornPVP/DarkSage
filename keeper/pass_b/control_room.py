@@ -6,9 +6,10 @@ from typing import Any, Callable
 
 from keeper.pass_b.conversation import (
     CharterDraftContextRecord,
-    expire_delegated_grants,
+    ProjectStatusReader,
+    reconcile_delegated_grants,
 )
-from keeper.pass_b.enums import AssignmentState, DelegatedModeState
+from keeper.pass_b.enums import AssignmentState
 from keeper.pass_b.models import (
     AssignmentRecord,
     AttemptRecord,
@@ -59,14 +60,15 @@ class ControlRoomService:
         repository: PassBRepository,
         *,
         authority_health: AuthorityHealth | None = None,
+        project_status: ProjectStatusReader,
     ) -> None:
         self.repository = repository
         self.authority_health = authority_health or (
             lambda: {"state": "NOT_CONFIGURED"}
         )
+        self.project_status = project_status
 
     def snapshot(self, project_id: str | None = None) -> ControlRoomSnapshot:
-        expire_delegated_grants(self.repository)
         assignments = self.repository.list(
             AssignmentRecord, project_id=project_id
         )
@@ -88,9 +90,7 @@ class ControlRoomService:
         contexts = self.repository.list(
             CharterDraftContextRecord, project_id=project_id
         )
-        delegated = self.repository.list(
-            DelegatedModeGrantRecord, project_id=project_id
-        )
+
         providers = self.repository.list(ProviderRecord)
         accounts = self.repository.list(ProviderAccountRecord)
         sessions = self.repository.list(ProviderSessionRecord)
@@ -101,8 +101,10 @@ class ControlRoomService:
         }
         active_delegation = [
             item
-            for item in delegated
-            if item.state == DelegatedModeState.ACTIVE
+            for item in reconcile_delegated_grants(
+                self.repository, project_status=self.project_status
+            )
+            if project_id is None or item.project_id == project_id
         ]
         uncertain = [
             item

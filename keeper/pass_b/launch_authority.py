@@ -16,6 +16,8 @@ from keeper.executive.service import KeeperExecutive
 from keeper.pass_b.models import (
     AssignmentRecord,
     ProviderRecord,
+    WorkflowRecord,
+    WorkItemRecord,
     WorkspaceReservationRecord,
 )
 from keeper.pass_b.providers import (
@@ -44,6 +46,8 @@ class LaunchAuthorization:
 class LaunchAuthority(Protocol):
     def authorize(
         self,
+        workflow: WorkflowRecord,
+        work_item: WorkItemRecord,
         assignment: AssignmentRecord,
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
@@ -63,12 +67,14 @@ class UnavailableLaunchAuthority:
 
     def authorize(
         self,
+        workflow: WorkflowRecord,
+        work_item: WorkItemRecord,
         assignment: AssignmentRecord,
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
         authority_attempt_id: str,
     ) -> LaunchAuthorization:
-        del assignment, provider, workspace, authority_attempt_id
+        del workflow, work_item, assignment, provider, workspace, authority_attempt_id
         raise PermissionError(
             "Pass B launch requires active Executive and KeeperAuthority binding"
         )
@@ -137,6 +143,8 @@ class ExecutiveAuthorityLaunchGate:
 
     def authorize(
         self,
+        workflow: WorkflowRecord,
+        work_item: WorkItemRecord,
         assignment: AssignmentRecord,
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
@@ -146,6 +154,7 @@ class ExecutiveAuthorityLaunchGate:
             raise PermissionError(
                 "provider has no durable KeeperAuthority registration"
             )
+        _validate_durable_binding(workflow, work_item, assignment)
         charter = self._active_charter(assignment)
         self._validate_charter_scope(charter, assignment, workspace)
         state = self._authority.query_state("attempts", authority_attempt_id)
@@ -163,7 +172,8 @@ class ExecutiveAuthorityLaunchGate:
             "role": assignment.role.casefold(),
             "provider_instance_id": assignment.session_id,
             "workspace": canonical_workspace_path(
-                Path(workspace.canonical_path)
+                Path(workspace.canonical_path),
+                read_only=assignment.read_only,
             ),
             "project_id": assignment.project_id,
             "charter_id": assignment.charter_id,
@@ -216,6 +226,10 @@ class ExecutiveAuthorityLaunchGate:
             "launch_authorization_id": authorization_id,
             "authorization_generation": generation,
             "authority_envelope_digest": assignment.authority_envelope_digest,
+            "workflow_id": workflow.workflow_id,
+            "workflow_record_digest": _digest(workflow.to_dict()),
+            "work_item_id": work_item.work_item_id,
+            "work_item_record_digest": _digest(work_item.to_dict()),
             "workspace_reservation_id": workspace.workspace_reservation_id,
         }
         return LaunchAuthorization(
@@ -364,9 +378,17 @@ class ExecutiveAuthorityLaunchGate:
             raise PermissionError("provider is outside the active charter")
         workspaces = charter.get("workspaces")
         if isinstance(workspaces, (list, tuple)) and workspaces:
-            candidate = canonical_workspace_path(Path(workspace.canonical_path))
+            candidate = canonical_workspace_path(
+                Path(workspace.canonical_path),
+                read_only=assignment.read_only,
+            )
             if not any(
-                _path_contains(canonical_workspace_path(Path(item)), candidate)
+                _path_contains(
+                    canonical_workspace_path(
+                        Path(item), read_only=assignment.read_only
+                    ),
+                    candidate,
+                )
                 for item in workspaces
                 if isinstance(item, str) and item
             ):
@@ -383,6 +405,8 @@ class TestLaunchAuthority:
 
     def reserve(
         self,
+        workflow: WorkflowRecord,
+        work_item: WorkItemRecord,
         assignment: AssignmentRecord,
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
@@ -391,12 +415,14 @@ class TestLaunchAuthority:
         launch_token: str | None = None,
     ) -> str:
         token = launch_token or f"launch:{authority_attempt_id}"
-        expected = _test_expectation(assignment, provider, workspace)
+        expected = _test_expectation(workflow, work_item, assignment, provider, workspace)
         self._authorizations[authority_attempt_id] = (expected, token)
         return authority_attempt_id
 
     def authorize(
         self,
+        workflow: WorkflowRecord,
+        work_item: WorkItemRecord,
         assignment: AssignmentRecord,
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
@@ -406,7 +432,7 @@ class TestLaunchAuthority:
         if registered is None:
             raise PermissionError("test Authority attempt was not reserved")
         expected, launch_token = registered
-        actual = _test_expectation(assignment, provider, workspace)
+        actual = _test_expectation(workflow, work_item, assignment, provider, workspace)
         if actual != expected:
             raise PermissionError("test Authority attempt binding mismatch")
         plan = {
@@ -435,6 +461,29 @@ class TestLaunchAuthority:
         return adapter.launch(request)
 
 
+def _validate_durable_binding(
+    workflow: WorkflowRecord,
+    work_item: WorkItemRecord,
+    assignment: AssignmentRecord,
+) -> None:
+    if (
+        workflow.state != "ACTIVE"
+        or work_item.workflow_id != workflow.workflow_id
+        or assignment.workflow_id != workflow.workflow_id
+        or assignment.work_item_id != work_item.work_item_id
+        or workflow.project_id != assignment.project_id
+        or work_item.project_id != assignment.project_id
+        or workflow.charter_id != assignment.charter_id
+        or work_item.charter_id != assignment.charter_id
+        or workflow.charter_revision != assignment.charter_revision
+        or work_item.charter_revision != assignment.charter_revision
+        or workflow.authority_envelope_digest
+        != assignment.authority_envelope_digest
+    ):
+        raise PermissionError(
+            "launch is not bound to exact durable workflow and work item"
+        )
+
 def _status_dict(
     executive: KeeperExecutive, project_id: str
 ) -> dict[str, Any]:
@@ -450,6 +499,8 @@ def _status_dict(
 
 
 def _test_expectation(
+    workflow: WorkflowRecord,
+    work_item: WorkItemRecord,
     assignment: AssignmentRecord,
     provider: ProviderRecord,
     workspace: WorkspaceReservationRecord,
@@ -462,9 +513,15 @@ def _test_expectation(
         "task_id": assignment.assignment_id,
         "task_revision": assignment.revision,
         "stage_id": assignment.work_item_id,
+        "workflow_id": workflow.workflow_id,
+        "workflow_record_digest": _digest(workflow.to_dict()),
+        "work_item_id": work_item.work_item_id,
+        "work_item_record_digest": _digest(work_item.to_dict()),
         "role": assignment.role,
         "provider_instance_id": assignment.session_id,
-        "workspace": canonical_workspace_path(Path(workspace.canonical_path)),
+        "workspace": canonical_workspace_path(
+            Path(workspace.canonical_path), read_only=assignment.read_only
+        ),
         "workspace_reservation_id": workspace.workspace_reservation_id,
         "authority_envelope_digest": assignment.authority_envelope_digest,
     }

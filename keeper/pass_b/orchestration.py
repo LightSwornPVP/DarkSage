@@ -7,7 +7,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, cast
 
 from keeper.pass_b.enums import (
     AssignmentRole,
@@ -19,6 +19,7 @@ from keeper.pass_b.enums import (
     ReservationState,
     ReviewState,
     WorkItemState,
+    WorkflowState,
 )
 from keeper.pass_b.models import (
     AssignmentRecord,
@@ -31,12 +32,14 @@ from keeper.pass_b.models import (
     ResumeCheckpointRecord,
     ReviewRecord,
     UsagePoolRecord,
+    WorkflowRecord,
     WorkItemRecord,
     WorkspaceReservationRecord,
     WriteReservationRecord,
 )
 from keeper.pass_b.launch_authority import (
     LaunchAuthority,
+    ProjectStatusReader,
     UnavailableLaunchAuthority,
 )
 from keeper.pass_b.providers import (
@@ -67,6 +70,7 @@ class OrchestrationService:
         clock: Clock | None = None,
         launch_authority: LaunchAuthority | None = None,
         usage_reset_verifier: UsageResetVerifier | None = None,
+        project_status: ProjectStatusReader | None = None,
     ) -> None:
         self.repository = repository
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -76,6 +80,7 @@ class OrchestrationService:
         self.usage_reset_verifier = (
             usage_reset_verifier or UnavailableUsageResetVerifier()
         )
+        self.project_status = project_status
         self.adapters: dict[str, ProviderAdapter] = {}
 
     def register_provider(
@@ -153,6 +158,34 @@ class OrchestrationService:
             raise PermissionError("adapter does not match durable provider")
         self.adapters[provider.provider_id] = adapter
 
+    def create_workflow(
+        self,
+        *,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+        strategy: str,
+        authority_envelope_digest: str,
+        workflow_id: str | None = None,
+    ) -> WorkflowRecord:
+        self._require_current_charter(
+            project_id, charter_id, charter_revision, authority_envelope_digest
+        )
+        now = self._now()
+        record = WorkflowRecord(
+            workflow_id=workflow_id or uuid.uuid4().hex,
+            project_id=project_id,
+            charter_id=charter_id,
+            charter_revision=charter_revision,
+            strategy=strategy,
+            authority_envelope_digest=authority_envelope_digest,
+            state=WorkflowState.ACTIVE,
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        self.repository.insert_workflow(record)
+        return record
     def create_work_item(
         self,
         *,
@@ -165,6 +198,13 @@ class OrchestrationService:
         dependencies: tuple[str, ...] = (),
         required_roles: tuple[str, ...] = (),
     ) -> WorkItemRecord:
+        workflow = self.repository.get(WorkflowRecord, workflow_id)
+        self._require_current_charter(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
         now = self._now()
         record = WorkItemRecord(
             work_item_id=uuid.uuid4().hex,
@@ -181,7 +221,7 @@ class OrchestrationService:
             updated_at=now,
             revision=1,
         )
-        self.repository.insert(record)
+        self.repository.insert_work_item_bound(record)
         return record
 
     def create_assignment(
@@ -200,6 +240,15 @@ class OrchestrationService:
         independence_key: str,
     ) -> AssignmentRecord:
         selected_role = AssignmentRole(role)
+        workflow = self.repository.get(
+            WorkflowRecord, work_item.workflow_id
+        )
+        self._require_current_charter(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
         provider = self.repository.get(ProviderRecord, provider_id)
         account = self.repository.get(ProviderAccountRecord, account_id)
         session = self.repository.get(ProviderSessionRecord, session_id)
@@ -238,7 +287,7 @@ class OrchestrationService:
             updated_at=now,
             revision=1,
         )
-        self.repository.insert(record)
+        self.repository.insert_assignment_bound(record, work_item)
         return record
 
     def reserve_workspace(
@@ -258,7 +307,9 @@ class OrchestrationService:
             project_id=assignment.project_id,
             assignment_id=assignment.assignment_id,
             workspace_id=assignment.workspace_id,
-            canonical_path=canonical_workspace_path(path),
+            canonical_path=canonical_workspace_path(
+                path, read_only=assignment.read_only
+            ),
             mode=(
                 ReservationMode.READ_ONLY
                 if assignment.read_only
@@ -384,6 +435,21 @@ class OrchestrationService:
         pool = self.repository.get(
             UsagePoolRecord, observation.pool_id
         )
+        sessions = tuple(
+            item
+            for item in self.repository.list(ProviderSessionRecord)
+            if item.provider_id == pool.provider_id
+            and item.account_id == pool.account_id
+        )
+        expected_models = tuple(sorted({item.model_id for item in sessions}))
+        expected_sessions = tuple(sorted(item.session_id for item in sessions))
+        if (
+            tuple(sorted(observation.model_ids)) != expected_models
+            or tuple(sorted(observation.session_ids)) != expected_sessions
+        ):
+            raise PermissionError(
+                "usage reset observation provider-session scope changed"
+            )
         self.usage_reset_verifier.verify(
             pool, observation, now=self.clock()
         )
@@ -393,8 +459,11 @@ class OrchestrationService:
             observation_digest=observation.digest(),
             observed_reset_at=observation.reset_at,
             observation_source=observation.source,
+            observation_generation=observation.generation,
+            observed_capacity=observation.capacity,
+            observed_consumed=observation.consumed,
             observed_remaining=observation.remaining,
-            confidence="HIGH",
+            confidence=observation.confidence,
             observed_at=observation.observed_at,
         )
 
@@ -409,7 +478,9 @@ class OrchestrationService:
         side_effect_class: str = "REVERSIBLE_WORKSPACE_WRITE",
         after_launch_claim: Callable[[], None] | None = None,
     ) -> EvidenceBundleRecord:
-        assignment = self.repository.get(AssignmentRecord, assignment_id)
+        workflow, work_item, assignment = (
+            self.repository.assignment_launch_binding(assignment_id)
+        )
         adapter = self.adapters.get(assignment.provider_id)
         if adapter is None:
             raise RuntimeError("assignment provider adapter is unavailable")
@@ -429,7 +500,9 @@ class OrchestrationService:
         workspace = workspaces[0]
         if (
             workspace.workspace_id != assignment.workspace_id
-            or canonical_workspace_path(workspace_path)
+            or canonical_workspace_path(
+                workspace_path, read_only=assignment.read_only
+            )
             != workspace.canonical_path
         ):
             raise PermissionError(
@@ -439,6 +512,8 @@ class OrchestrationService:
             ProviderRecord, assignment.provider_id
         )
         authorization = self.launch_authority.authorize(
+            workflow,
+            work_item,
             assignment,
             provider,
             workspace,
@@ -483,7 +558,12 @@ class OrchestrationService:
             launch_plan_digest=authorization.launch_plan_digest,
             session_slot_claimed=True,
         )
-        self.repository.reserve_attempt(attempt)
+        self.repository.reserve_attempt(
+            attempt,
+            expected_workflow=workflow,
+            expected_work_item=work_item,
+            expected_assignment=assignment,
+        )
         claimed = self.repository.claim_launch(attempt.attempt_id, self._now())
         if after_launch_claim is not None:
             after_launch_claim()
@@ -778,6 +858,39 @@ class OrchestrationService:
             revision=1,
         )
 
+    def _require_current_charter(
+        self,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+        authority_envelope_digest: str,
+    ) -> None:
+        if self.project_status is None:
+            return
+        status = self.project_status(project_id)
+        project = status.get("project_summary")
+        charter = status.get("active_charter")
+        if (
+            not isinstance(project, dict)
+            or not isinstance(charter, dict)
+            or project.get("project_id") != project_id
+            or project.get("state") != "ACTIVE"
+            or project.get("active_charter_id") != charter_id
+            or project.get("active_charter_revision") != charter_revision
+            or charter.get("project_id") != project_id
+            or charter.get("charter_id") != charter_id
+            or charter.get("revision") != charter_revision
+            or charter.get("status") != "ACTIVE"
+            or not charter.get("founder_approval_record_id")
+            or not charter.get("founder_approval_identity")
+            or not charter.get("founder_authorization_capability_digest")
+            or not isinstance(charter.get("authority_envelope"), dict)
+            or authority_envelope_digest
+            != authority_envelope_digest_for_status(charter)
+        ):
+            raise PermissionError(
+                "workflow is not bound to the current Founder-approved charter"
+            )
     def _now(self) -> str:
         value = self.clock()
         if value.tzinfo is None:
@@ -813,6 +926,12 @@ def evidence_content_digest(
         ).encode("utf-8")
     ).hexdigest()
 
+
+def authority_envelope_digest_for_status(charter: dict[str, Any]) -> str:
+    envelope = charter.get("authority_envelope")
+    if not isinstance(envelope, dict):
+        raise PermissionError("current charter authority envelope is malformed")
+    return authority_envelope_digest(cast(dict[str, object], envelope))
 
 def authority_envelope_digest(value: dict[str, object]) -> str:
     return hashlib.sha256(

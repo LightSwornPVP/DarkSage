@@ -40,6 +40,7 @@ from keeper.pass_b.application import PassBApplication
 from keeper.pass_b.launch_authority import ExecutiveAuthorityLaunchGate
 from keeper.pass_b.conversation import (
     DynamicWorkflowDesigner,
+    ProjectStatusReader,
     activate_delegated_mode,
     validate_delegated_action,
 )
@@ -65,6 +66,10 @@ from keeper.pass_b.models import (
 )
 from keeper.pass_b.orchestration import authority_envelope_digest
 from keeper.pass_b.providers import LocalMockAdapter
+from keeper.pass_b.repository import (
+    canonical_evidence_reference_path,
+    canonical_workspace_path,
+)
 from keeper.pass_b.usage_authority import TestUsageResetVerifier
 from keeper.providers.adapters import create_provider_registration
 
@@ -309,6 +314,30 @@ def run_darksage_pilot(
         launch_authority=launch_gate,
         usage_reset_verifier=usage_reset_verifier,
     )
+    production_rejected_test_reset_verifier = False
+    try:
+        PassBApplication(
+            data_directory / "production-reset-boundary-check",
+            executive=executive,
+            usage_reset_verifier=usage_reset_verifier,
+        )
+    except TypeError:
+        production_rejected_test_reset_verifier = True
+    pilot_evidence_root = (
+        data_directory
+        / ".ai-workflow"
+        / "pilot-invocations"
+        / f"pass-b-{uuid.uuid4().hex}"
+    )
+    pilot_evidence_root.mkdir(parents=True, exist_ok=False)
+    pilot_evidence_read_only_reference = bool(
+        canonical_evidence_reference_path(pilot_evidence_root)
+    )
+    pilot_evidence_writer_rejected = False
+    try:
+        canonical_workspace_path(pilot_evidence_root)
+    except PermissionError:
+        pilot_evidence_writer_rejected = True
     outcome = application.begin_conversation(
         f"Continue the DarkSage software project in {workspace}. No spending, no deployment, "
         "no live trading, and do not push."
@@ -347,11 +376,20 @@ def run_darksage_pilot(
         session_id="reviewer-session",
         capacity=2,
     )
+    durable_workflow = application.orchestration.create_workflow(
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        strategy=blueprint.strategy,
+        authority_envelope_digest=authority_envelope_digest(
+            charter.authority_envelope.to_dict()
+        ),
+    )
     implementation_item = application.orchestration.create_work_item(
         project_id=project.project_id,
         charter_id=charter.charter_id,
         charter_revision=charter.revision,
-        workflow_id=f"pilot-{uuid.uuid4().hex}",
+        workflow_id=durable_workflow.workflow_id,
         title="Implement bounded DarkSage continuation",
         objective="Create isolated implementation evidence",
         required_roles=(AssignmentRole.IMPLEMENTER,),
@@ -416,7 +454,7 @@ def run_darksage_pilot(
         project_id=project.project_id,
         charter_id=charter.charter_id,
         charter_revision=charter.revision,
-        workflow_id=implementation_item.workflow_id,
+        workflow_id=durable_workflow.workflow_id,
         title="Independent review",
         objective="Review implementation evidence without writes",
         dependencies=(implementation_item.work_item_id,),
@@ -488,7 +526,7 @@ def run_darksage_pilot(
         project_id=project.project_id,
         charter_id=charter.charter_id,
         charter_revision=charter.revision,
-        workflow_id=implementation_item.workflow_id,
+        workflow_id=durable_workflow.workflow_id,
         title="Usage reset simulation",
         objective="Pause and resume without duplicate execution",
         required_roles=(AssignmentRole.TESTER,),
@@ -532,33 +570,43 @@ def run_darksage_pilot(
         current_pool,
         reset_at=current_pool.reset_at or "",
         observed_at=_now(),
+        model_ids=(builder_session.model_id,),
+        session_ids=(builder_session.session_id,),
     )
     application.orchestration.observe_usage_reset(reset_observation)
     resumed_assignment = application.orchestration.resume_after_reset(
         waiting_assignment.assignment_id,
         checkpoint.resume_checkpoint_id,
     )
-    prohibited_delegation_denied = False
-    try:
-        activate_delegated_mode(
-            application.repository,
-            project_id=project.project_id,
-            charter=charter,
-            founder_identity=str(charter.founder_approval_identity),
-            founder_approval_id=str(charter.founder_approval_record_id),
-            founder_approval_digest=str(
-                charter.founder_authorization_capability_digest
-            ),
-            scope=("FORCE_PUSH",),
-            expires_at=(
-                datetime.now(UTC) + timedelta(minutes=1)
-            ).isoformat(),
-        )
-    except PermissionError:
-        prohibited_delegation_denied = True
+    prohibited_delegation_results: dict[str, bool] = {}
+    for prohibited_action in ("PUSH", "FORCE_PUSH"):
+        try:
+            activate_delegated_mode(
+                application.repository,
+                project_status=application.project_status,
+                project_id=project.project_id,
+                charter=charter,
+                founder_identity=str(charter.founder_approval_identity),
+                founder_approval_id=str(charter.founder_approval_record_id),
+                founder_approval_digest=str(
+                    charter.founder_authorization_capability_digest
+                ),
+                scope=(prohibited_action,),
+                expires_at=(
+                    datetime.now(UTC) + timedelta(minutes=1)
+                ).isoformat(),
+            )
+        except PermissionError:
+            prohibited_delegation_results[prohibited_action] = True
+        else:
+            prohibited_delegation_results[prohibited_action] = False
+    prohibited_delegation_denied = all(
+        prohibited_delegation_results.values()
+    )
     delegation_observed_at = datetime.now(UTC)
-    delegated_grant = activate_delegated_mode(
+    superseded_grant = activate_delegated_mode(
         application.repository,
+        project_status=application.project_status,
         project_id=project.project_id,
         charter=charter,
         founder_identity=str(charter.founder_approval_identity),
@@ -568,15 +616,102 @@ def run_darksage_pilot(
         ),
         scope=("RUN_TESTS",),
         expires_at=(
-            delegation_observed_at + timedelta(minutes=1)
+            delegation_observed_at + timedelta(minutes=10)
+        ).isoformat(),
+    )
+    validate_delegated_action(
+        application.repository,
+        superseded_grant.delegated_mode_grant_id,
+        project_status=application.project_status,
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        action="RUN_TESTS",
+        observed_at=superseded_grant.starts_at,
+    )
+    superseding_status = json.loads(
+        json.dumps(application.project_status(project.project_id))
+    )
+    superseding_status["project_summary"]["active_charter_revision"] = (
+        charter.revision + 1
+    )
+    superseding_status["active_charter"]["revision"] = charter.revision + 1
+    superseding_status["active_charter"]["founder_approval_record_id"] = (
+        "pilot-superseding-approval"
+    )
+    superseding_status["active_charter"][
+        "founder_authorization_capability_digest"
+    ] = "b" * 64
+
+    def superseding_project_status(requested_project_id: str) -> dict[str, Any]:
+        if requested_project_id == project.project_id:
+            return cast(dict[str, Any], superseding_status)
+        return application.project_status(requested_project_id)
+    delegated_supersession_enforced = False
+    try:
+        validate_delegated_action(
+            application.repository,
+            superseded_grant.delegated_mode_grant_id,
+            project_status=cast(
+                ProjectStatusReader, superseding_project_status
+            ),
+            project_id=project.project_id,
+            charter_id=charter.charter_id,
+            charter_revision=charter.revision,
+            action="RUN_TESTS",
+        )
+    except PermissionError:
+        delegated_supersession_enforced = True
+    persisted_superseded_grant = application.repository.get(
+        type(superseded_grant), superseded_grant.delegated_mode_grant_id
+    )
+    expiry_outcome = application.begin_conversation(
+        "Build an isolated software verification fixture under delegated mode. "
+        "Run tests only. No spending, deployment, service changes, live trading, "
+        "or push."
+    )
+    expiry_outcome = application.conversation.revise(
+        expiry_outcome.project.project_id,
+        {
+            "success_criteria": ("expiry enforcement is proven",),
+            "target_audience": "Founder",
+            "approved_providers": ("pilot-builder",),
+            "approved_tools": ("tests",),
+            "review_requirements": ("bounded deterministic check",),
+            "evidence_requirements": ("structured-report",),
+            "workspaces": (str(data_directory / "expiry-workspace"),),
+        },
+    )
+    expiry_challenge = application.conversation.request_approval(
+        expiry_outcome.project.project_id
+    )
+    expiry_project, current_charter = executive.approve_and_activate(
+        expiry_challenge
+    )
+    application.conversation.record_approval(current_charter)
+    expiry_observed_at = datetime.now(UTC)
+    delegated_grant = activate_delegated_mode(
+        application.repository,
+        project_status=application.project_status,
+        project_id=expiry_project.project_id,
+        charter=current_charter,
+        founder_identity=str(current_charter.founder_approval_identity),
+        founder_approval_id=str(current_charter.founder_approval_record_id),
+        founder_approval_digest=str(
+            current_charter.founder_authorization_capability_digest
+        ),
+        scope=("RUN_TESTS",),
+        expires_at=(
+            expiry_observed_at + timedelta(minutes=1)
         ).isoformat(),
     )
     validate_delegated_action(
         application.repository,
         delegated_grant.delegated_mode_grant_id,
-        project_id=project.project_id,
-        charter_id=charter.charter_id,
-        charter_revision=charter.revision,
+        project_status=application.project_status,
+        project_id=expiry_project.project_id,
+        charter_id=current_charter.charter_id,
+        charter_revision=current_charter.revision,
         action="RUN_TESTS",
         observed_at=delegated_grant.starts_at,
     )
@@ -585,12 +720,13 @@ def run_darksage_pilot(
         validate_delegated_action(
             application.repository,
             delegated_grant.delegated_mode_grant_id,
-            project_id=project.project_id,
-            charter_id=charter.charter_id,
-            charter_revision=charter.revision,
+            project_status=application.project_status,
+            project_id=expiry_project.project_id,
+            charter_id=current_charter.charter_id,
+            charter_revision=current_charter.revision,
             action="RUN_TESTS",
             observed_at=(
-                delegation_observed_at + timedelta(minutes=2)
+                expiry_observed_at + timedelta(minutes=2)
             ).isoformat(),
         )
     except PermissionError:
@@ -601,14 +737,22 @@ def run_darksage_pilot(
     snapshot = application.control_room.snapshot(project.project_id).to_dict()
     delegated_absent_from_active_projection = all(
         item["delegated_mode_grant_id"]
-        != delegated_grant.delegated_mode_grant_id
+        not in {
+            delegated_grant.delegated_mode_grant_id,
+            superseded_grant.delegated_mode_grant_id,
+        }
         for item in snapshot["safety"]["delegated_mode"]
     )
     if not (
         prohibited_delegation_denied
+        and delegated_supersession_enforced
+        and persisted_superseded_grant.state == "SUPERSEDED"
         and delegated_expiry_enforced
         and persisted_delegated_grant.state == "EXPIRED"
         and delegated_absent_from_active_projection
+        and production_rejected_test_reset_verifier
+        and pilot_evidence_read_only_reference
+        and pilot_evidence_writer_rejected
     ):
         raise RuntimeError("pilot delegated-mode boundary proof failed")
     attempts = application.repository.list(AttemptRecord)
@@ -630,7 +774,7 @@ def run_darksage_pilot(
         )
     }
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pilot": "Keeper Completion Pass B DarkSage/Sage",
         "generated_at": _now(),
         "project_id": project.project_id,
@@ -642,6 +786,18 @@ def run_darksage_pilot(
         ),
         "workflow_strategy": blueprint.strategy,
         "workflow_roles": [item.role for item in blueprint.steps],
+        "durable_workflow_id": durable_workflow.workflow_id,
+        "durable_work_item_ids": (
+            implementation_item.work_item_id,
+            review_item.work_item_id,
+            waiting_item.work_item_id,
+        ),
+        "durable_workflow_present": (
+            application.repository.get(
+                type(durable_workflow), durable_workflow.workflow_id
+            )
+            == durable_workflow
+        ),
         "provider_sessions": [
             builder_session.session_id,
             reviewer_session.session_id,
@@ -656,15 +812,33 @@ def run_darksage_pilot(
         "delegated_prohibited_action_denied": (
             prohibited_delegation_denied
         ),
+        "delegated_push_denied": prohibited_delegation_results["PUSH"],
+        "delegated_force_push_denied": (
+            prohibited_delegation_results["FORCE_PUSH"]
+        ),
+        "delegated_supersession_enforced": (
+            delegated_supersession_enforced
+        ),
+        "delegated_superseded_state": persisted_superseded_grant.state,
         "delegated_expiry_enforced": delegated_expiry_enforced,
         "delegated_expired_state": persisted_delegated_grant.state,
         "delegated_absent_from_active_projection": (
             delegated_absent_from_active_projection
         ),
         "duplicate_launch_count": duplicate_launch_count,
+        "production_rejected_test_reset_verifier": (
+            production_rejected_test_reset_verifier
+        ),
+        "pilot_evidence_read_only_reference": (
+            pilot_evidence_read_only_reference
+        ),
+        "pilot_evidence_writer_rejected": pilot_evidence_writer_rejected,
         "automatic_paid_fallback": False,
         "provider_self_approval": False,
         "push_performed": False,
+        "deployment_performed": False,
+        "spending_performed": False,
+        "service_change_performed": False,
         "live_trading_enabled": False,
         "presentation_authority_effect": "NONE",
         "authority_attempts": (

@@ -86,17 +86,19 @@ def test_delegated_mode_is_founder_bound_scoped_and_revocable(
     with pytest.raises(PermissionError):
         activate_delegated_mode(
             application.repository,
+            project_status=application.project_status,
             project_id=charter.project_id,
             charter=charter,
             founder_identity=charter.founder_approval_identity,
             founder_approval_id=charter.founder_approval_record_id,
             founder_approval_digest="wrong",
-            scope=("CONTINUE_ROUTINE_WORK",),
+            scope=("RUN_TESTS",),
             expires_at=expires_at,
         )
     with pytest.raises(PermissionError):
         activate_delegated_mode(
             application.repository,
+            project_status=application.project_status,
             project_id=charter.project_id,
             charter=charter,
             founder_identity=charter.founder_approval_identity,
@@ -110,12 +112,13 @@ def test_delegated_mode_is_founder_bound_scoped_and_revocable(
 
     grant = activate_delegated_mode(
         application.repository,
+        project_status=application.project_status,
         project_id=charter.project_id,
         charter=charter,
         founder_identity=charter.founder_approval_identity,
         founder_approval_id=charter.founder_approval_record_id,
         founder_approval_digest=charter.founder_authorization_capability_digest,
-        scope=("CONTINUE_ROUTINE_WORK",),
+        scope=("RUN_TESTS",),
         expires_at=expires_at,
     )
     snapshot = application.control_room.snapshot(charter.project_id).to_dict()
@@ -170,6 +173,8 @@ def test_darksage_pilot_completes_with_independent_roles(
 
     assert report["result"] == "PASS"
     assert report["workflow_strategy"] == "software-adaptive"
+    assert report["durable_workflow_present"] is True
+    assert len(report["durable_work_item_ids"]) == 3
     assert len(set(report["provider_sessions"])) == 2
     assert report["charter_founder_approved"] is True
     assert report["implementation_evidence"]["state"] == "VALIDATED"
@@ -177,13 +182,23 @@ def test_darksage_pilot_completes_with_independent_roles(
     assert report["usage_pause_observed"] is True
     assert report["usage_resume_state"] == "READY"
     assert report["delegated_prohibited_action_denied"] is True
+    assert report["delegated_push_denied"] is True
+    assert report["delegated_force_push_denied"] is True
+    assert report["delegated_supersession_enforced"] is True
+    assert report["delegated_superseded_state"] == "SUPERSEDED"
     assert report["delegated_expiry_enforced"] is True
     assert report["delegated_expired_state"] == "EXPIRED"
     assert report["delegated_absent_from_active_projection"] is True
     assert report["duplicate_launch_count"] == 0
+    assert report["production_rejected_test_reset_verifier"] is True
+    assert report["pilot_evidence_read_only_reference"] is True
+    assert report["pilot_evidence_writer_rejected"] is True
     assert report["automatic_paid_fallback"] is False
     assert report["provider_self_approval"] is False
     assert report["push_performed"] is False
+    assert report["deployment_performed"] is False
+    assert report["spending_performed"] is False
+    assert report["service_change_performed"] is False
     assert report["live_trading_enabled"] is False
     assert report["presentation_authority_effect"] == "NONE"
     assert set(report["authority_attempt_states"].values()) == {

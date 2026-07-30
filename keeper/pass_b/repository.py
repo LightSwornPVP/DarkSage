@@ -20,6 +20,7 @@ from keeper.pass_b.enums import (
     ReservationState,
     ReviewState,
     WorkItemState,
+    WorkflowState,
 )
 from keeper.pass_b.models import (
     AssignmentRecord,
@@ -33,6 +34,7 @@ from keeper.pass_b.models import (
     ResumeCheckpointRecord,
     ReviewRecord,
     UsagePoolRecord,
+    WorkflowRecord,
     WorkItemRecord,
     WorkspaceReservationRecord,
     WriteReservationRecord,
@@ -210,6 +212,69 @@ class PassBRepository:
         with self.store.connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
         return [self._decode(record_type, row) for row in rows]
+
+    def insert_workflow(self, record: WorkflowRecord) -> None:
+        if record.state != WorkflowState.ACTIVE:
+            raise ValueError("new workflows must begin active")
+        self.insert(record)
+
+    def insert_work_item_bound(self, record: WorkItemRecord) -> None:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            workflow = self._get(
+                connection, WorkflowRecord, record.workflow_id
+            )
+            _validate_workflow_work_item(workflow, record)
+            for dependency_id in record.dependencies:
+                dependency = self._get(
+                    connection, WorkItemRecord, dependency_id
+                )
+                if (
+                    dependency.workflow_id != workflow.workflow_id
+                    or dependency.project_id != workflow.project_id
+                    or dependency.charter_id != workflow.charter_id
+                    or dependency.charter_revision != workflow.charter_revision
+                ):
+                    raise PermissionError(
+                        "work item dependency crosses its durable workflow"
+                    )
+            self._insert(connection, record)
+
+    def insert_assignment_bound(
+        self,
+        record: AssignmentRecord,
+        supplied_work_item: WorkItemRecord,
+    ) -> None:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            work_item = self._get(
+                connection, WorkItemRecord, record.work_item_id
+            )
+            if work_item != supplied_work_item:
+                raise PermissionError(
+                    "assignment work item differs from durable state"
+                )
+            workflow = self._get(
+                connection, WorkflowRecord, record.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, record)
+            self._insert(connection, record)
+
+    def assignment_launch_binding(
+        self, assignment_id: str
+    ) -> tuple[WorkflowRecord, WorkItemRecord, AssignmentRecord]:
+        with self.store.connect() as connection:
+            assignment = self._get(
+                connection, AssignmentRecord, assignment_id
+            )
+            work_item = self._get(
+                connection, WorkItemRecord, assignment.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, assignment.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
+            return workflow, work_item, assignment
 
     def reserve_workspace(self, record: WorkspaceReservationRecord) -> None:
         if record.state != ReservationState.ACTIVE:
@@ -531,6 +596,9 @@ class PassBRepository:
         observation_digest: str,
         observed_reset_at: str,
         observation_source: str,
+        observation_generation: int,
+        observed_capacity: float | None,
+        observed_consumed: float,
         observed_remaining: float | None,
         confidence: str,
         observed_at: str,
@@ -553,6 +621,8 @@ class PassBRepository:
                 pool.reset_at is None
                 or reset < _parse_time(pool.reset_at)
                 or observation <= _parse_time(pool.last_observed_at)
+                or observation_generation != pool.observation_generation + 1
+                or observed_capacity != pool.capacity
             ):
                 raise PermissionError("usage reset observation is stale")
             active = connection.execute(
@@ -562,23 +632,21 @@ class PassBRepository:
                 (pool_id,),
             ).fetchone()
             reserved = float(active[0])
-            observed_capacity = (
-                pool.capacity
-                if observed_remaining is None
-                else (
-                    observed_remaining
-                    if pool.capacity is None
-                    else min(pool.capacity, observed_remaining)
+            if (
+                observed_remaining is not None
+                and observed_remaining < reserved
+            ):
+                raise PermissionError(
+                    "usage reset cannot cover active durable reservations"
                 )
-            )
             remaining = (
                 None
-                if observed_capacity is None
-                else max(0.0, observed_capacity - reserved)
+                if observed_remaining is None
+                else observed_remaining - reserved
             )
             updated = replace(
                 pool,
-                consumed=0,
+                consumed=observed_consumed,
                 reserved=reserved,
                 remaining=remaining,
                 reset_at=None,
@@ -739,7 +807,14 @@ class PassBRepository:
                     )
         return updated_assignment
 
-    def reserve_attempt(self, attempt: AttemptRecord) -> None:
+    def reserve_attempt(
+        self,
+        attempt: AttemptRecord,
+        *,
+        expected_workflow: WorkflowRecord | None = None,
+        expected_work_item: WorkItemRecord | None = None,
+        expected_assignment: AssignmentRecord | None = None,
+    ) -> None:
         if attempt.state != AttemptState.RESERVED:
             raise ValueError("new attempts must begin reserved")
         with self.store.connect() as connection:
@@ -747,6 +822,26 @@ class PassBRepository:
             assignment = self._get(
                 connection, AssignmentRecord, attempt.assignment_id
             )
+            work_item = self._get(
+                connection, WorkItemRecord, assignment.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, assignment.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
+            expected = (
+                expected_workflow,
+                expected_work_item,
+                expected_assignment,
+            )
+            if any(item is not None for item in expected) and (
+                expected_workflow != workflow
+                or expected_work_item != work_item
+                or expected_assignment != assignment
+            ):
+                raise PermissionError(
+                    "launch binding changed before the transactional claim"
+                )
             session = self._get(
                 connection, ProviderSessionRecord, assignment.session_id
             )
@@ -1002,6 +1097,13 @@ class PassBRepository:
             assignment = self._get(
                 connection, AssignmentRecord, attempt.assignment_id
             )
+            work_item = self._get(
+                connection, WorkItemRecord, assignment.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, assignment.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
             session = self._get(
                 connection, ProviderSessionRecord, assignment.session_id
             )
@@ -1086,6 +1188,13 @@ class PassBRepository:
             assignment = self._get(
                 connection, AssignmentRecord, attempt.assignment_id
             )
+            work_item = self._get(
+                connection, WorkItemRecord, assignment.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, assignment.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
             session = self._get(
                 connection, ProviderSessionRecord, assignment.session_id
             )
@@ -1145,6 +1254,13 @@ class PassBRepository:
             assignment = self._get(
                 connection, AssignmentRecord, attempt.assignment_id
             )
+            work_item = self._get(
+                connection, WorkItemRecord, assignment.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, assignment.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
             session = self._get(
                 connection, ProviderSessionRecord, assignment.session_id
             )
@@ -1536,16 +1652,21 @@ class PassBRepository:
         return record_type.from_dict(cast(dict[str, Any], value))
 
 
-def canonical_workspace_path(path: Path) -> str:
+def canonical_workspace_path(path: Path, *, read_only: bool = False) -> str:
     resolved = path.resolve(strict=True)
     if not resolved.is_dir():
         raise ValueError("workspace path must be an existing directory")
     parts = tuple(item.casefold() for item in resolved.parts)
-    if any(
-        parts[index : index + 2] == (".ai-workflow", "pw")
-        for index in range(max(0, len(parts) - 1))
-    ):
+    if _contains_parts(parts, (".ai-workflow", "pw")):
         raise PermissionError("Keeper browser evidence workspace is protected")
+    pilot_reference = is_pilot_evidence_path(resolved)
+
+    if pilot_reference:
+        raise PermissionError("Keeper pilot evidence is read-only and protected")
+    if not read_only and contains_pilot_evidence(resolved):
+        raise PermissionError(
+            "writer workspace cannot contain Keeper pilot evidence"
+        )
     for ancestor in (resolved, *resolved.parents):
         marker = ancestor / ".git"
         if marker.is_dir():
@@ -1554,8 +1675,21 @@ def canonical_workspace_path(path: Path) -> str:
             )
         if marker.is_file():
             break
-    return str(resolved).replace("\\", "/").casefold()
+    return _path_key(resolved)
 
+
+def canonical_evidence_reference_path(path: Path) -> str:
+    resolved = path.resolve(strict=True)
+    parts = tuple(item.casefold() for item in resolved.parts)
+    if _contains_parts(parts, (".ai-workflow", "pw")):
+        raise PermissionError("Keeper browser evidence reference is protected")
+    if not _contains_parts(
+        parts, (".ai-workflow", "pilot-invocations")
+    ):
+        raise PermissionError(
+            "only explicit pilot evidence uses this read-only reference path"
+        )
+    return _path_key(resolved)
 
 def canonical_scope(workspace_path: str, scope: str) -> str:
     normalized = scope.replace("\\", "/").strip("/")
@@ -1569,8 +1703,105 @@ def canonical_scope(workspace_path: str, scope: str) -> str:
         raise PermissionError(
             "write scope resolves outside the assigned workspace"
         ) from error
-    return str(candidate).replace("\\", "/").casefold()
+    parts = tuple(item.casefold() for item in candidate.parts)
+    if (
+        is_pilot_evidence_path(candidate)
+        or contains_pilot_evidence(candidate)
+    ):
+        raise PermissionError("write scope overlaps protected pilot evidence")
+    return _path_key(candidate)
 
+
+def _path_key(path: Path) -> str:
+    return str(path).replace("\\", "/").casefold()
+
+
+def _contains_parts(
+    parts: tuple[str, ...], fragment: tuple[str, ...]
+) -> bool:
+    return any(
+        parts[index : index + len(fragment)] == fragment
+        for index in range(max(0, len(parts) - len(fragment) + 1))
+    )
+
+
+def is_pilot_evidence_path(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    parts = tuple(item.casefold() for item in resolved.parts)
+    return _contains_parts(
+        parts, (".ai-workflow", "pilot-invocations")
+    )
+
+
+def contains_pilot_evidence(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    direct = resolved / ".ai-workflow" / "pilot-invocations"
+    if direct.exists():
+        return True
+    if not resolved.is_dir():
+        return False
+    try:
+        return any(
+            candidate.exists()
+            for candidate in resolved.glob(
+                "**/.ai-workflow/pilot-invocations"
+            )
+        )
+    except OSError:
+        return True
+
+def _validate_workflow_work_item(
+    workflow: WorkflowRecord, work_item: WorkItemRecord
+) -> None:
+    if (
+        workflow.state != WorkflowState.ACTIVE
+        or work_item.state not in {
+            WorkItemState.PROPOSED,
+            WorkItemState.READY,
+            WorkItemState.ASSIGNED,
+            WorkItemState.ACTIVE,
+            WorkItemState.REVIEW_REQUIRED,
+            WorkItemState.REPAIR_REQUIRED,
+        }
+        or work_item.workflow_id != workflow.workflow_id
+        or work_item.project_id != workflow.project_id
+        or work_item.charter_id != workflow.charter_id
+        or work_item.charter_revision != workflow.charter_revision
+    ):
+        raise PermissionError(
+            "work item is not bound to an active durable workflow"
+        )
+
+
+def _validate_assignment_binding(
+    workflow: WorkflowRecord,
+    work_item: WorkItemRecord,
+    assignment: AssignmentRecord,
+) -> None:
+    _validate_workflow_work_item(workflow, work_item)
+    if (
+        assignment.workflow_id != workflow.workflow_id
+        or assignment.work_item_id != work_item.work_item_id
+        or assignment.project_id != workflow.project_id
+        or assignment.charter_id != workflow.charter_id
+        or assignment.charter_revision != workflow.charter_revision
+        or assignment.authority_envelope_digest
+        != workflow.authority_envelope_digest
+        or (
+            work_item.required_roles
+            and assignment.role not in work_item.required_roles
+            and not (
+                assignment.role == AssignmentRole.REVIEWER
+                and assignment.read_only
+                and bool(
+                    assignment.usage_policy.get("review_of_assignment_id")
+                )
+            )
+        )
+    ):
+        raise PermissionError(
+            "assignment binding mismatch: durable workflow or work item"
+        )
 
 def _path_overlap(left: str, right: str) -> bool:
     return (

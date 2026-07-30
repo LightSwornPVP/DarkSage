@@ -386,6 +386,8 @@ def test_reset_checkpoint_is_one_use(
         current,
         reset_at=current.reset_at or "",
         observed_at=clock().isoformat(),
+        model_ids=tuple(sorted({item.model_id for item in sessions})),
+        session_ids=tuple(sorted(item.session_id for item in sessions)),
     )
     service.observe_usage_reset(observation)
     with pytest.raises(PermissionError, match="replayed"):
@@ -592,6 +594,7 @@ def test_delegated_force_push_variants_are_denied(
         with pytest.raises(PermissionError, match="outside"):
             activate_delegated_mode(
                 application.repository,
+                project_status=application.project_status,
                 project_id=charter.project_id,
                 charter=charter,
                 founder_identity=charter.founder_approval_identity,
@@ -614,6 +617,7 @@ def test_delegated_expiry_persists_and_stale_charter_is_denied(
     now = datetime.now(UTC)
     grant = activate_delegated_mode(
         application.repository,
+        project_status=application.project_status,
         project_id=charter.project_id,
         charter=charter,
         founder_identity=charter.founder_approval_identity,
@@ -621,26 +625,28 @@ def test_delegated_expiry_persists_and_stale_charter_is_denied(
         founder_approval_digest=(
             charter.founder_authorization_capability_digest
         ),
-        scope=("CONTINUE_ROUTINE_WORK",),
+        scope=("RUN_TESTS",),
         expires_at=(now + timedelta(minutes=5)).isoformat(),
     )
     with pytest.raises(PermissionError, match="stale"):
         validate_delegated_action(
             application.repository,
             grant.delegated_mode_grant_id,
+            project_status=application.project_status,
             project_id=charter.project_id,
             charter_id=charter.charter_id,
             charter_revision=charter.revision + 1,
-            action="CONTINUE_ROUTINE_WORK",
+            action="RUN_TESTS",
         )
     with pytest.raises(PermissionError, match="expired"):
         validate_delegated_action(
             application.repository,
             grant.delegated_mode_grant_id,
+            project_status=application.project_status,
             project_id=charter.project_id,
             charter_id=charter.charter_id,
             charter_revision=charter.revision,
-            action="CONTINUE_ROUTINE_WORK",
+            action="RUN_TESTS",
             observed_at=(now + timedelta(minutes=10)).isoformat(),
         )
     persisted = application.repository.get(

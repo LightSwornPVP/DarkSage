@@ -22,6 +22,7 @@ from keeper.pass_b.enums import (
     ReviewState,
     SessionModel,
     WorkItemState,
+    WorkflowState,
 )
 
 
@@ -218,6 +219,35 @@ class UsagePoolRecord(PassBRecord):
             raise ValueError("usage observation generation must be positive")
         _optional_timestamp(self.reset_at, "reset_at")
         _timestamp(self.last_observed_at, "last_observed_at")
+        _timestamp(self.created_at, "created_at")
+        _timestamp(self.updated_at, "updated_at")
+        _positive_revision(self.revision)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowRecord(PassBRecord):
+    workflow_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    strategy: str
+    authority_envelope_digest: str
+    state: str
+    created_at: str
+    updated_at: str
+    revision: int
+
+    KIND = "workflow"
+    ID_FIELD = "workflow_id"
+
+    def __post_init__(self) -> None:
+        WorkflowState(self.state)
+        if (
+            self.charter_revision < 1
+            or not self.strategy
+            or len(self.authority_envelope_digest) != 64
+        ):
+            raise ValueError("workflow charter binding is invalid")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -536,10 +566,20 @@ class DelegatedModeGrantRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    project_generation: str = ""
+    max_actions: int = 0
+    actions_used: int = 0
+    last_action_at: str | None = None
 
     KIND = "delegated_mode_grant"
     ID_FIELD = "delegated_mode_grant_id"
     TUPLE_FIELDS = ("scope",)
+    DEFAULTS = {
+        "project_generation": "",
+        "max_actions": 0,
+        "actions_used": 0,
+        "last_action_at": None,
+    }
 
     def __post_init__(self) -> None:
         DelegatedModeState(self.state)
@@ -548,6 +588,13 @@ class DelegatedModeGrantRecord(PassBRecord):
         _timestamp(self.starts_at, "starts_at")
         _timestamp(self.expires_at, "expires_at")
         _optional_timestamp(self.revoked_at, "revoked_at")
+        _optional_timestamp(self.last_action_at, "last_action_at")
+        if (
+            self.max_actions < 0
+            or self.actions_used < 0
+            or self.actions_used > self.max_actions
+        ):
+            raise ValueError("delegated action count is invalid")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -607,6 +654,7 @@ PASS_B_RECORD_TYPES: tuple[type[PassBRecord], ...] = (
     ProviderAccountRecord,
     ProviderSessionRecord,
     UsagePoolRecord,
+    WorkflowRecord,
     WorkItemRecord,
     AssignmentRecord,
     AttemptRecord,

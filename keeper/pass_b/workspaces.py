@@ -12,6 +12,10 @@ from keeper.pass_b.models import (
     EvidenceBundleRecord,
     WorkspaceReservationRecord,
 )
+from keeper.pass_b.repository import (
+    contains_pilot_evidence,
+    is_pilot_evidence_path,
+)
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -43,6 +47,8 @@ class WorkspacePolicy:
         ) or any(
             fragment.casefold() in normalized
             for fragment in self.prohibited_fragments
+        ) or is_pilot_evidence_path(resolved) or contains_pilot_evidence(
+            resolved
         ):
             raise PermissionError("workspace target is in a protected scope")
         return resolved

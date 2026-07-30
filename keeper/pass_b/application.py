@@ -9,7 +9,10 @@ from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.executive.service import KeeperExecutive
 from keeper.pass_b.control_room import ControlRoomService
-from keeper.pass_b.conversation import ConversationExecutive
+from keeper.pass_b.conversation import (
+    ConversationExecutive,
+    ProjectStatusReader,
+)
 from keeper.pass_b.conversation_runtime import DurableConversationService
 from keeper.pass_b.enums import (
     AssignmentRole,
@@ -34,7 +37,11 @@ from keeper.pass_b.launch_authority import (
 from keeper.pass_b.orchestration import OrchestrationService
 from keeper.pass_b.providers import LocalMockAdapter, ProviderAdapter
 from keeper.pass_b.repository import PassBRepository
-from keeper.pass_b.usage_authority import UsageResetVerifier
+from keeper.pass_b.usage_authority import (
+    ProductionUsageResetVerifier,
+    TestUsageResetVerifier,
+    UsageResetVerifier,
+)
 
 
 class PassBApplication:
@@ -60,7 +67,25 @@ class PassBApplication:
         )
         self.executive = executive or KeeperExecutive(self.store.path)
         self.authority_client = authority_client
+        self.project_status: ProjectStatusReader = lambda project_id: _project_status(
+            self.executive, project_id
+        )
         self._test_authority_configured = _test_launch_authority is not None
+        if _test_launch_authority is not None:
+            if type(usage_reset_verifier) is not TestUsageResetVerifier:
+                raise TypeError(
+                    "test composition requires the exact test usage verifier"
+                )
+        elif (
+            authority_client is not None
+            and type(usage_reset_verifier) is not ProductionUsageResetVerifier
+        ) or (
+            usage_reset_verifier is not None
+            and type(usage_reset_verifier) is not ProductionUsageResetVerifier
+        ):
+            raise TypeError(
+                "production composition requires the exact production usage verifier"
+            )
         if _test_launch_authority is not None:
             launch_authority = _test_launch_authority
         elif authority_client is not None:
@@ -77,12 +102,15 @@ class PassBApplication:
             self.repository,
             launch_authority=launch_authority,
             usage_reset_verifier=usage_reset_verifier,
+            project_status=self.project_status,
         )
         self.conversation = DurableConversationService(
             self.repository, self.executive
         )
         self.control_room = ControlRoomService(
-            self.repository, authority_health=self._authority_health
+            self.repository,
+            authority_health=self._authority_health,
+            project_status=self.project_status,
         )
         self._ensure_presentation_state()
 
@@ -296,6 +324,27 @@ class PassBApplication:
             )
         )
 
+
+def _project_status(
+    executive: ConversationExecutive, project_id: str
+) -> dict[str, Any]:
+    if isinstance(executive, KeeperExecutive):
+        status = executive.status(project_id)
+        return {
+            "project_summary": dict(status.project_summary),
+            "active_charter": (
+                dict(status.active_charter)
+                if status.active_charter is not None
+                else None
+            ),
+        }
+    reader = getattr(executive, "project_status", None)
+    if not callable(reader):
+        raise PermissionError("Executive project status reader is unavailable")
+    value = reader(project_id)
+    if not isinstance(value, dict):
+        raise PermissionError("Executive project status is malformed")
+    return value
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()

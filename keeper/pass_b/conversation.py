@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from keeper.executive.enums import CharterStatus
@@ -371,36 +374,25 @@ class DynamicWorkflowDesigner:
         )
 
 
-FORBIDDEN_DELEGATED_SCOPE = frozenset(
+class ProjectStatusReader(Protocol):
+    def __call__(self, project_id: str) -> dict[str, Any]: ...
+
+
+ALLOWED_DELEGATED_ACTIONS = frozenset(
     {
-        "FORCE_PUSH",
-        "GIT_PUSH_FORCE",
-        "HISTORY_REWRITE",
-        "REWRITE_HISTORY",
-        "DELETE_BACKUP",
-        "DELETE_BACKUP_BRANCH",
-        "DELETE_WORKTREE",
-        "DELETE_BACKUP_WORKTREE",
-        "SPENDING",
-        "PURCHASE",
-        "BUY_CREDITS",
-        "PAID_FALLBACK",
-        "DEPLOY",
-        "DEPLOY_PRODUCTION",
-        "PUBLISH",
-        "PUBLICATION",
-        "LIVE_TRADING",
-        "AUTONOMOUS_TRADING",
-        "CREDENTIAL_ACCESS",
-        "ACCESS_CREDENTIALS",
-        "CREDENTIAL_CHANGE",
-        "SECURITY_BOUNDARY_CHANGE",
-        "DESTRUCTIVE_ACTION",
-        "MAJOR_ARCHITECTURE_CHANGE",
-        "GOVERNANCE_CHANGE",
-        "EXPAND_GOVERNANCE",
-        "EXPAND_CHARTER",
-        "OUT_OF_CHARTER",
+        "TASK_SEQUENCING",
+        "SELECT_APPROVED_PROVIDER",
+        "ASSIGN_IMPLEMENTATION",
+        "ASSIGN_READ_ONLY_REVIEW",
+        "RUN_TESTS",
+        "RUN_VERIFICATION",
+        "REQUEST_BOUNDED_REPAIR",
+        "CREATE_ISOLATED_WORKTREE",
+        "PAUSE_FOR_USAGE_RESET",
+        "RESUME_AFTER_VALIDATED_RESET",
+        "UPDATE_ROUTINE_DOCUMENTATION",
+        "COLLECT_EVIDENCE",
+        "MARK_SAFE_IDEMPOTENT_RETRY",
     }
 )
 
@@ -408,6 +400,7 @@ FORBIDDEN_DELEGATED_SCOPE = frozenset(
 def activate_delegated_mode(
     repository: PassBRepository,
     *,
+    project_status: ProjectStatusReader,
     project_id: str,
     charter: ProjectCharter,
     founder_identity: str,
@@ -415,8 +408,12 @@ def activate_delegated_mode(
     founder_approval_digest: str,
     scope: tuple[str, ...],
     expires_at: str,
+    max_actions: int = 100,
 ) -> DelegatedModeGrantRecord:
     normalized_scope = tuple(_delegated_action(item) for item in scope)
+    project, active_charter = _current_project_charter(
+        project_status, project_id
+    )
     if (
         charter.project_id != project_id
         or charter.status != CharterStatus.ACTIVE
@@ -428,15 +425,26 @@ def activate_delegated_mode(
         or founder_identity != charter.founder_approval_identity
         or founder_approval_digest
         != charter.founder_authorization_capability_digest
+        or active_charter.get("charter_id") != charter.charter_id
+        or active_charter.get("revision") != charter.revision
+        or active_charter.get("founder_approval_record_id")
+        != founder_approval_id
+        or active_charter.get("founder_approval_identity")
+        != founder_identity
+        or active_charter.get("founder_authorization_capability_digest")
+        != founder_approval_digest
         or not normalized_scope
         or len(set(normalized_scope)) != len(normalized_scope)
-        or FORBIDDEN_DELEGATED_SCOPE.intersection(normalized_scope)
+        or any(item not in ALLOWED_DELEGATED_ACTIONS for item in normalized_scope)
+        or max_actions < 1
     ):
         raise PermissionError("delegated mode is outside Founder charter authority")
     now = _now()
     if _parse_time(expires_at) <= _parse_time(now):
         raise ValueError("delegated mode expiry must be in the future")
-    expire_delegated_grants(repository, observed_at=now)
+    reconcile_delegated_grants(
+        repository, project_status=project_status, observed_at=now
+    )
     existing = repository.list(
         DelegatedModeGrantRecord, project_id=project_id
     )
@@ -468,6 +476,10 @@ def activate_delegated_mode(
         created_at=now,
         updated_at=now,
         revision=1,
+        project_generation=_project_generation(project, active_charter),
+        max_actions=max_actions,
+        actions_used=0,
+        last_action_at=None,
     )
     repository.insert(record)
     return record
@@ -477,10 +489,12 @@ def validate_delegated_action(
     repository: PassBRepository,
     grant_id: str,
     *,
+    project_status: ProjectStatusReader,
     project_id: str,
     charter_id: str,
     charter_revision: int,
     action: str,
+    action_scope: dict[str, str] | None = None,
     observed_at: str | None = None,
 ) -> DelegatedModeGrantRecord:
     now = observed_at or _now()
@@ -501,6 +515,37 @@ def validate_delegated_action(
         raise PermissionError(
             f"delegated mode grant expired: {expired.delegated_mode_grant_id}"
         )
+    project, active_charter = _current_project_charter(
+        project_status, project_id
+    )
+    current_generation = _project_generation(project, active_charter)
+    if (
+        record.state == DelegatedModeState.ACTIVE
+        and (
+            record.project_id != project_id
+            or record.charter_id != active_charter.get("charter_id")
+            or record.charter_revision != active_charter.get("revision")
+            or record.founder_approval_id
+            != active_charter.get("founder_approval_record_id")
+            or record.founder_identity
+            != active_charter.get("founder_approval_identity")
+            or record.founder_approval_digest
+            != active_charter.get(
+                "founder_authorization_capability_digest"
+            )
+            or record.project_generation != current_generation
+        )
+    ):
+        repository.replace(
+            replace(
+                record,
+                state=DelegatedModeState.SUPERSEDED,
+                updated_at=now,
+                revision=record.revision + 1,
+            ),
+            expected_revision=record.revision,
+        )
+        raise PermissionError("delegated mode grant is superseded")
     normalized_action = _delegated_action(action)
     if (
         record.state != DelegatedModeState.ACTIVE
@@ -508,13 +553,26 @@ def validate_delegated_action(
         or record.project_id != project_id
         or record.charter_id != charter_id
         or record.charter_revision != charter_revision
-        or normalized_action in FORBIDDEN_DELEGATED_SCOPE
+        or normalized_action not in ALLOWED_DELEGATED_ACTIONS
         or normalized_action not in record.scope
+        or not _delegated_scope_allowed(
+            active_charter, normalized_action, action_scope
+        )
+        or record.actions_used >= record.max_actions
     ):
         raise PermissionError(
             "delegated action is expired, revoked, stale, or out of scope"
         )
-    return record
+    return repository.replace(
+        replace(
+            record,
+            actions_used=record.actions_used + 1,
+            last_action_at=now,
+            updated_at=now,
+            revision=record.revision + 1,
+        ),
+        expected_revision=record.revision,
+    )
 
 
 def expire_delegated_grants(
@@ -543,6 +601,50 @@ def expire_delegated_grants(
     return tuple(expired)
 
 
+def reconcile_delegated_grants(
+    repository: PassBRepository,
+    *,
+    project_status: ProjectStatusReader,
+    observed_at: str | None = None,
+) -> tuple[DelegatedModeGrantRecord, ...]:
+    now = observed_at or _now()
+    expire_delegated_grants(repository, observed_at=now)
+    active: list[DelegatedModeGrantRecord] = []
+    for record in repository.list(DelegatedModeGrantRecord):
+        if record.state != DelegatedModeState.ACTIVE:
+            continue
+        try:
+            project, charter = _current_project_charter(
+                project_status, record.project_id
+            )
+        except (KeyError, PermissionError, RuntimeError, ValueError):
+            continue
+        if (
+            record.charter_id != charter.get("charter_id")
+            or record.charter_revision != charter.get("revision")
+            or record.founder_approval_id
+            != charter.get("founder_approval_record_id")
+            or record.founder_identity
+            != charter.get("founder_approval_identity")
+            or record.founder_approval_digest
+            != charter.get("founder_authorization_capability_digest")
+            or record.project_generation
+            != _project_generation(project, charter)
+        ):
+            repository.replace(
+                replace(
+                    record,
+                    state=DelegatedModeState.SUPERSEDED,
+                    updated_at=now,
+                    revision=record.revision + 1,
+                ),
+                expected_revision=record.revision,
+            )
+            continue
+        active.append(record)
+    return tuple(active)
+
+
 def revoke_delegated_mode(
     repository: PassBRepository, grant_id: str
 ) -> DelegatedModeGrantRecord:
@@ -561,6 +663,97 @@ def revoke_delegated_mode(
         expected_revision=record.revision,
     )
 
+
+def _current_project_charter(
+    project_status: ProjectStatusReader, project_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        status = project_status(project_id)
+    except (KeyError, RuntimeError, ValueError) as error:
+        raise PermissionError("delegated project status is unavailable") from error
+    project = status.get("project_summary")
+    charter = status.get("active_charter")
+    if (
+        not isinstance(project, dict)
+        or not isinstance(charter, dict)
+        or project.get("project_id") != project_id
+        or project.get("state") != "ACTIVE"
+        or project.get("active_charter_id") != charter.get("charter_id")
+        or project.get("active_charter_revision") != charter.get("revision")
+        or charter.get("project_id") != project_id
+        or charter.get("status") != "ACTIVE"
+        or not charter.get("founder_approval_record_id")
+        or not charter.get("founder_approval_identity")
+        or not charter.get("founder_authorization_capability_digest")
+    ):
+        raise PermissionError(
+            "delegated project lacks a current Founder-approved charter"
+        )
+    return project, charter
+
+
+def _delegated_scope_allowed(
+    charter: dict[str, Any],
+    action: str,
+    action_scope: dict[str, str] | None,
+) -> bool:
+    scope = action_scope or {}
+    if any(
+        key not in {"provider_id", "workspace"}
+        or not isinstance(value, str)
+        or not value
+        for key, value in scope.items()
+    ):
+        return False
+    provider_id = scope.get("provider_id")
+    if provider_id is not None:
+        approved = charter.get("approved_providers")
+        if not isinstance(approved, (list, tuple)) or provider_id not in approved:
+            return False
+    workspace = scope.get("workspace")
+    if workspace is not None:
+        approved_workspaces = charter.get("workspaces")
+        if not isinstance(approved_workspaces, (list, tuple)):
+            return False
+        candidate = Path(workspace).resolve()
+        allowed = False
+        for item in approved_workspaces:
+            if not isinstance(item, str) or not item:
+                continue
+            root = Path(item).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            allowed = True
+            break
+        if not allowed:
+            return False
+    if action == "SELECT_APPROVED_PROVIDER" and provider_id is None:
+        return False
+    if action == "CREATE_ISOLATED_WORKTREE" and workspace is None:
+        return False
+    return True
+
+def _project_generation(
+    project: dict[str, Any], charter: dict[str, Any]
+) -> str:
+    value = {
+        "project_id": project.get("project_id"),
+        "project_state": project.get("state"),
+        "charter_id": charter.get("charter_id"),
+        "charter_revision": charter.get("revision"),
+        "founder_approval_id": charter.get("founder_approval_record_id"),
+        "founder_identity": charter.get("founder_approval_identity"),
+        "founder_approval_digest": charter.get(
+            "founder_authorization_capability_digest"
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 def _intake_to_dict(value: IntakeResult) -> dict[str, Any]:
     return value.to_dict()

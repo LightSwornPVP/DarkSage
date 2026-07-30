@@ -44,6 +44,13 @@ class AssignmentRole(StrEnum):
     DOCUMENTATION_SPECIALIST = "DOCUMENTATION_SPECIALIST"
 
 
+class WorkflowState(StrEnum):
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    CANCELED = "CANCELED"
+    SUPERSEDED = "SUPERSEDED"
+
+
 class WorkItemState(StrEnum):
     PROPOSED = "PROPOSED"
     READY = "READY"
@@ -124,6 +131,7 @@ class DelegatedModeState(StrEnum):
     ACTIVE = "ACTIVE"
     REVOKED = "REVOKED"
     EXPIRED = "EXPIRED"
+    SUPERSEDED = "SUPERSEDED"
 
 
 class PresentationMode(StrEnum):

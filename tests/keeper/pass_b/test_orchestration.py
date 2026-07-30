@@ -29,6 +29,7 @@ from keeper.pass_b.models import (
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     UsagePoolRecord,
+    WorkflowRecord,
     WorkItemRecord,
     WorkspaceReservationRecord,
 )
@@ -187,8 +188,15 @@ def _authorize(
     provider = service.repository.get(
         ProviderRecord, assignment.provider_id
     )
+    workflow, work_item, durable_assignment = (
+        service.repository.assignment_launch_binding(
+            assignment.assignment_id
+        )
+    )
     return authority.reserve(
-        assignment,
+        workflow,
+        work_item,
+        durable_assignment,
         provider,
         workspace,
         authority_attempt_id,
@@ -203,10 +211,18 @@ def _observe_reset(
     verifier = service.usage_reset_verifier
     assert isinstance(verifier, TestUsageResetVerifier)
     current = service.repository.get(UsagePoolRecord, pool.pool_id)
+    sessions = tuple(
+        item
+        for item in service.repository.list(ProviderSessionRecord)
+        if item.provider_id == current.provider_id
+        and item.account_id == current.account_id
+    )
     observation = verifier.issue(
         current,
         reset_at=current.reset_at or pool.reset_at or "",
         observed_at=clock().isoformat(),
+        model_ids=tuple(sorted({item.model_id for item in sessions})),
+        session_ids=tuple(sorted(item.session_id for item in sessions)),
     )
     return service.observe_usage_reset(observation)
 
@@ -223,11 +239,23 @@ def _assignment(
     review_of_assignment_id: str | None = None,
 ) -> AssignmentRecord:
     if work_item is None:
+        workflow = service.repository.optional(
+            WorkflowRecord, "workflow-1"
+        )
+        if workflow is None:
+            workflow = service.create_workflow(
+                workflow_id="workflow-1",
+                project_id="project-1",
+                charter_id="charter-1",
+                charter_revision=1,
+                strategy="test-bounded",
+                authority_envelope_digest="a" * 64,
+            )
         work_item = service.create_work_item(
             project_id="project-1",
             charter_id="charter-1",
             charter_revision=1,
-            workflow_id="workflow-1",
+            workflow_id=workflow.workflow_id,
             title=f"{role} work",
             objective="Produce bounded evidence",
             required_roles=(role,),
