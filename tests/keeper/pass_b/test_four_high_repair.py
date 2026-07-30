@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import hmac
+import os
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,7 +20,12 @@ from keeper.pass_b.conversation import (
     revoke_delegated_mode,
     validate_delegated_action,
 )
-from keeper.pass_b.enums import AssignmentRole, DelegatedModeState, WorkflowState
+from keeper.pass_b.enums import (
+    AssignmentRole,
+    AssignmentState,
+    DelegatedModeState,
+    WorkflowState,
+)
 from keeper.pass_b.launch_authority import TestLaunchAuthority
 from keeper.pass_b.models import (
     AssignmentRecord,
@@ -44,7 +51,7 @@ from keeper.pass_b.usage_authority import (
     UnavailableUsageResetVerifier,
     UsageResetObservation,
 )
-from keeper.pass_b.workspaces import WorkspacePolicy
+from keeper.pass_b.workspaces import GitWorktreeService, WorkspacePolicy
 from tests.keeper.pass_b.test_conversation_ui_pilot import (
     _approved_application,
 )
@@ -302,6 +309,7 @@ def test_ancestor_containing_nested_pilot_evidence_rejects(
     with pytest.raises(PermissionError, match="pilot evidence"):
         canonical_workspace_path(tmp_path)
 
+
 def test_pilot_evidence_symlink_alias_rejects(tmp_path: Path) -> None:
     _, _, run = _protected_tree(tmp_path)
     alias = tmp_path / "pilot-alias"
@@ -309,6 +317,21 @@ def test_pilot_evidence_symlink_alias_rejects(tmp_path: Path) -> None:
         alias.symlink_to(run, target_is_directory=True)
     except OSError as error:
         pytest.skip(f"directory symlink is unavailable: {error}")
+    with pytest.raises(PermissionError, match="pilot evidence"):
+        canonical_workspace_path(alias)
+
+
+def test_pilot_evidence_junction_alias_rejects(tmp_path: Path) -> None:
+    _, _, run = _protected_tree(tmp_path)
+    alias = tmp_path / "pilot-junction"
+    result = subprocess.run(
+        ["cmd.exe", "/c", "mklink", "/J", str(alias), str(run)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        pytest.skip(f"directory junction is unavailable: {result.stderr}")
     with pytest.raises(PermissionError, match="pilot evidence"):
         canonical_workspace_path(alias)
 
@@ -737,3 +760,230 @@ def test_delegated_action_count_is_enforced(tmp_path: Path) -> None:
             charter_revision=charter.revision,
             action="RUN_TESTS",
         )
+
+
+@pytest.mark.parametrize(
+    "role", (AssignmentRole.IMPLEMENTER, AssignmentRole.REVIEWER)
+)
+@pytest.mark.parametrize("location", ("root", "inside", "parent"))
+def test_every_assignment_role_rejects_pilot_evidence_tree(
+    tmp_path: Path, role: str, location: str
+) -> None:
+    _, service, _, provider, account, _, sessions, adapter = _stack(tmp_path)
+    assignment = _assignment(
+        service, provider, account, sessions[0], role=role
+    )
+    parent, evidence_root, evidence_run = _protected_tree(tmp_path)
+    candidates = {
+        "root": evidence_root,
+        "inside": evidence_run,
+        "parent": parent,
+    }
+    with pytest.raises(PermissionError, match="pilot evidence"):
+        service.reserve_workspace(
+            assignment,
+            candidates[location],
+            lease_seconds=300,
+            branch="test/protected",
+            base_commit="abc",
+        )
+    assert adapter.health()["launched"] == 0
+
+
+def test_reviewer_parent_revalidated_immediately_before_adapter(
+    tmp_path: Path,
+) -> None:
+    _, service, _, provider, account, _, sessions, adapter = _stack(tmp_path)
+    reviewer = _assignment(
+        service,
+        provider,
+        account,
+        sessions[0],
+        role=AssignmentRole.REVIEWER,
+    )
+    workspace = tmp_path / "reviewer-parent"
+    workspace.mkdir()
+    (workspace / ".git").write_text("gitdir: test", encoding="utf-8")
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "reviewer-parent-race"
+    )
+    artifact = (
+        workspace
+        / ".ai-workflow"
+        / "pilot-invocations"
+        / "preserved"
+        / "evidence.json"
+    )
+    snapshot: dict[str, int | bytes] = {}
+
+    def expose_protected_evidence() -> None:
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b'{"preserved":true}\n')
+        snapshot["bytes"] = artifact.read_bytes()
+        snapshot["mtime_ns"] = artifact.stat().st_mtime_ns
+
+    with pytest.raises(PermissionError, match="pilot evidence"):
+        service.run_assignment(
+            reviewer.assignment_id,
+            workspace,
+            authority_attempt_id=authority_id,
+            global_context={},
+            task_context={},
+            after_launch_claim=expose_protected_evidence,
+        )
+    assert adapter.health()["launched"] == 0
+    assert artifact.read_bytes() == snapshot["bytes"]
+    assert artifact.stat().st_mtime_ns == snapshot["mtime_ns"]
+
+
+def test_reviewer_write_reservation_still_rejects(tmp_path: Path) -> None:
+    _, service, _, provider, account, _, sessions, _ = _stack(tmp_path)
+    reviewer = _assignment(
+        service,
+        provider,
+        account,
+        sessions[0],
+        role=AssignmentRole.REVIEWER,
+    )
+    workspace, _ = _launch_ready(
+        service, reviewer, tmp_path / "isolated-review", "review-write"
+    )
+    with pytest.raises(PermissionError, match="cannot reserve writes"):
+        service.reserve_writes(
+            reviewer, workspace, ("review-output",), lease_seconds=300
+        )
+
+
+def test_explicit_reference_is_not_a_launch_workspace(tmp_path: Path) -> None:
+    _, _, evidence_run = _protected_tree(tmp_path)
+    artifact = evidence_run / "evidence.json"
+    artifact.write_bytes(b'{"evidence":true}\n')
+    reference = canonical_evidence_reference_path(artifact)
+    assert reference.endswith("/evidence.json")
+    with pytest.raises((PermissionError, ValueError)):
+        canonical_workspace_path(Path(reference))
+
+
+def test_isolated_reviewer_consumes_explicit_reference(tmp_path: Path) -> None:
+    _, service, _, provider, account, _, sessions, adapter = _stack(tmp_path)
+    _, _, evidence_run = _protected_tree(tmp_path)
+    artifact = evidence_run / "evidence.json"
+    artifact.write_bytes(b'{"evidence":true}\n')
+    before = (artifact.read_bytes(), artifact.stat().st_mtime_ns)
+    reference = canonical_evidence_reference_path(artifact)
+    reviewer = _assignment(
+        service,
+        provider,
+        account,
+        sessions[0],
+        role=AssignmentRole.REVIEWER,
+    )
+    workspace = tmp_path / "isolated-reviewer"
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "isolated-reviewer"
+    )
+    result = service.run_assignment(
+        reviewer.assignment_id,
+        workspace,
+        authority_attempt_id=authority_id,
+        global_context={},
+        task_context={"evidence_reference": reference},
+    )
+    assert result.assignment_id == reviewer.assignment_id
+    assert adapter.health()["launched"] == 1
+    assert (artifact.read_bytes(), artifact.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("fragment", ("pilot-invocations", "pw"))
+def test_protected_workflow_parents_and_descendants_reject(
+    tmp_path: Path, fragment: str
+) -> None:
+    parent = tmp_path / f"parent-{fragment}"
+    protected = parent / ".ai-workflow" / fragment
+    descendant = protected / "nested"
+    descendant.mkdir(parents=True)
+    for candidate in (parent, protected, descendant):
+        with pytest.raises(PermissionError):
+            canonical_workspace_path(candidate)
+
+
+def test_dangling_alias_fails_conservatively(tmp_path: Path) -> None:
+    alias = tmp_path / "dangling-workspace"
+    try:
+        os.symlink(tmp_path / "missing-target", alias, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink is unavailable: {error}")
+    with pytest.raises(PermissionError, match="cannot be safely resolved"):
+        canonical_workspace_path(alias)
+
+
+def test_cleanup_rejects_tree_that_gains_pilot_evidence(tmp_path: Path) -> None:
+    _, service, _, provider, account, _, sessions, _ = _stack(tmp_path)
+    assignment = _assignment(service, provider, account, sessions[0])
+    target = tmp_path / "cleanup-target"
+    workspace, _ = _launch_ready(
+        service, assignment, target, "cleanup-protected"
+    )
+    artifact = (
+        target
+        / ".ai-workflow"
+        / "pilot-invocations"
+        / "preserved"
+        / "evidence.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"preserve me\n")
+    before = (artifact.read_bytes(), artifact.stat().st_mtime_ns)
+    calls: list[object] = []
+
+    def runner(*args: object, **kwargs: object) -> Any:
+        calls.append((args, kwargs))
+        raise AssertionError("cleanup runner must not be invoked")
+
+    cleanup = GitWorktreeService(WorkspacePolicy(tmp_path, ()), runner=runner)
+    with pytest.raises(PermissionError, match="protected scope"):
+        cleanup.cleanup_worktree(
+            tmp_path,
+            workspace,
+            replace(assignment, state=AssignmentState.COMPLETED),
+            (cast(Any, object()),),
+            explicitly_approved=True,
+        )
+    assert calls == []
+    assert (artifact.read_bytes(), artifact.stat().st_mtime_ns) == before
+
+
+def test_fake_original_repository_and_parent_reject(tmp_path: Path) -> None:
+    parent = tmp_path / "repository-parent"
+    repository = parent / "original"
+    (repository / ".git").mkdir(parents=True)
+    for candidate in (repository, parent):
+        with pytest.raises(PermissionError, match="repository"):
+            canonical_workspace_path(candidate)
+
+
+def test_normal_writer_and_reviewer_workspaces_remain_usable(
+    tmp_path: Path,
+) -> None:
+    for index, role in enumerate(
+        (AssignmentRole.IMPLEMENTER, AssignmentRole.REVIEWER)
+    ):
+        _, service, _, provider, account, _, sessions, adapter = _stack(
+            tmp_path / str(index)
+        )
+        assignment = _assignment(
+            service, provider, account, sessions[0], role=role
+        )
+        workspace = tmp_path / str(index) / "isolated"
+        _, authority_id = _launch_ready(
+            service, assignment, workspace, f"normal-{index}"
+        )
+        result = service.run_assignment(
+            assignment.assignment_id,
+            workspace,
+            authority_attempt_id=authority_id,
+            global_context={},
+            task_context={},
+        )
+        assert result.assignment_id == assignment.assignment_id
+        assert adapter.health()["launched"] == 1

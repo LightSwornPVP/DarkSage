@@ -4,6 +4,7 @@ import builtins
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from dataclasses import replace
 from datetime import datetime
@@ -279,6 +280,9 @@ class PassBRepository:
     def reserve_workspace(self, record: WorkspaceReservationRecord) -> None:
         if record.state != ReservationState.ACTIVE:
             raise ValueError("new workspace reservations must be active")
+        canonical_path = canonical_workspace_path(Path(record.canonical_path))
+        if canonical_path != record.canonical_path:
+            raise PermissionError("workspace reservation path is not canonical")
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             assignment = self._get(
@@ -331,6 +335,16 @@ class PassBRepository:
                 record.workspace_reservation_id,
             )
             if (
+                canonical_workspace_path(Path(workspace.canonical_path))
+                != workspace.canonical_path
+            ):
+                raise PermissionError("writer workspace path is not canonical")
+            if tuple(
+                canonical_scope(workspace.canonical_path, scope)
+                for scope in record.scope
+            ) != record.scope_keys:
+                raise PermissionError("write reservation scope is not canonical")
+            if (
                 assignment.read_only
                 or workspace.mode != ReservationMode.WRITE
                 or workspace.state != ReservationState.ACTIVE
@@ -378,6 +392,11 @@ class PassBRepository:
                 connection, WorkspaceReservationRecord, reservation_id
             )
             if (
+                canonical_workspace_path(Path(current.canonical_path))
+                != current.canonical_path
+            ):
+                raise PermissionError("workspace lease path is no longer safe")
+            if (
                 current.owner_token != owner_token
                 or current.state != ReservationState.ACTIVE
             ):
@@ -420,6 +439,11 @@ class PassBRepository:
             current = self._get(
                 connection, WorkspaceReservationRecord, reservation_id
             )
+            if (
+                canonical_workspace_path(Path(current.canonical_path))
+                != current.canonical_path
+            ):
+                raise PermissionError("workspace release path is no longer safe")
             assignment = self._get(
                 connection, AssignmentRecord, current.assignment_id
             )
@@ -470,6 +494,11 @@ class PassBRepository:
             current = self._get(
                 connection, WorkspaceReservationRecord, reservation_id
             )
+            if (
+                canonical_workspace_path(Path(current.canonical_path))
+                != current.canonical_path
+            ):
+                raise PermissionError("workspace release path is no longer safe")
             assignment = self._get(
                 connection, AssignmentRecord, current.assignment_id
             )
@@ -1652,30 +1681,105 @@ class PassBRepository:
         return record_type.from_dict(cast(dict[str, Any], value))
 
 
-def canonical_workspace_path(path: Path, *, read_only: bool = False) -> str:
-    resolved = path.resolve(strict=True)
-    if not resolved.is_dir():
-        raise ValueError("workspace path must be an existing directory")
-    parts = tuple(item.casefold() for item in resolved.parts)
-    if _contains_parts(parts, (".ai-workflow", "pw")):
-        raise PermissionError("Keeper browser evidence workspace is protected")
-    pilot_reference = is_pilot_evidence_path(resolved)
+_PROTECTED_TREE_FRAGMENTS = (
+    (".ai-workflow", "pilot-invocations"),
+    (".ai-workflow", "pw"),
+)
 
-    if pilot_reference:
-        raise PermissionError("Keeper pilot evidence is read-only and protected")
-    if not read_only and contains_pilot_evidence(resolved):
+
+def validate_protected_workspace_tree(
+    path: Path, *, require_exists: bool = True
+) -> Path:
+    """Return one safe canonical workspace tree or fail conservatively."""
+    try:
+        resolved = path.resolve(strict=require_exists)
+    except (OSError, RuntimeError) as error:
         raise PermissionError(
-            "writer workspace cannot contain Keeper pilot evidence"
+            "workspace path identity cannot be safely resolved"
+        ) from error
+    if require_exists and not resolved.is_dir():
+        raise ValueError("workspace path must be an existing directory")
+    if _is_protected_tree_path(resolved):
+        raise PermissionError(
+            "workspace overlaps protected Keeper pilot evidence "
+            "or workflow state"
         )
-    for ancestor in (resolved, *resolved.parents):
-        marker = ancestor / ".git"
-        if marker.is_dir():
+    _reject_primary_repository(resolved)
+    if not require_exists and not os.path.lexists(resolved):
+        return resolved
+    if not resolved.is_dir():
+        raise ValueError("workspace path must be a directory")
+
+    visited: set[str] = set()
+    pending = [resolved]
+    while pending:
+        current = pending.pop()
+        try:
+            canonical_current = current.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
             raise PermissionError(
-                "primary repository cannot be a writable Keeper workspace"
+                "workspace tree contains an unresolved path identity"
+            ) from error
+        key = _path_key(canonical_current)
+        if key in visited:
+            continue
+        visited.add(key)
+        if _is_protected_tree_path(canonical_current):
+            raise PermissionError(
+                "workspace contains protected Keeper pilot evidence "
+                "or workflow state"
             )
-        if marker.is_file():
-            break
-    return _path_key(resolved)
+        try:
+            with os.scandir(canonical_current) as entries:
+                for entry in entries:
+                    candidate = Path(entry.path)
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                        is_reparse = bool(
+                            getattr(entry_stat, "st_file_attributes", 0)
+                            & getattr(os, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                        )
+                        is_alias = entry.is_symlink() or is_reparse
+                        is_directory = entry.is_dir(follow_symlinks=False)
+                        if not is_directory and not is_alias:
+                            continue
+                        canonical_candidate = candidate.resolve(strict=True)
+                    except (OSError, RuntimeError) as error:
+                        raise PermissionError(
+                            "workspace tree contains an unresolved alias"
+                        ) from error
+                    if _is_protected_tree_path(canonical_candidate):
+                        raise PermissionError(
+                            "workspace contains protected Keeper pilot evidence "
+                            "or workflow state"
+                        )
+                    if (
+                        entry.name.casefold() == ".git"
+                        and canonical_candidate.is_dir()
+                    ):
+                        raise PermissionError(
+                            "primary repository cannot be a Keeper workspace"
+                        )
+                    if is_alias:
+                        try:
+                            canonical_candidate.relative_to(resolved)
+                        except ValueError as error:
+                            raise PermissionError(
+                                "workspace alias escapes its canonical tree"
+                            ) from error
+                    if canonical_candidate.is_dir():
+                        pending.append(canonical_candidate)
+        except PermissionError:
+            raise
+        except OSError as error:
+            raise PermissionError(
+                "workspace tree cannot be safely inspected"
+            ) from error
+    return resolved
+
+
+def canonical_workspace_path(path: Path) -> str:
+    return _path_key(validate_protected_workspace_tree(path))
 
 
 def canonical_evidence_reference_path(path: Path) -> str:
@@ -1691,11 +1795,12 @@ def canonical_evidence_reference_path(path: Path) -> str:
         )
     return _path_key(resolved)
 
+
 def canonical_scope(workspace_path: str, scope: str) -> str:
     normalized = scope.replace("\\", "/").strip("/")
     if not normalized or normalized == "." or ".." in normalized.split("/"):
         raise ValueError("write scope must be a contained relative path")
-    root = Path(workspace_path).resolve(strict=True)
+    root = validate_protected_workspace_tree(Path(workspace_path))
     candidate = (root / normalized).resolve(strict=False)
     try:
         candidate.relative_to(root)
@@ -1703,12 +1808,8 @@ def canonical_scope(workspace_path: str, scope: str) -> str:
         raise PermissionError(
             "write scope resolves outside the assigned workspace"
         ) from error
-    parts = tuple(item.casefold() for item in candidate.parts)
-    if (
-        is_pilot_evidence_path(candidate)
-        or contains_pilot_evidence(candidate)
-    ):
-        raise PermissionError("write scope overlaps protected pilot evidence")
+    if _is_protected_tree_path(candidate):
+        raise PermissionError("write scope overlaps protected Keeper state")
     return _path_key(candidate)
 
 
@@ -1749,6 +1850,31 @@ def contains_pilot_evidence(path: Path) -> bool:
         )
     except OSError:
         return True
+
+
+def _is_protected_tree_path(path: Path) -> bool:
+    parts = tuple(item.casefold() for item in path.parts)
+    return any(
+        _contains_parts(parts, fragment)
+        for fragment in _PROTECTED_TREE_FRAGMENTS
+    )
+
+
+def _reject_primary_repository(path: Path) -> None:
+    for ancestor in (path, *path.parents):
+        marker = ancestor / ".git"
+        try:
+            if marker.is_dir():
+                raise PermissionError(
+                    "primary repository cannot be a Keeper workspace"
+                )
+            if marker.is_file():
+                return
+        except OSError as error:
+            raise PermissionError(
+                "repository identity cannot be safely inspected"
+            ) from error
+
 
 def _validate_workflow_work_item(
     workflow: WorkflowRecord, work_item: WorkItemRecord

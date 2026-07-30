@@ -193,6 +193,11 @@ def test_darksage_pilot_completes_with_independent_roles(
     assert report["production_rejected_test_reset_verifier"] is True
     assert report["pilot_evidence_read_only_reference"] is True
     assert report["pilot_evidence_writer_rejected"] is True
+    assert report["pilot_evidence_reference_preserved"] is True
+    assert report["reviewer_workspace_isolated"] is True
+    assert report["reviewer_parent_workspace_rejected"] is True
+    assert report["reviewer_parent_adapter_not_invoked"] is True
+    assert report["reviewer_parent_evidence_unchanged"] is True
     assert report["automatic_paid_fallback"] is False
     assert report["provider_self_approval"] is False
     assert report["push_performed"] is False

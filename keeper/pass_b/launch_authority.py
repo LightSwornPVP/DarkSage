@@ -173,7 +173,6 @@ class ExecutiveAuthorityLaunchGate:
             "provider_instance_id": assignment.session_id,
             "workspace": canonical_workspace_path(
                 Path(workspace.canonical_path),
-                read_only=assignment.read_only,
             ),
             "project_id": assignment.project_id,
             "charter_id": assignment.charter_id,
@@ -380,12 +379,11 @@ class ExecutiveAuthorityLaunchGate:
         if isinstance(workspaces, (list, tuple)) and workspaces:
             candidate = canonical_workspace_path(
                 Path(workspace.canonical_path),
-                read_only=assignment.read_only,
             )
             if not any(
                 _path_contains(
                     canonical_workspace_path(
-                        Path(item), read_only=assignment.read_only
+                        Path(item)
                     ),
                     candidate,
                 )
@@ -520,7 +518,7 @@ def _test_expectation(
         "role": assignment.role,
         "provider_instance_id": assignment.session_id,
         "workspace": canonical_workspace_path(
-            Path(workspace.canonical_path), read_only=assignment.read_only
+            Path(workspace.canonical_path)
         ),
         "workspace_reservation_id": workspace.workspace_reservation_id,
         "authority_envelope_digest": assignment.authority_envelope_digest,

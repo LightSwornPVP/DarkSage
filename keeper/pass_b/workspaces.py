@@ -13,8 +13,8 @@ from keeper.pass_b.models import (
     WorkspaceReservationRecord,
 )
 from keeper.pass_b.repository import (
-    contains_pilot_evidence,
-    is_pilot_evidence_path,
+    canonical_workspace_path,
+    validate_protected_workspace_tree,
 )
 
 
@@ -28,29 +28,34 @@ class WorkspacePolicy:
     prohibited_fragments: tuple[str, ...] = (".ai-workflow/pw",)
 
     def validate_target(self, target: Path) -> Path:
-        resolved = target.resolve()
-        root = self.implementation_root.resolve()
+        try:
+            resolved = validate_protected_workspace_tree(
+                target, require_exists=os.path.lexists(target)
+            )
+        except PermissionError as error:
+            raise PermissionError(
+                "workspace target is in a protected scope"
+            ) from error
+        root = self.implementation_root.resolve(strict=True)
         try:
             resolved.relative_to(root)
         except ValueError as error:
             raise PermissionError(
                 "workspace must be inside the configured implementation root"
             ) from error
-        normalized = str(resolved).replace("\\", "/").casefold()
-        if any(
-            normalized == str(item.resolve()).replace("\\", "/").casefold()
-            or normalized.startswith(
-                str(item.resolve()).replace("\\", "/").casefold().rstrip("/")
-                + "/"
+        for prohibited in self.prohibited_roots:
+            protected = prohibited.resolve(strict=False)
+            if _paths_overlap(resolved, protected):
+                raise PermissionError("workspace target is in a protected scope")
+        normalized_parts = tuple(item.casefold() for item in resolved.parts)
+        for fragment in self.prohibited_fragments:
+            fragment_parts = tuple(
+                item.casefold()
+                for item in fragment.replace("\\", "/").split("/")
+                if item
             )
-            for item in self.prohibited_roots
-        ) or any(
-            fragment.casefold() in normalized
-            for fragment in self.prohibited_fragments
-        ) or is_pilot_evidence_path(resolved) or contains_pilot_evidence(
-            resolved
-        ):
-            raise PermissionError("workspace target is in a protected scope")
+            if _contains_parts(normalized_parts, fragment_parts):
+                raise PermissionError("workspace target is in a protected scope")
         return resolved
 
 
@@ -102,7 +107,7 @@ class GitWorktreeService:
             raise RuntimeError(
                 f"isolated worktree creation failed: {result.stderr.strip()}"
             )
-        return destination
+        return self.policy.validate_target(destination)
 
     def validate_reviewer_workspace(
         self,
@@ -115,7 +120,9 @@ class GitWorktreeService:
             or reservation.assignment_id != assignment.assignment_id
         ):
             raise PermissionError("review workspace is not read-only")
-        path = Path(reservation.canonical_path).resolve(strict=True)
+        path = self.policy.validate_target(Path(reservation.canonical_path))
+        if canonical_workspace_path(path) != reservation.canonical_path:
+            raise PermissionError("review workspace identity changed")
         if not (path / ".git").exists():
             raise PermissionError("review workspace is not a Git worktree")
         return path
@@ -187,3 +194,25 @@ def workspace_identity(path: Path) -> str:
 
     normalized = os.path.normcase(str(path.resolve()))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
+def _contains_parts(
+    parts: tuple[str, ...], fragment: tuple[str, ...]
+) -> bool:
+    return any(
+        parts[index : index + len(fragment)] == fragment
+        for index in range(max(0, len(parts) - len(fragment) + 1))
+    )

@@ -308,7 +308,7 @@ class OrchestrationService:
             assignment_id=assignment.assignment_id,
             workspace_id=assignment.workspace_id,
             canonical_path=canonical_workspace_path(
-                path, read_only=assignment.read_only
+                path
             ),
             mode=(
                 ReservationMode.READ_ONLY
@@ -501,7 +501,7 @@ class OrchestrationService:
         if (
             workspace.workspace_id != assignment.workspace_id
             or canonical_workspace_path(
-                workspace_path, read_only=assignment.read_only
+                workspace_path
             )
             != workspace.canonical_path
         ):
@@ -567,6 +567,10 @@ class OrchestrationService:
         claimed = self.repository.claim_launch(attempt.attempt_id, self._now())
         if after_launch_claim is not None:
             after_launch_claim()
+        if canonical_workspace_path(workspace_path) != workspace.canonical_path:
+            raise PermissionError(
+                "launch workspace became unsafe before adapter invocation"
+            )
         request = assignment_to_adapter(
             assignment,
             claimed.attempt_id,

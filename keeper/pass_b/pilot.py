@@ -290,8 +290,12 @@ def run_darksage_pilot(
 ) -> dict[str, Any]:
     data_directory = data_directory.resolve()
     data_directory.mkdir(parents=True, exist_ok=True)
-    workspace = data_directory / "isolated-darksage-workspace"
+    workspace = data_directory / "approved-workspace-root"
     workspace.mkdir(parents=True, exist_ok=True)
+    builder_workspace_path = workspace / "isolated-builder-workspace"
+    builder_workspace_path.mkdir(parents=True, exist_ok=True)
+    reviewer_workspace_path = workspace / "isolated-reviewer-workspace"
+    reviewer_workspace_path.mkdir(parents=True, exist_ok=True)
     executive = PilotConversationExecutive(data_directory / "keeper.db")
     authority_core = AuthorityServiceCore(
         data_directory / "test-authority-service",
@@ -330,9 +334,19 @@ def run_darksage_pilot(
         / f"pass-b-{uuid.uuid4().hex}"
     )
     pilot_evidence_root.mkdir(parents=True, exist_ok=False)
-    pilot_evidence_read_only_reference = bool(
-        canonical_evidence_reference_path(pilot_evidence_root)
+    pilot_evidence_artifact = pilot_evidence_root / "reference.json"
+    pilot_evidence_artifact.write_bytes(b'{"pilot":"preserved"}\n')
+    pilot_evidence_reference = canonical_evidence_reference_path(
+        pilot_evidence_artifact
     )
+    pilot_evidence_digest = hashlib.sha256(
+        pilot_evidence_artifact.read_bytes()
+    ).hexdigest()
+    pilot_evidence_snapshot = (
+        pilot_evidence_artifact.read_bytes(),
+        pilot_evidence_artifact.stat().st_mtime_ns,
+    )
+    pilot_evidence_read_only_reference = bool(pilot_evidence_reference)
     pilot_evidence_writer_rejected = False
     try:
         canonical_workspace_path(pilot_evidence_root)
@@ -411,7 +425,7 @@ def run_darksage_pilot(
     )
     implementation_workspace = application.orchestration.reserve_workspace(
         implementation,
-        workspace,
+        builder_workspace_path,
         lease_seconds=3600,
         branch="pilot/pass-b-builder",
         base_commit="1f5ff458",
@@ -436,13 +450,13 @@ def run_darksage_pilot(
     )
     implementation_evidence = application.orchestration.run_assignment(
         implementation.assignment_id,
-        workspace,
+        builder_workspace_path,
         authority_attempt_id=builder_authority_attempt,
         global_context={"charter_revision": charter.revision},
         task_context={"objective": implementation_item.objective},
     )
     implementation_evidence = application.orchestration.validate_evidence(
-        implementation_evidence.evidence_bundle_id, workspace
+        implementation_evidence.evidence_bundle_id, builder_workspace_path
     )
     application.repository.release_workspace(
         implementation_workspace.workspace_reservation_id,
@@ -467,7 +481,7 @@ def run_darksage_pilot(
         session_id=reviewer_session.session_id,
         role=AssignmentRole.REVIEWER,
         model_id=reviewer_session.model_id,
-        workspace_id="pilot-darksage",
+        workspace_id="pilot-darksage-reviewer",
         authority_envelope_digest=authority_envelope_digest(
             charter.authority_envelope.to_dict()
         ),
@@ -479,9 +493,57 @@ def run_darksage_pilot(
         },
         independence_key="reviewer-independence",
     )
+    boundary_item = application.orchestration.create_work_item(
+        project_id=project.project_id,
+        charter_id=charter.charter_id,
+        charter_revision=charter.revision,
+        workflow_id=durable_workflow.workflow_id,
+        title="Reviewer protected-tree boundary",
+        objective="Prove protected evidence never becomes a reviewer workspace",
+        dependencies=(implementation_item.work_item_id,),
+        required_roles=(AssignmentRole.REVIEWER,),
+    )
+    boundary_assignment = application.orchestration.create_assignment(
+        work_item=boundary_item,
+        provider_id=reviewer.provider_id,
+        account_id="reviewer-account",
+        session_id=reviewer_session.session_id,
+        role=AssignmentRole.REVIEWER,
+        model_id=reviewer_session.model_id,
+        workspace_id="pilot-protected-parent-rejection",
+        authority_envelope_digest=authority_envelope_digest(
+            charter.authority_envelope.to_dict()
+        ),
+        expected_evidence=("structured-report",),
+        usage_policy={"reservation_required": True, "paid_fallback": False},
+        independence_key="reviewer-boundary-independence",
+    )
+    reviewer_adapter = application.orchestration.adapters[reviewer.provider_id]
+    reviewer_launches_before_rejection = int(
+        reviewer_adapter.health()["launched"]
+    )
+    reviewer_parent_workspace_rejected = False
+    try:
+        application.orchestration.reserve_workspace(
+            boundary_assignment,
+            data_directory,
+            lease_seconds=3600,
+            branch=None,
+            base_commit="1f5ff458",
+        )
+    except PermissionError:
+        reviewer_parent_workspace_rejected = True
+    reviewer_parent_adapter_not_invoked = (
+        int(reviewer_adapter.health()["launched"])
+        == reviewer_launches_before_rejection
+    )
+    reviewer_parent_evidence_unchanged = (
+        pilot_evidence_artifact.read_bytes(),
+        pilot_evidence_artifact.stat().st_mtime_ns,
+    ) == pilot_evidence_snapshot
     review_workspace = application.orchestration.reserve_workspace(
         review_assignment,
-        workspace,
+        reviewer_workspace_path,
         lease_seconds=3600,
         branch=None,
         base_commit="1f5ff458",
@@ -500,18 +562,32 @@ def run_darksage_pilot(
     )
     review_evidence = application.orchestration.run_assignment(
         review_assignment.assignment_id,
-        workspace,
+        reviewer_workspace_path,
         authority_attempt_id=reviewer_authority_attempt,
         global_context={"charter_revision": charter.revision},
         task_context={
             "implementation_evidence": (
                 implementation_evidence.evidence_bundle_id
-            )
+            ),
+            "pilot_evidence_reference": {
+                "path": pilot_evidence_reference,
+                "sha256": pilot_evidence_digest,
+            },
         },
         side_effect_class="READ_ONLY_REVIEW",
     )
     review_evidence = application.orchestration.validate_evidence(
-        review_evidence.evidence_bundle_id, workspace
+        review_evidence.evidence_bundle_id, reviewer_workspace_path
+    )
+    pilot_evidence_reference_preserved = (
+        pilot_evidence_artifact.read_bytes(),
+        pilot_evidence_artifact.stat().st_mtime_ns,
+    ) == pilot_evidence_snapshot
+    reviewer_workspace_isolated = (
+        Path(review_workspace.canonical_path)
+        != Path(implementation_workspace.canonical_path)
+        and Path(review_workspace.canonical_path).parent
+        == Path(implementation_workspace.canonical_path).parent
     )
     independent_review = application.orchestration.create_review(
         implementation_evidence.evidence_bundle_id,
@@ -753,6 +829,11 @@ def run_darksage_pilot(
         and production_rejected_test_reset_verifier
         and pilot_evidence_read_only_reference
         and pilot_evidence_writer_rejected
+        and reviewer_parent_workspace_rejected
+        and reviewer_parent_adapter_not_invoked
+        and reviewer_parent_evidence_unchanged
+        and pilot_evidence_reference_preserved
+        and reviewer_workspace_isolated
     ):
         raise RuntimeError("pilot delegated-mode boundary proof failed")
     attempts = application.repository.list(AttemptRecord)
@@ -833,6 +914,22 @@ def run_darksage_pilot(
             pilot_evidence_read_only_reference
         ),
         "pilot_evidence_writer_rejected": pilot_evidence_writer_rejected,
+        "pilot_evidence_reference": pilot_evidence_reference,
+        "pilot_evidence_reference_digest": pilot_evidence_digest,
+        "pilot_evidence_reference_preserved": (
+            pilot_evidence_reference_preserved
+        ),
+        "reviewer_workspace": review_workspace.canonical_path,
+        "reviewer_workspace_isolated": reviewer_workspace_isolated,
+        "reviewer_parent_workspace_rejected": (
+            reviewer_parent_workspace_rejected
+        ),
+        "reviewer_parent_adapter_not_invoked": (
+            reviewer_parent_adapter_not_invoked
+        ),
+        "reviewer_parent_evidence_unchanged": (
+            reviewer_parent_evidence_unchanged
+        ),
         "automatic_paid_fallback": False,
         "provider_self_approval": False,
         "push_performed": False,
