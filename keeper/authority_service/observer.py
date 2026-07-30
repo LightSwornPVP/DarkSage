@@ -10,6 +10,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, cast
 
+from keeper.evidence_input import (
+    provider_prompt_context,
+    review_input_declaration_json_schema,
+)
 from keeper.authority_service.core import (
     CompletionObservation,
     ExecutionObservation,
@@ -177,6 +181,44 @@ class ServiceProviderObserver:
             raise PermissionError("registered provider launcher identity changed")
         provider_id = str(registration["logical_provider_id"])
         prompt = prompt_path.read_text(encoding="utf-8")
+        provider_input = attempt.get("provider_input")
+        provider_input_digest = attempt.get("provider_input_digest")
+        if provider_input is not None:
+            if not isinstance(provider_input_digest, str):
+                raise PermissionError(
+                    "Authority-bound provider input digest is unavailable"
+                )
+            prompt = (
+                prompt
+                + "\n\nKEEPER TRUSTED REVIEW INPUT (server-owned; echo the "
+                "required_review_input_binding exactly in structured review "
+                "output and bind the same top-level review disposition):\n"
+                + provider_prompt_context(
+                    provider_input,
+                    provider_input_digest=provider_input_digest,
+                )
+            )
+        role = str(attempt["role"])
+
+        def provider_output_schema() -> dict[str, Any]:
+            from keeper.providers.adapters import _domain_schema
+
+            schema = _domain_schema(role)
+            if provider_input is None or role.casefold() != "reviewer":
+                return schema
+            properties = schema.get("properties")
+            required = schema.get("required")
+            if not isinstance(properties, dict) or not isinstance(
+                required, list
+            ):
+                raise PermissionError(
+                    "provider output schema is unavailable"
+                )
+            properties["review_input_declaration"] = (
+                review_input_declaration_json_schema()
+            )
+            required.append("review_input_declaration")
+            return schema
         base_command = (
             [
                 str(executable),
@@ -188,11 +230,9 @@ class ServiceProviderObserver:
             else [str(executable)]
         )
         if provider_id == "codex":
-            from keeper.providers.adapters import _domain_schema
-
             schema_path = stdout_path.parent / "provider-output-schema.json"
             schema_path.write_text(
-                json.dumps(_domain_schema(str(attempt["role"]))),
+                json.dumps(provider_output_schema()),
                 encoding="utf-8",
             )
             command = [
@@ -206,15 +246,13 @@ class ServiceProviderObserver:
                 prompt,
             ]
         elif provider_id == "claude":
-            from keeper.providers.adapters import _domain_schema
-
             command = [
                 *base_command,
                 "--output-format",
                 "json",
                 "--json-schema",
                 json.dumps(
-                    _domain_schema(str(attempt["role"])),
+                    provider_output_schema(),
                     separators=(",", ":"),
                 ),
                 "-p",

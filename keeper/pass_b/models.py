@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from typing import Any, ClassVar, TypeVar
 
+from keeper.evidence_input import structured_digest, validate_provider_input
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
@@ -345,6 +346,9 @@ class AttemptRecord(PassBRecord):
     usage_reservation_id: str | None = None
     launch_plan_digest: str = ""
     session_slot_claimed: bool = False
+    delivered_input_id: str | None = None
+    delivered_input_digest: str | None = None
+    provider_input_digest: str | None = None
 
     KIND = "attempt"
     ID_FIELD = "attempt_id"
@@ -353,6 +357,9 @@ class AttemptRecord(PassBRecord):
         "usage_reservation_id": None,
         "launch_plan_digest": "legacy-unbound",
         "session_slot_claimed": False,
+        "delivered_input_id": None,
+        "delivered_input_digest": None,
+        "provider_input_digest": None,
     }
 
     def __post_init__(self) -> None:
@@ -364,8 +371,81 @@ class AttemptRecord(PassBRecord):
             or not self.launch_plan_digest
         ):
             raise ValueError("attempt authority and launch identities are required")
+        input_binding = (
+            self.delivered_input_id,
+            self.delivered_input_digest,
+            self.provider_input_digest,
+        )
+        if any(input_binding) and (
+            not all(input_binding)
+            or len(self.delivered_input_digest or "") != 64
+            or len(self.provider_input_digest or "") != 64
+        ):
+            raise ValueError("attempt delivered-input binding is incomplete")
         _optional_timestamp(self.started_at, "started_at")
         _optional_timestamp(self.finished_at, "finished_at")
+        _timestamp(self.created_at, "created_at")
+        _timestamp(self.updated_at, "updated_at")
+        _positive_revision(self.revision)
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredInputRecord(PassBRecord):
+    delivered_input_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    workflow_id: str
+    work_item_id: str
+    reviewer_assignment_id: str
+    reviewer_attempt_id: str
+    producer_assignment_id: str
+    producer_attempt_id: str
+    references: tuple[dict[str, Any], ...]
+    manifest_digest: str
+    delivered_input_digest: str
+    provider_input_digest: str
+    provider_input: dict[str, Any]
+    delivery_method: str
+    composition_identity: str
+    delivered_at: str
+    created_at: str
+    updated_at: str
+    revision: int
+
+    KIND = "delivered_input"
+    ID_FIELD = "delivered_input_id"
+    TUPLE_FIELDS = ("references",)
+
+    def __post_init__(self) -> None:
+        validate_provider_input(self.provider_input)
+        if structured_digest(self.provider_input) != self.provider_input_digest:
+            raise ValueError(
+                "delivered-input provider digest does not match provider input"
+            )
+        expected = {
+            "project_id": self.project_id,
+            "charter_id": self.charter_id,
+            "charter_revision": self.charter_revision,
+            "workflow_id": self.workflow_id,
+            "work_item_id": self.work_item_id,
+            "reviewer_assignment_id": self.reviewer_assignment_id,
+            "reviewer_attempt_id": self.reviewer_attempt_id,
+            "producer_assignment_id": self.producer_assignment_id,
+            "producer_attempt_id": self.producer_attempt_id,
+            "references": list(self.references),
+            "manifest_digest": self.manifest_digest,
+            "delivered_input_digest": self.delivered_input_digest,
+            "delivery_method": self.delivery_method,
+            "composition_identity": self.composition_identity,
+            "delivered_at": self.delivered_at,
+        }
+        for name, value in expected.items():
+            if self.provider_input[name] != value:
+                raise ValueError(f"delivered-input {name} does not match provider input")
+        if self.charter_revision < 1:
+            raise ValueError("delivered-input charter revision is invalid")
+        _timestamp(self.delivered_at, "delivered_at")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -390,16 +470,28 @@ class ReviewRecord(PassBRecord):
     reviewer_evidence_bundle_id: str = ""
     consumed_evidence_reference_id: str | None = None
     consumed_evidence_reference_revision: int | None = None
+    delivered_input_id: str | None = None
+    delivered_input_digest: str | None = None
+    consumed_evidence_reference_ids: tuple[str, ...] = ()
+    consumed_evidence_reference_revisions: tuple[int, ...] = ()
 
     KIND = "review"
     ID_FIELD = "review_id"
-    TUPLE_FIELDS = ("findings",)
+    TUPLE_FIELDS = (
+        "findings",
+        "consumed_evidence_reference_ids",
+        "consumed_evidence_reference_revisions",
+    )
     DEFAULTS = {
         "producer_evidence_bundle_id": "legacy-unbound",
         "reviewer_attempt_id": "legacy-unbound",
         "reviewer_evidence_bundle_id": "legacy-unbound",
         "consumed_evidence_reference_id": None,
         "consumed_evidence_reference_revision": None,
+        "delivered_input_id": None,
+        "delivered_input_digest": None,
+        "consumed_evidence_reference_ids": (),
+        "consumed_evidence_reference_revisions": (),
     }
 
     def __post_init__(self) -> None:
@@ -421,6 +513,23 @@ class ReviewRecord(PassBRecord):
             and self.consumed_evidence_reference_revision < 1
         ):
             raise ValueError("review evidence-reference revision is invalid")
+        if (self.delivered_input_id is None) != (
+            self.delivered_input_digest is None
+        ):
+            raise ValueError("review delivered-input binding is incomplete")
+        if self.delivered_input_digest is not None and len(
+            self.delivered_input_digest
+        ) != 64:
+            raise ValueError("review delivered-input digest is invalid")
+        if len(self.consumed_evidence_reference_ids) != len(
+            self.consumed_evidence_reference_revisions
+        ) or any(
+            revision < 1
+            for revision in self.consumed_evidence_reference_revisions
+        ):
+            raise ValueError("review evidence-reference set is invalid")
+        if self.delivered_input_id and not self.consumed_evidence_reference_ids:
+            raise ValueError("review delivered-input set cannot be empty")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -443,15 +552,34 @@ class EvidenceBundleRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    delivered_input_id: str | None = None
+    delivered_input_digest: str | None = None
+    provider_input_digest: str | None = None
 
     KIND = "evidence_bundle"
     ID_FIELD = "evidence_bundle_id"
     TUPLE_FIELDS = ("artifacts", "validation_errors")
+    DEFAULTS = {
+        "delivered_input_id": None,
+        "delivered_input_digest": None,
+        "provider_input_digest": None,
+    }
 
     def __post_init__(self) -> None:
         EvidenceState(self.state)
         if self.schema_version != 1 or len(self.content_digest) != 64:
             raise ValueError("evidence schema or digest is invalid")
+        input_binding = (
+            self.delivered_input_id,
+            self.delivered_input_digest,
+            self.provider_input_digest,
+        )
+        if any(input_binding) and (
+            not all(input_binding)
+            or len(self.delivered_input_digest or "") != 64
+            or len(self.provider_input_digest or "") != 64
+        ):
+            raise ValueError("reviewer evidence input binding is invalid")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -783,6 +911,7 @@ PASS_B_RECORD_TYPES: tuple[type[PassBRecord], ...] = (
     WorkItemRecord,
     AssignmentRecord,
     AttemptRecord,
+    DeliveredInputRecord,
     ReviewRecord,
     EvidenceBundleRecord,
     EvidenceReferenceRecord,

@@ -18,6 +18,7 @@ from keeper.authority_service.core import (
     QualificationObservation,
     TrustedObserver,
 )
+from keeper.evidence_input import review_input_declaration
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.founder_auth import TestFounderAuthenticator
@@ -57,6 +58,7 @@ from keeper.pass_b.enums import (
 from keeper.pass_b.models import (
     AssignmentRecord,
     AttemptRecord,
+    DeliveredInputRecord,
     ProviderAccountRecord,
     ProviderRecord,
     ProviderSessionRecord,
@@ -247,6 +249,13 @@ class _PilotAuthorityObserver:
             output: dict[str, Any] = {
                 "review_disposition": "ACCEPTED",
                 "findings": [],
+                "review_input_declaration": review_input_declaration(
+                    attempt["provider_input"],
+                    provider_input_digest=str(
+                        attempt["provider_input_digest"]
+                    ),
+                    review_disposition="ACCEPTED",
+                ),
             }
         else:
             output = {"status": "completed", "files_changed": []}
@@ -502,6 +511,15 @@ def run_darksage_pilot(
             ),
         )
     )
+    alternate_pilot_evidence_reference = (
+        application.orchestration.create_local_evidence_reference(
+            review_assignment.assignment_id,
+            pilot_evidence_artifact,
+            source_evidence_bundle_id=(
+                implementation_evidence.evidence_bundle_id
+            ),
+        )
+    )
     boundary_item = application.orchestration.create_work_item(
         project_id=project.project_id,
         charter_id=charter.charter_id,
@@ -595,6 +613,27 @@ def run_darksage_pilot(
         and Path(review_workspace.canonical_path).parent
         == Path(implementation_workspace.canonical_path).parent
     )
+    reviewer_attempt_record = application.repository.get(
+        AttemptRecord, review_evidence.attempt_id
+    )
+    if reviewer_attempt_record.delivered_input_id is None:
+        raise RuntimeError("pilot reviewer input was not durably bound")
+    delivered_input_record = application.repository.get(
+        DeliveredInputRecord,
+        reviewer_attempt_record.delivered_input_id,
+    )
+    delivered_but_alternate_consumed_rejected = False
+    try:
+        application.orchestration.create_review(
+            implementation_evidence.evidence_bundle_id,
+            review_assignment.assignment_id,
+            review_evidence.evidence_bundle_id,
+            evidence_reference_id=(
+                alternate_pilot_evidence_reference.evidence_reference_id
+            ),
+        )
+    except PermissionError:
+        delivered_but_alternate_consumed_rejected = True
     independent_review = application.orchestration.create_review(
         implementation_evidence.evidence_bundle_id,
         review_assignment.assignment_id,
@@ -843,6 +882,12 @@ def run_darksage_pilot(
         and reviewer_parent_evidence_unchanged
         and pilot_evidence_reference_preserved
         and reviewer_workspace_isolated
+        and delivered_but_alternate_consumed_rejected
+        and reviewer_attempt_record.delivered_input_digest
+        == delivered_input_record.delivered_input_digest
+        and review_evidence.delivered_input_digest
+        == delivered_input_record.delivered_input_digest
+        and delivered_input_record.composition_identity == "TEST_AUTHORITY"
     ):
         raise RuntimeError("pilot delegated-mode boundary proof failed")
     attempts = application.repository.list(AttemptRecord)
@@ -897,6 +942,31 @@ def run_darksage_pilot(
         "implementation_evidence": implementation_evidence.to_dict(),
         "review_evidence": review_evidence.to_dict(),
         "independent_review": independent_review.to_dict(),
+        "reviewer_delivered_input": delivered_input_record.to_dict(),
+        "reviewer_delivered_input_digest": (
+            delivered_input_record.delivered_input_digest
+        ),
+        "reviewer_provider_input_digest": (
+            delivered_input_record.provider_input_digest
+        ),
+        "reviewer_input_composition_identity": (
+            delivered_input_record.composition_identity
+        ),
+        "reviewer_evidence_bound_to_delivered_input": (
+            review_evidence.delivered_input_digest
+            == delivered_input_record.delivered_input_digest
+        ),
+        "review_consumed_exact_delivered_input": (
+            independent_review.delivered_input_digest
+            == delivered_input_record.delivered_input_digest
+            and independent_review.consumed_evidence_reference_ids
+            == (
+                pilot_evidence_reference_record.evidence_reference_id,
+            )
+        ),
+        "delivered_a_consumed_b_rejected": (
+            delivered_but_alternate_consumed_rejected
+        ),
         "usage_pause_observed": paused,
         "usage_resume_state": resumed_assignment.state,
         "delegated_prohibited_action_denied": (

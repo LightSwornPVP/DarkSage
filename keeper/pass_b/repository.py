@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from keeper.app.storage import KeeperStore
+from keeper.evidence_input import validate_review_input_declaration
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
@@ -27,6 +28,7 @@ from keeper.pass_b.enums import (
 from keeper.pass_b.models import (
     AssignmentRecord,
     AttemptRecord,
+    DeliveredInputRecord,
     EvidenceBundleRecord,
     EvidenceReferenceRecord,
     PassBRecord,
@@ -45,7 +47,7 @@ from keeper.pass_b.models import (
 
 
 R = TypeVar("R", bound=PassBRecord)
-PASS_B_SCHEMA_VERSION = 5
+PASS_B_SCHEMA_VERSION = 6
 
 
 class PassBRepository:
@@ -187,6 +189,12 @@ class PassBRepository:
                     "VALUES(5,?)",
                     (_now(),),
                 )
+            if current < 6:
+                connection.execute(
+                    "INSERT INTO pass_b_schema_migrations(version,applied_at) "
+                    "VALUES(6,?)",
+                    (_now(),),
+                )
 
     def insert(self, record: PassBRecord) -> None:
         with self.store.connect() as connection:
@@ -200,34 +208,59 @@ class PassBRepository:
         *,
         consumed_at: str,
     ) -> EvidenceReferenceRecord:
+        return self.insert_review_with_references(
+            review,
+            (reference,),
+            consumed_at=consumed_at,
+        )[0]
+
+    def insert_review_with_references(
+        self,
+        review: ReviewRecord,
+        references: tuple[EvidenceReferenceRecord, ...],
+        *,
+        consumed_at: str,
+    ) -> tuple[EvidenceReferenceRecord, ...]:
+        if not references:
+            raise PermissionError("review requires its delivered evidence set")
+        consumed_records: list[EvidenceReferenceRecord] = []
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            current = self._get(
-                connection,
-                EvidenceReferenceRecord,
-                reference.evidence_reference_id,
-            )
             if (
-                current.revision != reference.revision
-                or current.state != EvidenceReferenceState.VALIDATED
-                or current.consumed_by_review_id is not None
-                or current.assignment_id != review.reviewer_assignment_id
-                or current.source_evidence_bundle_id
-                != review.producer_evidence_bundle_id
+                tuple(item.evidence_reference_id for item in references)
+                != review.consumed_evidence_reference_ids
+                or tuple(item.revision + 1 for item in references)
+                != review.consumed_evidence_reference_revisions
             ):
-                raise PermissionError(
-                    "evidence reference cannot be consumed for review"
+                raise PermissionError("review consumed-reference set is not exact")
+            for reference in references:
+                current = self._get(
+                    connection,
+                    EvidenceReferenceRecord,
+                    reference.evidence_reference_id,
                 )
-            consumed = replace(
-                current,
-                consumed_by_review_id=review.review_id,
-                consumed_at=consumed_at,
-                updated_at=consumed_at,
-                revision=current.revision + 1,
-            )
-            self._replace(connection, consumed, current.revision)
+                if (
+                    current.revision != reference.revision
+                    or current.state != EvidenceReferenceState.VALIDATED
+                    or current.consumed_by_review_id is not None
+                    or current.assignment_id != review.reviewer_assignment_id
+                    or current.source_evidence_bundle_id
+                    != review.producer_evidence_bundle_id
+                ):
+                    raise PermissionError(
+                        "evidence reference cannot be consumed for review"
+                    )
+                consumed = replace(
+                    current,
+                    consumed_by_review_id=review.review_id,
+                    consumed_at=consumed_at,
+                    updated_at=consumed_at,
+                    revision=current.revision + 1,
+                )
+                self._replace(connection, consumed, current.revision)
+                consumed_records.append(consumed)
             self._insert(connection, review)
-        return consumed
+        return tuple(consumed_records)
 
     def replace(self, record: R, *, expected_revision: int) -> R:
         with self.store.connect() as connection:
@@ -891,6 +924,7 @@ class PassBRepository:
         self,
         attempt: AttemptRecord,
         *,
+        delivered_input: DeliveredInputRecord | None = None,
         expected_workflow: WorkflowRecord | None = None,
         expected_work_item: WorkItemRecord | None = None,
         expected_assignment: AssignmentRecord | None = None,
@@ -977,6 +1011,30 @@ class PassBRepository:
                     raise PermissionError(
                         "write-capable launch requires a protected write scope"
                     )
+            if delivered_input is not None:
+                if (
+                    assignment.role != AssignmentRole.REVIEWER
+                    or delivered_input.reviewer_attempt_id != attempt.attempt_id
+                    or delivered_input.reviewer_assignment_id
+                    != assignment.assignment_id
+                    or attempt.delivered_input_id
+                    != delivered_input.delivered_input_id
+                    or attempt.delivered_input_digest
+                    != delivered_input.delivered_input_digest
+                    or attempt.provider_input_digest
+                    != delivered_input.provider_input_digest
+                    or delivered_input.project_id != assignment.project_id
+                    or delivered_input.charter_id != assignment.charter_id
+                    or delivered_input.charter_revision
+                    != assignment.charter_revision
+                    or delivered_input.workflow_id != assignment.workflow_id
+                    or delivered_input.work_item_id != assignment.work_item_id
+                ):
+                    raise PermissionError(
+                        "attempt delivered-input binding is invalid"
+                    )
+            elif attempt.delivered_input_id is not None:
+                raise PermissionError("attempt delivered input was not persisted")
             updated_session = replace(
                 session,
                 active_assignments=session.active_assignments + 1,
@@ -990,6 +1048,8 @@ class PassBRepository:
                 updated_at=attempt.created_at,
                 revision=session.revision + 1,
             )
+            if delivered_input is not None:
+                self._insert(connection, delivered_input)
             self._insert(connection, attempt)
             self._replace(connection, updated_session, session.revision)
             try:
@@ -1044,15 +1104,37 @@ class PassBRepository:
                 EvidenceBundleRecord,
                 review.reviewer_evidence_bundle_id,
             )
-            reference = (
+            delivered_input = (
                 self._get(
                     connection,
-                    EvidenceReferenceRecord,
-                    review.consumed_evidence_reference_id,
+                    DeliveredInputRecord,
+                    review.delivered_input_id,
                 )
-                if review.consumed_evidence_reference_id is not None
+                if review.delivered_input_id is not None
                 else None
             )
+            references = tuple(
+                self._get(connection, EvidenceReferenceRecord, reference_id)
+                for reference_id in review.consumed_evidence_reference_ids
+            )
+            declarations = [
+                artifact.get("review_input_declaration")
+                for artifact in reviewer_evidence.artifacts
+                if isinstance(artifact, dict)
+                and "review_input_declaration" in artifact
+            ]
+            declaration_valid = False
+            if delivered_input is not None and len(declarations) == 1:
+                try:
+                    validate_review_input_declaration(
+                        declarations[0],
+                        delivered_input.provider_input,
+                        provider_input_digest=delivered_input.provider_input_digest,
+                        review_disposition=cast(str, review.disposition),
+                    )
+                    declaration_valid = True
+                except ValueError:
+                    declaration_valid = False
             if (
                 review.state != ReviewState.PENDING
                 or review.disposition
@@ -1090,34 +1172,67 @@ class PassBRepository:
                 or work_item.project_id != assignment.project_id
                 or work_item.charter_id != assignment.charter_id
                 or work_item.charter_revision != assignment.charter_revision
-                or (
-                    reference is not None
-                    and (
-                        review.consumed_evidence_reference_revision is None
-                        or reference.revision
-                        != review.consumed_evidence_reference_revision
-                        or reference.consumed_by_review_id != review.review_id
-                        or reference.assignment_id
-                        != reviewer_assignment.assignment_id
-                        or reference.review_target_assignment_id
-                        != assignment.assignment_id
-                        or reference.producer_assignment_id
-                        != assignment.assignment_id
-                        or reference.producer_attempt_id
-                        != producer_evidence.attempt_id
-                        or reference.source_evidence_bundle_id
-                        != producer_evidence.evidence_bundle_id
-                        or reference.source_project_id
-                        != assignment.project_id
-                        or reference.source_workflow_id
-                        != assignment.workflow_id
-                        or reference.source_work_item_id
-                        != assignment.work_item_id
-                        or reference.source_charter_id
-                        != assignment.charter_id
-                        or reference.source_charter_revision
-                        != assignment.charter_revision
-                    )
+                or delivered_input is None
+                or review.delivered_input_digest
+                != delivered_input.delivered_input_digest
+                or delivered_input.project_id != assignment.project_id
+                or delivered_input.charter_id != assignment.charter_id
+                or delivered_input.charter_revision
+                != assignment.charter_revision
+                or delivered_input.workflow_id
+                != reviewer_assignment.workflow_id
+                or delivered_input.work_item_id
+                != reviewer_assignment.work_item_id
+                or delivered_input.producer_assignment_id
+                != assignment.assignment_id
+                or delivered_input.producer_attempt_id
+                != producer_evidence.attempt_id
+                or delivered_input.reviewer_assignment_id
+                != reviewer_assignment.assignment_id
+                or reviewer_attempt.delivered_input_id
+                != delivered_input.delivered_input_id
+                or reviewer_attempt.delivered_input_digest
+                != delivered_input.delivered_input_digest
+                or reviewer_attempt.provider_input_digest
+                != delivered_input.provider_input_digest
+                or reviewer_evidence.delivered_input_id
+                != delivered_input.delivered_input_id
+                or reviewer_evidence.delivered_input_digest
+                != delivered_input.delivered_input_digest
+                or reviewer_evidence.provider_input_digest
+                != delivered_input.provider_input_digest
+                or not declaration_valid
+                or tuple(
+                    item["reference_id"]
+                    for item in delivered_input.references
+                )
+                != review.consumed_evidence_reference_ids
+                or tuple(item.revision for item in references)
+                != review.consumed_evidence_reference_revisions
+                or any(
+                    reference.consumed_by_review_id != review.review_id
+                    or reference.assignment_id
+                    != reviewer_assignment.assignment_id
+                    or reference.review_target_assignment_id
+                    != assignment.assignment_id
+                    or reference.producer_assignment_id
+                    != assignment.assignment_id
+                    or reference.producer_attempt_id
+                    != producer_evidence.attempt_id
+                    or reference.source_evidence_bundle_id
+                    != producer_evidence.evidence_bundle_id
+                    or reference.source_project_id != assignment.project_id
+                    or reference.source_workflow_id != assignment.workflow_id
+                    or reference.source_work_item_id != assignment.work_item_id
+                    or reference.source_charter_id != assignment.charter_id
+                    or reference.source_charter_revision
+                    != assignment.charter_revision
+                    or reference.sha256
+                    != delivered_input.references[index]["sha256"]
+                    or reference.revision
+                    != delivered_input.references[index]["reference_revision"]
+                    + 1
+                    for index, reference in enumerate(references)
                 )
             ):
                 raise PermissionError("review decision binding changed")

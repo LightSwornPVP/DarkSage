@@ -635,7 +635,7 @@ class AuthorityStore:
                 raise PermissionError("launch authorization revocation is stale")
             rows = connection.execute(
                 "SELECT id,payload,payload_hash FROM attempts "
-                "WHERE state IN ('RESERVED','LAUNCH_CLAIMED')"
+                "WHERE state IN ('RESERVED','INPUT_BOUND','LAUNCH_CLAIMED')"
             ).fetchall()
             for row in rows:
                 attempt = json.loads(str(row["payload"]))
@@ -660,6 +660,8 @@ class AuthorityStore:
         generation: int,
         client_sid: str,
         claim: dict[str, Any],
+        *,
+        expected_attempt_state: str = "RESERVED",
     ) -> None:
         serialized, digest = _serialize(claim)
         with self.connect() as connection:
@@ -687,8 +689,14 @@ class AuthorityStore:
                 raise PermissionError("authoritative launch lease expired")
             cursor = connection.execute(
                 "UPDATE attempts SET state='LAUNCH_CLAIMED',payload=?,"
-                "payload_hash=?,updated_at=? WHERE id=? AND state='RESERVED'",
-                (serialized, digest, _now(), attempt_id),
+                "payload_hash=?,updated_at=? WHERE id=? AND state=?",
+                (
+                    serialized,
+                    digest,
+                    _now(),
+                    attempt_id,
+                    expected_attempt_state,
+                ),
             )
             if cursor.rowcount != 1:
                 raise PermissionError("provider launch is not reserved")

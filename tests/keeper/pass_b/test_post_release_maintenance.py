@@ -10,7 +10,10 @@ import keeper
 from keeper.app.service import KeeperApplication
 from keeper.pass_b.application import PassBApplication
 from keeper.pass_b.enums import AssignmentRole
-from keeper.pass_b.launch_authority import ExecutiveAuthorityLaunchGate
+from keeper.pass_b.launch_authority import (
+    ExecutiveAuthorityLaunchGate,
+    TestLaunchAuthority,
+)
 from keeper.pass_b.models import EvidenceReferenceRecord, ReviewRecord
 from keeper.pass_b.providers import AdapterAssignment, LocalMockAdapter
 from keeper.ui.desktop import (
@@ -119,8 +122,11 @@ def test_exact_lineage_is_delivered_and_consumed_once(tmp_path: Path) -> None:
     assert context[0]["reviewed_assignment_id"] == reference.review_target_assignment_id
     assert "canonical_source_path" not in context[0]
     assert str(artifact.resolve()).casefold() not in json.dumps(context).casefold()
+    authority = service.launch_authority
+    assert isinstance(authority, TestLaunchAuthority)
+    assert authority.last_launch_authorization is not None
     ExecutiveAuthorityLaunchGate._validate_production_evidence_delivery(
-        capture.last_request
+        authority.last_launch_authorization, capture.last_request
     )
     with pytest.raises(PermissionError, match="already consumed"):
         service.create_review(
@@ -215,8 +221,11 @@ def test_remote_reference_delivery_is_pathless(tmp_path: Path) -> None:
     assert item["local_or_remote"] == "REMOTE"
     assert item["source_identity"] == "provider-object:immutable-1"
     assert "review_copy" not in item
+    authority = service.launch_authority
+    assert isinstance(authority, TestLaunchAuthority)
+    assert authority.last_launch_authorization is not None
     ExecutiveAuthorityLaunchGate._validate_production_evidence_delivery(
-        capture.last_request
+        authority.last_launch_authorization, capture.last_request
     )
 
 

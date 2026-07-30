@@ -106,6 +106,25 @@ class AuthorityServiceClient:
             Operation.EXECUTE_PROVIDER, {"attempt_id": attempt_id}
         )
 
+    def bind_provider_input(
+        self,
+        attempt_id: str,
+        provider_input: dict[str, Any],
+        provider_input_digest: str,
+        delivered_input_digest: str,
+        manifest_digest: str,
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.BIND_PROVIDER_INPUT,
+            {
+                "attempt_id": attempt_id,
+                "provider_input": provider_input,
+                "provider_input_digest": provider_input_digest,
+                "delivered_input_digest": delivered_input_digest,
+                "manifest_digest": manifest_digest,
+            },
+        )
+
     def finalize_completion(self, attempt_id: str) -> dict[str, Any]:
         return self.request(
             Operation.FINALIZE_COMPLETION, {"attempt_id": attempt_id}

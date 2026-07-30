@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -354,12 +355,20 @@ def test_review_repair_is_transactional_and_retry_is_explicit(
         review_workspace,
         "authority-repair-review",
     )
+    reference = service.create_remote_evidence_reference(
+        reviewer.assignment_id,
+        source_identity="keeper-evidence:repair-review",
+        sha256=hashlib.sha256(b"repair-review").hexdigest(),
+        size_bytes=len(b"repair-review"),
+        source_evidence_bundle_id=evidence.evidence_bundle_id,
+    )
     reviewer_evidence = service.run_assignment(
         reviewer.assignment_id,
         review_path,
         authority_attempt_id=reviewer_authority_id,
         global_context={},
         task_context={},
+        evidence_reference_ids=(reference.evidence_reference_id,),
     )
     reviewer_evidence = service.validate_evidence(
         reviewer_evidence.evidence_bundle_id,

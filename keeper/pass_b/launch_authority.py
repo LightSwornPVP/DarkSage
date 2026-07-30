@@ -7,6 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol, cast
 
+from keeper.evidence_input import (
+    finalize_provider_input,
+    structured_digest,
+    validate_provider_input,
+    validate_review_input_declaration,
+)
 from keeper.authority_service.client import (
     AuthorityServiceClient,
     ProductionAuthorityServiceClient,
@@ -41,6 +47,9 @@ class LaunchAuthorization:
     authorization_generation: int
     stdout_path: str
     stderr_path: str
+    provider_input: dict[str, Any] | None = None
+    delivered_input_digest: str | None = None
+    provider_input_digest: str | None = None
 
 
 class LaunchAuthority(Protocol):
@@ -52,6 +61,9 @@ class LaunchAuthority(Protocol):
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
         authority_attempt_id: str,
+        *,
+        reviewer_attempt_id: str | None = None,
+        provider_input_base: dict[str, Any] | None = None,
     ) -> LaunchAuthorization: ...
 
     def launch(
@@ -73,8 +85,20 @@ class UnavailableLaunchAuthority:
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
         authority_attempt_id: str,
+        *,
+        reviewer_attempt_id: str | None = None,
+        provider_input_base: dict[str, Any] | None = None,
     ) -> LaunchAuthorization:
-        del workflow, work_item, assignment, provider, workspace, authority_attempt_id
+        del (
+            workflow,
+            work_item,
+            assignment,
+            provider,
+            workspace,
+            authority_attempt_id,
+            reviewer_attempt_id,
+            provider_input_base,
+        )
         raise PermissionError(
             "Pass B launch requires active Executive and KeeperAuthority binding"
         )
@@ -149,6 +173,9 @@ class ExecutiveAuthorityLaunchGate:
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
         authority_attempt_id: str,
+        *,
+        reviewer_attempt_id: str | None = None,
+        provider_input_base: dict[str, Any] | None = None,
     ) -> LaunchAuthorization:
         if not provider.authority_registration_id:
             raise PermissionError(
@@ -231,6 +258,75 @@ class ExecutiveAuthorityLaunchGate:
             "work_item_record_digest": _digest(work_item.to_dict()),
             "workspace_reservation_id": workspace.workspace_reservation_id,
         }
+        provider_input: dict[str, Any] | None = None
+        delivered_input_digest: str | None = None
+        provider_input_digest: str | None = None
+        if provider_input_base is not None:
+            if (
+                assignment.role != "REVIEWER"
+                or not reviewer_attempt_id
+                or provider_input_base.get("reviewer_attempt_id")
+                != reviewer_attempt_id
+            ):
+                raise PermissionError(
+                    "typed evidence input is not bound to the reviewer attempt"
+                )
+            (
+                provider_input,
+                delivered_input_digest,
+                provider_input_digest,
+            ) = finalize_provider_input(
+                provider_input_base,
+                composition_identity=(
+                    "PRODUCTION_AUTHORITY"
+                    if self._production
+                    else "TEST_AUTHORITY"
+                ),
+                provider_id=assignment.provider_id,
+                account_id=assignment.account_id,
+                session_id=assignment.session_id,
+                model_id=assignment.model_id,
+                workspace=canonical_workspace_path(
+                    Path(workspace.canonical_path)
+                ),
+                authority_attempt_id=authority_attempt_id,
+                launch_authorization_id=authorization_id,
+                authorization_generation=generation,
+            )
+            bound = self._authority.bind_provider_input(
+                authority_attempt_id,
+                provider_input,
+                provider_input_digest,
+                delivered_input_digest,
+                str(provider_input["manifest_digest"]),
+            )
+            bound_record = bound.get("attempt")
+            bound_state = (
+                bound_record.pop("service_state", None)
+                if isinstance(bound_record, dict)
+                else None
+            )
+            if (
+                not isinstance(bound_record, dict)
+                or bound_state != "INPUT_BOUND"
+                or bound_record.get("provider_input_digest")
+                != provider_input_digest
+                or bound_record.get("delivered_input_digest")
+                != delivered_input_digest
+                or not self._authority.verify(
+                    "provider-input-binding", bound_record
+                )
+            ):
+                raise PermissionError(
+                    "Authority provider-input binding is invalid"
+                )
+            plan.update(
+                {
+                    "reviewer_attempt_id": reviewer_attempt_id,
+                    "delivered_input_digest": delivered_input_digest,
+                    "provider_input_digest": provider_input_digest,
+                }
+            )
         return LaunchAuthorization(
             authority_attempt_id=authority_attempt_id,
             launch_token=launch_token,
@@ -239,6 +335,9 @@ class ExecutiveAuthorityLaunchGate:
             authorization_generation=generation,
             stdout_path=str(record.get("stdout_path") or ""),
             stderr_path=str(record.get("stderr_path") or ""),
+            provider_input=provider_input,
+            delivered_input_digest=delivered_input_digest,
+            provider_input_digest=provider_input_digest,
         )
 
     def launch(
@@ -248,7 +347,7 @@ class ExecutiveAuthorityLaunchGate:
         adapter: ProviderAdapter,
     ) -> AdapterResult:
         del adapter
-        self._validate_production_evidence_delivery(request)
+        self._validate_production_evidence_delivery(authorization, request)
         result = self._authority.execute_provider(
             authorization.authority_attempt_id
         )
@@ -271,6 +370,10 @@ class ExecutiveAuthorityLaunchGate:
             or completion.get("provider_instance_id")
             != request.session_id
             or completion.get("normalized_result") != "completed"
+            or completion.get("delivered_input_digest")
+            != authorization.delivered_input_digest
+            or completion.get("provider_input_digest")
+            != authorization.provider_input_digest
         ):
             raise PermissionError(
                 "Authority provider completion is invalid or failed"
@@ -312,18 +415,35 @@ class ExecutiveAuthorityLaunchGate:
         if request.role == "REVIEWER":
             disposition = output.get("review_disposition")
             findings = output.get("findings")
+            declaration = output.get("review_input_declaration")
             if (
                 disposition not in {"ACCEPTED", "REPAIR_REQUIRED"}
                 or not isinstance(findings, list)
                 or any(not isinstance(item, dict) for item in findings)
+                or authorization.provider_input is None
+                or authorization.provider_input_digest is None
             ):
                 raise PermissionError(
                     "Authority review output is invalid"
                 )
+            try:
+                validated_declaration = validate_review_input_declaration(
+                    declaration,
+                    authorization.provider_input,
+                    provider_input_digest=(
+                        authorization.provider_input_digest
+                    ),
+                    review_disposition=disposition,
+                )
+            except ValueError as error:
+                raise PermissionError(
+                    "Authority review input declaration is invalid"
+                ) from error
             artifact.update(
                 {
                     "review_disposition": disposition,
                     "findings": findings,
+                    "review_input_declaration": validated_declaration,
                 }
             )
         return AdapterResult(
@@ -336,21 +456,49 @@ class ExecutiveAuthorityLaunchGate:
 
     @staticmethod
     def _validate_production_evidence_delivery(
+        authorization: LaunchAuthorization,
         request: AdapterAssignment,
     ) -> None:
-        raw_references = request.task_context.get(
-            "keeper_evidence_references"
+        provider_input = request.task_context.get("keeper_provider_input")
+        provider_input_digest = request.task_context.get(
+            "keeper_provider_input_digest"
         )
-        if raw_references is None:
+        if provider_input is None:
+            if authorization.provider_input is not None:
+                raise PermissionError("reserved provider input was omitted")
             return
-        if (
-            not isinstance(raw_references, list)
-            or not raw_references
-            or any(not isinstance(item, dict) for item in raw_references)
-        ):
+        try:
+            validated_input = validate_provider_input(provider_input)
+        except ValueError as error:
             raise PermissionError(
                 "production evidence context is not structured"
+            ) from error
+        if (
+            validated_input != authorization.provider_input
+            or provider_input_digest != authorization.provider_input_digest
+            or structured_digest(validated_input) != provider_input_digest
+            or validated_input["authority_attempt_id"]
+            != authorization.authority_attempt_id
+            or validated_input["project_id"] != request.project_id
+            or validated_input["charter_id"] != request.charter_id
+            or validated_input["charter_revision"]
+            != request.charter_revision
+            or validated_input["workflow_id"] != request.workflow_id
+            or validated_input["work_item_id"] != request.work_item_id
+            or validated_input["reviewer_assignment_id"]
+            != request.assignment_id
+            or validated_input["reviewer_attempt_id"] != request.attempt_id
+            or validated_input["provider_id"] != request.provider_id
+            or validated_input["account_id"] != request.account_id
+            or validated_input["session_id"] != request.session_id
+            or validated_input["model_id"] != request.model_id
+            or validated_input["workspace"]
+            != canonical_workspace_path(request.workspace)
+        ):
+            raise PermissionError(
+                "production evidence context binding is invalid"
             )
+        raw_references = validated_input["references"]
         manifest_value = request.task_context.get(
             "keeper_evidence_manifest"
         )
@@ -378,44 +526,7 @@ class ExecutiveAuthorityLaunchGate:
             raise PermissionError(
                 "production evidence manifest does not match task context"
             )
-        allowed_fields = {
-            "reference_id",
-            "reference_revision",
-            "classification",
-            "source_identity",
-            "project_id",
-            "charter_id",
-            "charter_revision",
-            "workflow_id",
-            "work_item_id",
-            "producer_assignment_id",
-            "producer_attempt_id",
-            "reviewed_assignment_id",
-            "sha256",
-            "size_bytes",
-            "validated_at",
-            "local_or_remote",
-            "review_copy",
-        }
         for item in raw_references:
-            if set(item) - allowed_fields:
-                raise PermissionError(
-                    "production evidence context exposes unsupported fields"
-                )
-            if (
-                item.get("project_id") != request.project_id
-                or item.get("charter_id") != request.charter_id
-                or item.get("charter_revision")
-                != request.charter_revision
-                or not isinstance(item.get("reference_revision"), int)
-                or not isinstance(item.get("sha256"), str)
-                or len(str(item.get("sha256"))) != 64
-                or not isinstance(item.get("size_bytes"), int)
-                or int(item.get("size_bytes", -1)) < 0
-            ):
-                raise PermissionError(
-                    "production evidence context binding is invalid"
-                )
             if item.get("local_or_remote") == "REMOTE":
                 if "review_copy" in item:
                     raise PermissionError(
@@ -514,6 +625,7 @@ class TestLaunchAuthority:
 
     def __init__(self) -> None:
         self._authorizations: dict[str, tuple[dict[str, object], str]] = {}
+        self.last_launch_authorization: LaunchAuthorization | None = None
 
     def reserve(
         self,
@@ -539,6 +651,9 @@ class TestLaunchAuthority:
         provider: ProviderRecord,
         workspace: WorkspaceReservationRecord,
         authority_attempt_id: str,
+        *,
+        reviewer_attempt_id: str | None = None,
+        provider_input_base: dict[str, Any] | None = None,
     ) -> LaunchAuthorization:
         registered = self._authorizations.get(authority_attempt_id)
         if registered is None:
@@ -553,6 +668,37 @@ class TestLaunchAuthority:
             "launch_authorization_id": f"test-launch:{assignment.project_id}",
             "authorization_generation": assignment.charter_revision,
         }
+        provider_input: dict[str, Any] | None = None
+        delivered_input_digest: str | None = None
+        provider_input_digest: str | None = None
+        if provider_input_base is not None:
+            if not reviewer_attempt_id:
+                raise PermissionError("reviewer attempt identity is missing")
+            (
+                provider_input,
+                delivered_input_digest,
+                provider_input_digest,
+            ) = finalize_provider_input(
+                provider_input_base,
+                composition_identity="TEST_AUTHORITY",
+                provider_id=assignment.provider_id,
+                account_id=assignment.account_id,
+                session_id=assignment.session_id,
+                model_id=assignment.model_id,
+                workspace=canonical_workspace_path(
+                    Path(workspace.canonical_path)
+                ),
+                authority_attempt_id=authority_attempt_id,
+                launch_authorization_id=str(plan["launch_authorization_id"]),
+                authorization_generation=assignment.charter_revision,
+            )
+            plan.update(
+                {
+                    "reviewer_attempt_id": reviewer_attempt_id,
+                    "delivered_input_digest": delivered_input_digest,
+                    "provider_input_digest": provider_input_digest,
+                }
+            )
         return LaunchAuthorization(
             authority_attempt_id=authority_attempt_id,
             launch_token=launch_token,
@@ -561,6 +707,9 @@ class TestLaunchAuthority:
             authorization_generation=assignment.charter_revision,
             stdout_path="",
             stderr_path="",
+            provider_input=provider_input,
+            delivered_input_digest=delivered_input_digest,
+            provider_input_digest=provider_input_digest,
         )
 
     def launch(
@@ -569,7 +718,13 @@ class TestLaunchAuthority:
         request: AdapterAssignment,
         adapter: ProviderAdapter,
     ) -> AdapterResult:
-        del authorization
+        self.last_launch_authorization = authorization
+        if request.task_context.get("keeper_provider_input") != (
+            authorization.provider_input
+        ) or request.task_context.get("keeper_provider_input_digest") != (
+            authorization.provider_input_digest
+        ):
+            raise PermissionError("test provider input differs from reservation")
         return adapter.launch(request)
 
 

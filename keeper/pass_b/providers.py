@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from keeper.evidence_input import (
+    review_input_declaration,
+    structured_digest,
+    validate_provider_input,
+)
 from keeper.pass_b.enums import AssignmentRole, CostMode, HealthState
 from keeper.pass_b.models import (
     AssignmentRecord,
@@ -51,6 +56,10 @@ class AdapterAssignment:
     expected_evidence: tuple[str, ...]
     authority_attempt_id: str
     session_id: str = ""
+    workflow_id: str = ""
+    work_item_id: str = ""
+    provider_id: str = ""
+    account_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,12 +159,40 @@ class LocalMockAdapter:
             "execution_requested": False,
         }
         if assignment.role == AssignmentRole.REVIEWER:
+            provider_input = assignment.task_context.get(
+                "keeper_provider_input"
+            )
+            provider_input_digest = assignment.task_context.get(
+                "keeper_provider_input_digest"
+            )
             artifact.update(
                 {
                     "review_disposition": self._review_disposition,
                     "findings": list(self._review_findings),
                 }
             )
+            if provider_input is not None:
+                if not isinstance(provider_input_digest, str):
+                    raise PermissionError(
+                        "review provider input digest is missing"
+                    )
+                try:
+                    validate_provider_input(provider_input)
+                    if (
+                        structured_digest(provider_input)
+                        != provider_input_digest
+                    ):
+                        raise ValueError("provider input digest mismatch")
+                    declaration = review_input_declaration(
+                        provider_input,
+                        provider_input_digest=provider_input_digest,
+                        review_disposition=self._review_disposition,
+                    )
+                except ValueError as error:
+                    raise PermissionError(
+                        "review provider input binding is invalid"
+                    ) from error
+                artifact["review_input_declaration"] = declaration
         return AdapterResult(
             external_execution_id=external_id,
             summary=f"Completed {assignment.role.casefold()} assignment.",
@@ -442,4 +479,8 @@ def assignment_to_adapter(
         expected_evidence=assignment.expected_evidence,
         authority_attempt_id=authority_attempt_id,
         session_id=assignment.session_id,
+        workflow_id=assignment.workflow_id,
+        work_item_id=assignment.work_item_id,
+        provider_id=assignment.provider_id,
+        account_id=assignment.account_id,
     )

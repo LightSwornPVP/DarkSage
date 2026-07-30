@@ -278,7 +278,7 @@ class PassBApplication:
     def diagnostics(self) -> dict[str, Any]:
         return {
             "data_directory": str(self.data_directory),
-            "pass_b_schema_version": 5,
+            "pass_b_schema_version": 6,
             "authority": self._authority_health(),
             "launch_authority_configured": (
                 self.authority_client is not None

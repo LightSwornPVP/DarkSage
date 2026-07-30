@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -547,7 +548,18 @@ def test_review_requires_matching_reviewer_attempt_and_evidence(
         ),
     )
     reviewer_evidence = []
+    reviewer_references = []
     for index, reviewer in enumerate(reviewers):
+        reference = service.create_remote_evidence_reference(
+            reviewer.assignment_id,
+            source_identity=f"keeper-evidence:reviewer-{index}",
+            sha256=hashlib.sha256(
+                f"reviewer-{index}".encode("utf-8")
+            ).hexdigest(),
+            size_bytes=len(f"reviewer-{index}"),
+            source_evidence_bundle_id=producer_evidence.evidence_bundle_id,
+        )
+        reviewer_references.append(reference)
         path = tmp_path / f"reviewer-{index}"
         _, authority_id = _launch_ready(
             service, reviewer, path, f"reviewer-{index}"
@@ -558,6 +570,7 @@ def test_review_requires_matching_reviewer_attempt_and_evidence(
             authority_attempt_id=authority_id,
             global_context={},
             task_context={},
+            evidence_reference_ids=(reference.evidence_reference_id,),
         )
         reviewer_evidence.append(
             service.validate_evidence(evidence.evidence_bundle_id, path)

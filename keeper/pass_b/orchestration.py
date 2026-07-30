@@ -10,6 +10,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, NoReturn, TypedDict, cast
 
+from keeper.evidence_input import (
+    PROVIDER_INPUT_SCHEMA_VERSION,
+    validate_remote_source_identity,
+    validate_provider_input,
+    validate_review_input_declaration,
+)
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
@@ -27,6 +33,7 @@ from keeper.pass_b.enums import (
 from keeper.pass_b.models import (
     AssignmentRecord,
     AttemptRecord,
+    DeliveredInputRecord,
     EvidenceBundleRecord,
     EvidenceReferenceRecord,
     PauseReasonRecord,
@@ -537,6 +544,7 @@ class OrchestrationService:
         size_bytes: int,
         source_evidence_bundle_id: str | None = None,
     ) -> EvidenceReferenceRecord:
+        source_identity = validate_remote_source_identity(source_identity)
         workflow, work_item, assignment = (
             self.repository.assignment_launch_binding(assignment_id)
         )
@@ -838,6 +846,20 @@ class OrchestrationService:
         provider = self.repository.get(
             ProviderRecord, assignment.provider_id
         )
+        now = self._now()
+        attempt_id = uuid.uuid4().hex
+        provider_input_base = (
+            self._provider_input_base(
+                assignment,
+                attempt_id,
+                references,
+                delivery_context,
+                delivery_manifest_digest,
+                now,
+            )
+            if references
+            else None
+        )
         authorization = self.launch_authority.authorize(
             workflow,
             work_item,
@@ -845,6 +867,12 @@ class OrchestrationService:
             provider,
             workspace,
             authority_attempt_id,
+            reviewer_attempt_id=(
+                attempt_id
+                if assignment.role == AssignmentRole.REVIEWER
+                else None
+            ),
+            provider_input_base=provider_input_base,
         )
         usage_rows = [
             item
@@ -865,9 +893,54 @@ class OrchestrationService:
             if usage_rows
             else None
         )
-        now = self._now()
+        delivered_input: DeliveredInputRecord | None = None
+        if provider_input_base is not None:
+            if (
+                authorization.provider_input is None
+                or authorization.delivered_input_digest is None
+                or authorization.provider_input_digest is None
+            ):
+                raise PermissionError(
+                    "launch authority omitted the typed provider input binding"
+                )
+            delivered_input = DeliveredInputRecord(
+                delivered_input_id=uuid.uuid4().hex,
+                project_id=assignment.project_id,
+                charter_id=assignment.charter_id,
+                charter_revision=assignment.charter_revision,
+                workflow_id=assignment.workflow_id,
+                work_item_id=assignment.work_item_id,
+                reviewer_assignment_id=assignment.assignment_id,
+                reviewer_attempt_id=attempt_id,
+                producer_assignment_id=str(
+                    provider_input_base["producer_assignment_id"]
+                ),
+                producer_attempt_id=str(
+                    provider_input_base["producer_attempt_id"]
+                ),
+                references=tuple(
+                    dict(item)
+                    for item in authorization.provider_input["references"]
+                ),
+                manifest_digest=delivery_manifest_digest or "",
+                delivered_input_digest=(
+                    authorization.delivered_input_digest
+                ),
+                provider_input_digest=authorization.provider_input_digest,
+                provider_input=dict(authorization.provider_input),
+                delivery_method=str(
+                    provider_input_base["delivery_method"]
+                ),
+                composition_identity=str(
+                    authorization.provider_input["composition_identity"]
+                ),
+                delivered_at=now,
+                created_at=now,
+                updated_at=now,
+                revision=1,
+            )
         attempt = AttemptRecord(
-            attempt_id=uuid.uuid4().hex,
+            attempt_id=attempt_id,
             assignment_id=assignment_id,
             authority_attempt_id=authority_attempt_id,
             launch_token=authorization.launch_token,
@@ -884,9 +957,17 @@ class OrchestrationService:
             usage_reservation_id=usage_reservation_id,
             launch_plan_digest=authorization.launch_plan_digest,
             session_slot_claimed=True,
+            delivered_input_id=(
+                delivered_input.delivered_input_id
+                if delivered_input is not None
+                else None
+            ),
+            delivered_input_digest=authorization.delivered_input_digest,
+            provider_input_digest=authorization.provider_input_digest,
         )
         self.repository.reserve_attempt(
             attempt,
+            delivered_input=delivered_input,
             expected_workflow=workflow,
             expected_work_item=work_item,
             expected_assignment=assignment,
@@ -914,6 +995,12 @@ class OrchestrationService:
             )
             adapter_task_context["keeper_evidence_manifest"] = (
                 ".keeper-input/evidence-references.json"
+            )
+            adapter_task_context["keeper_provider_input"] = dict(
+                cast(dict[str, Any], authorization.provider_input)
+            )
+            adapter_task_context["keeper_provider_input_digest"] = (
+                authorization.provider_input_digest
             )
         request = assignment_to_adapter(
             assignment,
@@ -1001,6 +1088,9 @@ class OrchestrationService:
                 "reviewed_assignment_id": (
                     reference.review_target_assignment_id
                 ),
+                "source_evidence_bundle_id": (
+                    reference.source_evidence_bundle_id
+                ),
                 "sha256": reference.sha256,
                 "size_bytes": reference.size_bytes,
                 "validated_at": reference.validated_at,
@@ -1076,6 +1166,56 @@ class OrchestrationService:
             copied,
             hashlib.sha256(manifest_bytes).hexdigest(),
         )
+
+    @staticmethod
+    def _provider_input_base(
+        assignment: AssignmentRecord,
+        attempt_id: str,
+        references: tuple[EvidenceReferenceRecord, ...],
+        delivery_context: tuple[dict[str, object], ...],
+        manifest_digest: str | None,
+        delivered_at: str,
+    ) -> dict[str, Any]:
+        if (
+            assignment.role != AssignmentRole.REVIEWER
+            or not references
+            or len(references) != len(delivery_context)
+            or manifest_digest is None
+        ):
+            raise PermissionError(
+                "typed evidence delivery is restricted to reviewer attempts"
+            )
+        producer_assignment_id = references[0].producer_assignment_id
+        producer_attempt_id = references[0].producer_attempt_id
+        if any(
+            reference.producer_assignment_id != producer_assignment_id
+            or reference.producer_attempt_id != producer_attempt_id
+            or reference.review_target_assignment_id
+            != producer_assignment_id
+            or reference.assignment_id != assignment.assignment_id
+            for reference in references
+        ):
+            raise PermissionError(
+                "typed evidence references do not share exact review lineage"
+            )
+        return {
+            "schema_version": PROVIDER_INPUT_SCHEMA_VERSION,
+            "project_id": assignment.project_id,
+            "charter_id": assignment.charter_id,
+            "charter_revision": assignment.charter_revision,
+            "workflow_id": assignment.workflow_id,
+            "work_item_id": assignment.work_item_id,
+            "producer_assignment_id": producer_assignment_id,
+            "producer_attempt_id": producer_attempt_id,
+            "reviewer_assignment_id": assignment.assignment_id,
+            "reviewer_attempt_id": attempt_id,
+            "references": [dict(item) for item in delivery_context],
+            "manifest_digest": manifest_digest,
+            "delivery_method": (
+                "TRUSTED_IMMUTABLE_COPY_OR_PATHLESS_REMOTE"
+            ),
+            "delivered_at": delivered_at,
+        }
 
     @staticmethod
     def _verify_evidence_delivery(
@@ -1163,6 +1303,63 @@ class OrchestrationService:
             or attempt.assignment_id != assignment.assignment_id
         ):
             errors.append("producer identity does not match assignment")
+        if assignment.role == AssignmentRole.REVIEWER:
+            delivered_input = (
+                self.repository.optional(
+                    DeliveredInputRecord,
+                    attempt.delivered_input_id,
+                )
+                if attempt.delivered_input_id is not None
+                else None
+            )
+            declaration_artifacts = [
+                artifact
+                for artifact in evidence.artifacts
+                if isinstance(artifact, dict)
+                and "review_input_declaration" in artifact
+            ]
+            if delivered_input is None:
+                if (
+                    attempt.delivered_input_id is not None
+                    or declaration_artifacts
+                ):
+                    errors.append(
+                        "reviewer evidence has an invalid delivered-input binding"
+                    )
+            elif (
+                evidence.delivered_input_id
+                != delivered_input.delivered_input_id
+                or evidence.delivered_input_digest
+                != delivered_input.delivered_input_digest
+                or evidence.provider_input_digest
+                != delivered_input.provider_input_digest
+                or len(declaration_artifacts) != 1
+                or declaration_artifacts[0].get("review_disposition")
+                not in {"ACCEPTED", "REPAIR_REQUIRED"}
+            ):
+                errors.append(
+                    "reviewer evidence lacks its exact delivered-input binding"
+                )
+            else:
+                try:
+                    validate_review_input_declaration(
+                        declaration_artifacts[0][
+                            "review_input_declaration"
+                        ],
+                        delivered_input.provider_input,
+                        provider_input_digest=(
+                            delivered_input.provider_input_digest
+                        ),
+                        review_disposition=str(
+                            declaration_artifacts[0][
+                                "review_disposition"
+                            ]
+                        ),
+                    )
+                except ValueError:
+                    errors.append(
+                        "reviewer evidence delivered-input declaration is invalid"
+                    )
         kinds: set[str] = set()
         root = workspace_path.resolve(strict=True)
         forbidden_keys = {
@@ -1220,6 +1417,7 @@ class OrchestrationService:
         reviewer_evidence_id: str,
         *,
         evidence_reference_id: str | None = None,
+        evidence_reference_ids: tuple[str, ...] | None = None,
     ) -> ReviewRecord:
         evidence = self.repository.get(EvidenceBundleRecord, evidence_id)
         producer = self.repository.get(
@@ -1246,6 +1444,35 @@ class OrchestrationService:
             AttemptRecord, reviewer_evidence.attempt_id
         )
         disposition, findings = _review_outcome(reviewer_evidence)
+        delivered_input = (
+            self.repository.get(
+                DeliveredInputRecord,
+                reviewer_attempt.delivered_input_id,
+            )
+            if reviewer_attempt.delivered_input_id is not None
+            else None
+        )
+        declaration_valid = False
+        if delivered_input is not None:
+            declarations = [
+                artifact.get("review_input_declaration")
+                for artifact in reviewer_evidence.artifacts
+                if isinstance(artifact, dict)
+                and "review_input_declaration" in artifact
+            ]
+            if len(declarations) == 1:
+                try:
+                    validate_review_input_declaration(
+                        declarations[0],
+                        delivered_input.provider_input,
+                        provider_input_digest=(
+                            delivered_input.provider_input_digest
+                        ),
+                        review_disposition=disposition,
+                    )
+                    declaration_valid = True
+                except ValueError:
+                    declaration_valid = False
         if (
             reviewer_evidence.state != EvidenceState.VALIDATED
             or reviewer_evidence.assignment_id != reviewer.assignment_id
@@ -1256,18 +1483,80 @@ class OrchestrationService:
             or reviewer.charter_revision != producer.charter_revision
             or reviewer.usage_policy.get("review_of_assignment_id")
             != producer.assignment_id
+            or delivered_input is None
+            or delivered_input.reviewer_attempt_id
+            != reviewer_attempt.attempt_id
+            or delivered_input.reviewer_assignment_id
+            != reviewer.assignment_id
+            or delivered_input.producer_assignment_id
+            != producer.assignment_id
+            or delivered_input.producer_attempt_id != evidence.attempt_id
+            or delivered_input.project_id != producer.project_id
+            or delivered_input.charter_id != producer.charter_id
+            or delivered_input.charter_revision
+            != producer.charter_revision
+            or delivered_input.workflow_id != reviewer.workflow_id
+            or delivered_input.work_item_id != reviewer.work_item_id
+            or reviewer_evidence.delivered_input_id
+            != delivered_input.delivered_input_id
+            or reviewer_evidence.delivered_input_digest
+            != delivered_input.delivered_input_digest
+            or reviewer_evidence.provider_input_digest
+            != delivered_input.provider_input_digest
+            or not declaration_valid
         ):
             raise PermissionError("review independence or evidence is invalid")
+        self._require_current_charter(
+            producer.project_id,
+            producer.charter_id,
+            producer.charter_revision,
+            producer.authority_envelope_digest,
+        )
         now = self._now()
-        reference = (
+        delivered_reference_ids = tuple(
+            str(item["reference_id"])
+            for item in delivered_input.references
+        )
+        caller_reference_ids = (
+            evidence_reference_ids
+            if evidence_reference_ids is not None
+            else (
+                (evidence_reference_id,)
+                if evidence_reference_id is not None
+                else delivered_reference_ids
+            )
+        )
+        if (
+            evidence_reference_id is not None
+            and evidence_reference_ids is not None
+        ) or caller_reference_ids != delivered_reference_ids:
+            raise PermissionError(
+                "caller evidence references differ from reviewer delivery"
+            )
+        references = tuple(
             self.validate_evidence_reference(
-                evidence_reference_id,
+                reference_id,
                 reviewer_assignment_id,
                 expected_source_evidence_bundle_id=evidence_id,
             )
-            if evidence_reference_id is not None
-            else None
+            for reference_id in delivered_reference_ids
         )
+        if tuple(
+            reference.revision for reference in references
+        ) != tuple(
+            int(item["reference_revision"])
+            for item in delivered_input.references
+        ) or any(
+            reference.sha256 != delivered_input.references[index]["sha256"]
+            or reference.source_evidence_bundle_id
+            != delivered_input.references[index][
+                "source_evidence_bundle_id"
+            ]
+            for index, reference in enumerate(references)
+        ):
+            raise PermissionError(
+                "durable evidence references changed after reviewer delivery"
+            )
         review = ReviewRecord(
             review_id=uuid.uuid4().hex,
             project_id=producer.project_id,
@@ -1285,22 +1574,29 @@ class OrchestrationService:
             reviewer_attempt_id=reviewer_attempt.attempt_id,
             reviewer_evidence_bundle_id=reviewer_evidence.evidence_bundle_id,
             consumed_evidence_reference_id=(
-                reference.evidence_reference_id
-                if reference is not None
+                references[0].evidence_reference_id
+                if len(references) == 1
                 else None
             ),
             consumed_evidence_reference_revision=(
-                reference.revision + 1 if reference is not None else None
+                references[0].revision + 1
+                if len(references) == 1
+                else None
+            ),
+            delivered_input_id=delivered_input.delivered_input_id,
+            delivered_input_digest=delivered_input.delivered_input_digest,
+            consumed_evidence_reference_ids=tuple(
+                item.evidence_reference_id for item in references
+            ),
+            consumed_evidence_reference_revisions=tuple(
+                item.revision + 1 for item in references
             ),
         )
-        if reference is None:
-            self.repository.insert(review)
-        else:
-            self.repository.insert_review_with_reference(
-                review,
-                reference,
-                consumed_at=now,
-            )
+        self.repository.insert_review_with_references(
+            review,
+            references,
+            consumed_at=now,
+        )
         return review
 
     def decide_review(
@@ -1308,9 +1604,18 @@ class OrchestrationService:
         review_id: str,
     ) -> tuple[ReviewRecord, AssignmentRecord, WorkItemRecord]:
         review = self.repository.get(ReviewRecord, review_id)
-        if review.consumed_evidence_reference_id is not None:
+        producer = self.repository.get(
+            AssignmentRecord, review.assignment_id
+        )
+        self._require_current_charter(
+            producer.project_id,
+            producer.charter_id,
+            producer.charter_revision,
+            producer.authority_envelope_digest,
+        )
+        for evidence_reference_id in review.consumed_evidence_reference_ids:
             self.validate_evidence_reference(
-                review.consumed_evidence_reference_id,
+                evidence_reference_id,
                 review.reviewer_assignment_id,
                 expected_source_evidence_bundle_id=(
                     review.producer_evidence_bundle_id
@@ -1402,6 +1707,9 @@ class OrchestrationService:
             created_at=now,
             updated_at=now,
             revision=1,
+            delivered_input_id=attempt.delivered_input_id,
+            delivered_input_digest=attempt.delivered_input_digest,
+            provider_input_digest=attempt.provider_input_digest,
         )
 
     def _require_current_charter(

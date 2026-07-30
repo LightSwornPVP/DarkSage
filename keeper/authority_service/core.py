@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from keeper.evidence_input import structured_digest, validate_provider_input
 from keeper.authority_service.key_ring import ServiceKeyRing
 from keeper.authority_service.protocol import (
     PROTOCOL_VERSION,
@@ -32,7 +33,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.4.0"
+SERVICE_VERSION = "1.5.0"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
@@ -175,6 +176,7 @@ class AuthorityServiceCore:
             Operation.RESERVE_ATTEMPT: self._reserve_attempt,
             Operation.AUTHORIZE_PROJECT_LAUNCH: self._authorize_project_launch,
             Operation.REVOKE_PROJECT_LAUNCH: self._revoke_project_launch,
+            Operation.BIND_PROVIDER_INPUT: self._bind_provider_input,
             Operation.EXECUTE_PROVIDER: self._execute_provider,
             Operation.RECORD_PROVIDER_START: self._record_provider_start,
             Operation.FINALIZE_COMPLETION: self._finalize_completion,
@@ -742,6 +744,120 @@ class AuthorityServiceCore:
         )
         return {"attempt": record, "attempt_id": attempt_id}
 
+    def _bind_provider_input(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(
+            payload,
+            {
+                "attempt_id",
+                "provider_input",
+                "provider_input_digest",
+                "delivered_input_digest",
+                "manifest_digest",
+            },
+        )
+        attempt_id = _text(payload["attempt_id"], "attempt ID")
+        provider_input = validate_provider_input(payload["provider_input"])
+        provider_input_digest = _sha256_text(
+            payload["provider_input_digest"], "provider input digest"
+        )
+        delivered_input_digest = _sha256_text(
+            payload["delivered_input_digest"], "delivered input digest"
+        )
+        manifest_digest = _sha256_text(
+            payload["manifest_digest"], "manifest digest"
+        )
+        if (
+            structured_digest(provider_input) != provider_input_digest
+            or provider_input["delivered_input_digest"]
+            != delivered_input_digest
+            or provider_input["manifest_digest"] != manifest_digest
+            or provider_input["authority_attempt_id"] != attempt_id
+        ):
+            raise PermissionError("provider input digest binding is invalid")
+        current = self.store.get("attempts", attempt_id)
+        if current is None:
+            raise PermissionError("provider attempt is unavailable")
+        state = current.pop("service_state", None)
+        if state == "INPUT_BOUND":
+            if (
+                current.get("authorized_client_sid") != client_sid
+                or current.get("provider_input") != provider_input
+                or current.get("provider_input_digest")
+                != provider_input_digest
+                or current.get("delivered_input_digest")
+                != delivered_input_digest
+                or not self.keys.verify("provider-input-binding", current)
+            ):
+                raise PermissionError(
+                    "provider input is already bound differently"
+                )
+            return {"attempt": {**current, "service_state": "INPUT_BOUND"}}
+        expected = {
+            "project_id": current.get("project_id"),
+            "charter_id": current.get("charter_id"),
+            "charter_revision": current.get("charter_revision"),
+            "reviewer_assignment_id": current.get("task_id"),
+            "work_item_id": current.get("stage_id"),
+            "session_id": current.get("provider_instance_id"),
+            "launch_authorization_id": current.get(
+                "launch_authorization_id"
+            ),
+            "authorization_generation": current.get(
+                "authorization_generation"
+            ),
+        }
+        mismatches = [
+            name
+            for name, value in expected.items()
+            if provider_input[name] != value
+        ]
+        if str(Path(str(provider_input["workspace"])).resolve()).casefold() != str(
+            Path(str(current.get("workspace"))).resolve()
+        ).casefold():
+            mismatches.append("workspace")
+        if (
+            state != "RESERVED"
+            or current.get("authorized_client_sid") != client_sid
+            or str(current.get("role", "")).casefold() != "reviewer"
+            or (
+                provider_input["composition_identity"]
+                == "TEST_AUTHORITY"
+                and type(self.founder_capability_verifier)
+                is not TestFounderCapabilityVerifier
+            )
+            or mismatches
+        ):
+            raise PermissionError(
+                "provider input does not match the reserved Authority attempt"
+                + (
+                    ": " + ", ".join(sorted(mismatches))
+                    if mismatches
+                    else ""
+                )
+            )
+        bound = self.keys.sign(
+            "provider-input-binding",
+            {
+                **current,
+                "kind": "provider_input_binding",
+                "provider_input": provider_input,
+                "provider_input_digest": provider_input_digest,
+                "delivered_input_digest": delivered_input_digest,
+                "manifest_digest": manifest_digest,
+                "provider_input_bound_at": _now(),
+            },
+        )
+        self.store.transition(
+            "attempts",
+            attempt_id,
+            "RESERVED",
+            "INPUT_BOUND",
+            bound,
+        )
+        return {"attempt": {**bound, "service_state": "INPUT_BOUND"}}
+
     def _execute_provider(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
@@ -750,8 +866,26 @@ class AuthorityServiceCore:
             raise RuntimeError("authority provider observer is unavailable")
         attempt_id = _text(payload["attempt_id"], "attempt ID")
         attempt = self.store.get("attempts", attempt_id)
-        if attempt is None or attempt.pop("service_state", None) != "RESERVED":
+        if attempt is None:
             raise PermissionError("provider launch is not reserved")
+        state = attempt.pop("service_state", None)
+        if (
+            state not in {"RESERVED", "INPUT_BOUND"}
+            or (
+                state == "INPUT_BOUND"
+                and (
+                    not self.keys.verify(
+                        "provider-input-binding", attempt
+                    )
+                    or not isinstance(attempt.get("provider_input"), dict)
+                    or structured_digest(attempt["provider_input"])
+                    != attempt.get("provider_input_digest")
+                )
+            )
+        ):
+            raise PermissionError(
+                "provider launch is not reserved or validly input-bound"
+            )
         if attempt.get("authorized_client_sid") != client_sid:
             raise PermissionError("provider launch belongs to another client")
         registration = self.store.get(
@@ -774,6 +908,7 @@ class AuthorityServiceCore:
             int(attempt["authorization_generation"]),
             client_sid,
             claim,
+            expected_attempt_state=str(state),
         )
         started_result: dict[str, Any] = {}
 
@@ -881,8 +1016,15 @@ class AuthorityServiceCore:
             raise RuntimeError("authority provider observer is unavailable")
         attempt_id = _text(payload["attempt_id"], "attempt ID")
         attempt = self.store.get("attempts", attempt_id)
-        if attempt is None or attempt.pop("service_state", None) != "RESERVED":
+        if attempt is None:
             raise PermissionError("provider launch is not reserved")
+        state = attempt.pop("service_state", None)
+        if state not in {"RESERVED", "INPUT_BOUND"}:
+            raise PermissionError("provider launch is not reserved")
+        if state == "INPUT_BOUND":
+            raise PermissionError(
+                "typed reviewer execution must use Authority-bound provider input"
+            )
         if attempt.get("authorized_client_sid") != client_sid:
             raise PermissionError("provider launch belongs to another client")
         observation = self.observer.observe_process(
@@ -916,7 +1058,13 @@ class AuthorityServiceCore:
                 "completion_challenge": secrets.token_hex(32),
             },
         )
-        self.store.transition("attempts", attempt_id, "RESERVED", "EXECUTION_STARTED", started)
+        self.store.transition(
+            "attempts",
+            attempt_id,
+            str(state),
+            "EXECUTION_STARTED",
+            started,
+        )
         return {"attempt": started, "attempt_id": attempt_id}
 
     def _finalize_completion(
@@ -998,6 +1146,13 @@ class AuthorityServiceCore:
                 "process_id": attempt["pid"],
                 "process_creation_time": attempt["process_creation_time"],
                 "provider_evidence_digest": evidence_digest,
+                "delivered_input_digest": attempt.get(
+                    "delivered_input_digest"
+                ),
+                "provider_input_digest": attempt.get(
+                    "provider_input_digest"
+                ),
+                "manifest_digest": attempt.get("manifest_digest"),
                 "exit_status": exit_status,
                 "normalized_result": normalized_result,
                 "terminal_disposition": normalized_result.upper(),
@@ -1225,6 +1380,7 @@ class AuthorityServiceCore:
                 "provider-qualification-start",
                 "provider-qualification",
                 "provider-launch-authorization",
+                "provider-input-binding",
                 "provider-launch-claim",
                 "provider-start",
                 "provider-completion",
@@ -1258,6 +1414,7 @@ class AuthorityServiceCore:
         state = str(value.pop("service_state"))
         if state not in {
             "RESERVED",
+            "INPUT_BOUND",
             "LAUNCH_CLAIMED",
             "EXECUTION_STARTED",
             "PAUSED",
