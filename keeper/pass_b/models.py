@@ -328,6 +328,142 @@ class AssignmentRecord(PassBRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionProfileRecord(PassBRecord):
+    execution_profile_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    workflow_id: str
+    work_item_id: str
+    role: str
+    review_of_assignment_id: str | None
+    workspace_id: str
+    canonical_workspace_path: str
+    write_scopes: tuple[str, ...]
+    write_scope_keys: tuple[str, ...]
+    expected_evidence: tuple[str, ...]
+    usage_amount: float
+    effort_level: str
+    required_capabilities: tuple[str, ...]
+    privacy_classification: str
+    preferred_provider_id: str | None
+    allow_substitution: bool
+    allow_paid: bool
+    authority_envelope_digest: str
+    created_at: str
+    updated_at: str
+    revision: int
+
+    KIND = "execution_profile"
+    ID_FIELD = "execution_profile_id"
+    TUPLE_FIELDS = (
+        "write_scopes",
+        "write_scope_keys",
+        "expected_evidence",
+        "required_capabilities",
+    )
+
+    def __post_init__(self) -> None:
+        role = AssignmentRole(self.role)
+        if (
+            self.charter_revision < 1
+            or not self.workspace_id
+            or not self.canonical_workspace_path
+            or len(self.authority_envelope_digest) != 64
+            or self.effort_level not in {"MEDIUM", "HIGH"}
+            or not math.isfinite(self.usage_amount)
+            or self.usage_amount < 0
+            or not self.expected_evidence
+            or not self.required_capabilities
+            or not self.privacy_classification
+            or len(self.write_scopes) != len(self.write_scope_keys)
+            or len(set(self.write_scope_keys)) != len(self.write_scope_keys)
+            or len(set(self.expected_evidence)) != len(self.expected_evidence)
+            or len(set(self.required_capabilities))
+            != len(self.required_capabilities)
+            or (role == AssignmentRole.REVIEWER and self.write_scopes)
+            or (
+                role == AssignmentRole.REVIEWER
+                and not self.review_of_assignment_id
+            )
+            or (
+                role != AssignmentRole.REVIEWER
+                and self.review_of_assignment_id is not None
+            )
+            or self.allow_paid
+        ):
+            raise ValueError("execution profile policy is invalid")
+        _timestamp(self.created_at, "created_at")
+        _timestamp(self.updated_at, "updated_at")
+        _positive_revision(self.revision)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSelectionRecord(PassBRecord):
+    provider_selection_id: str
+    execution_profile_id: str
+    assignment_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    workflow_id: str
+    work_item_id: str
+    role: str
+    provider_id: str
+    account_id: str
+    session_id: str
+    model_id: str
+    usage_pool_id: str
+    cost_mode: str
+    privacy_classification: str
+    independence_key: str
+    effort_level: str
+    allowed_provider_ids: tuple[str, ...]
+    required_capabilities: tuple[str, ...]
+    excluded_independence_keys: tuple[str, ...]
+    policy_digest: str
+    delegated_mode_grant_id: str
+    created_at: str
+    updated_at: str
+    revision: int
+
+    KIND = "provider_selection"
+    ID_FIELD = "provider_selection_id"
+    TUPLE_FIELDS = (
+        "allowed_provider_ids",
+        "required_capabilities",
+        "excluded_independence_keys",
+    )
+
+    def __post_init__(self) -> None:
+        AssignmentRole(self.role)
+        CostMode(self.cost_mode)
+        if (
+            self.charter_revision < 1
+            or self.effort_level not in {"MEDIUM", "HIGH"}
+            or len(self.policy_digest) != 64
+            or not self.execution_profile_id
+            or not self.assignment_id
+            or not self.usage_pool_id
+            or not self.privacy_classification
+            or not self.independence_key
+            or not self.delegated_mode_grant_id
+            or not self.allowed_provider_ids
+            or not self.required_capabilities
+            or len(set(self.allowed_provider_ids))
+            != len(self.allowed_provider_ids)
+            or len(set(self.required_capabilities))
+            != len(self.required_capabilities)
+            or len(set(self.excluded_independence_keys))
+            != len(self.excluded_independence_keys)
+        ):
+            raise ValueError("provider selection binding is invalid")
+        _timestamp(self.created_at, "created_at")
+        _timestamp(self.updated_at, "updated_at")
+        _positive_revision(self.revision)
+
+
+@dataclass(frozen=True, slots=True)
 class AttemptRecord(PassBRecord):
     attempt_id: str
     assignment_id: str
@@ -910,6 +1046,8 @@ PASS_B_RECORD_TYPES: tuple[type[PassBRecord], ...] = (
     WorkflowRecord,
     WorkItemRecord,
     AssignmentRecord,
+    ExecutionProfileRecord,
+    ProviderSelectionRecord,
     AttemptRecord,
     DeliveredInputRecord,
     ReviewRecord,

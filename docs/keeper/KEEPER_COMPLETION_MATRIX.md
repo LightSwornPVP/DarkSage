@@ -1,15 +1,15 @@
 # Keeper Completion Matrix
 
 This matrix records the repository-wide completion audit performed against merged
-main `3565b125788cd3c2337b9d5c7fa922772719abcf`. `COMPLETE` means the supported
+main `447231898abd68743a3b9de0e83912e141629aaf`. `COMPLETE` means the supported
 Keeper 1.0 path has an authoritative implementation and verification.
 
 | Area | Complete | Partial or deferred |
 |---|---|---|
 | Founder and authority | Native Founder identity/authentication; challenge, intent, project, machine, expiry, session and replay binding; Authority reservations; durable receipts; atomic failure; exceptional-action gates | Automatic authority-key rotation is deferred by design; retained verifier migration is future hardening |
-| Project Charters | Creation, validation, approval, versioning, amendment, revocation, budget/provider/authority enforcement | Founder-facing constraint and authority presentation; product-shell approval and project selection |
-| Workflow orchestration | Durable project creation, independent review, duplicate-delivery prevention | Product-integrated planning, provider selection, assignment, stage progression, lifecycle controls, uncertainty reconciliation |
-| Provider management | Registration, identity, capability enforcement, multiple sessions, review separation, model evidence | External-provider qualification matrix; Pass B effort selection; recovery reconciliation |
+| Project Charters | Creation, validation, approval, versioning, amendment, revocation, budget/provider/authority enforcement; product lifecycle selection, native approval, and atomic planning | Further Founder-facing constraint presentation polish |
+| Workflow orchestration | Durable project creation, independent review, duplicate-delivery prevention, atomic charter-derived planning, durable execution profiles, dependency-gated one-winner assignment preparation | Authority-bound provider runner, stage progression, lifecycle controls, uncertainty reconciliation |
+| Provider management | Registration, identity, capability enforcement, multiple sessions, review separation, model evidence, Medium/High effort profiles, durable fair policy selection | External-provider qualification matrix; execution/recovery reconciliation |
 | Full Delegation | Positive allowlist, current-charter binding, expiry, revocation, replay protection, exceptional-action denials | Founder-facing configuration and status controls |
 | Usage continuity | Atomic pause, durable checkpoint, authenticated reset/resume, shared pools, duplicate prevention | Durable fair queue and richer product controls |
 | Desktop product | Theme, navigation shell, conversation intake, provider/usage/evidence/safety projections, first-run foundation | Authoritative project/charter/workflow controls, receipts/recovery detail, complete settings, executive-command-center composition |
@@ -20,15 +20,14 @@ Keeper 1.0 path has an authoritative implementation and verification.
 
 ## Dependency-ordered completion backlog
 
-1. Product lifecycle integration: durable project selection, complete charter
-   review, native approval, atomic planning, and authoritative status.
-2. Provider execution lifecycle: integrated selection, effort, fair scheduling,
-   in-flight cancellation, and explicit uncertainty reconciliation.
-3. Desktop completion: executive dashboard, projects/charters, workflow timeline,
+1. Provider execution lifecycle: bind prepared assignments to exact
+   Authority attempts, run one dependency-ready action at a time, add in-flight
+   cancellation, and reconcile explicit uncertainty.
+2. Desktop completion: executive dashboard, projects/charters, workflow timeline,
    approvals, provider management, receipts/audit, recovery, and settings.
-4. Packaging and operations: repair/rollback workflows and supported local
+3. Packaging and operations: repair/rollback workflows and supported local
    installation guidance.
-5. Documentation, diagnostics, external-provider qualification evidence, and
+4. Documentation, diagnostics, external-provider qualification evidence, and
    consolidated minor cleanup.
 
 No Critical or High defect was found in the approved Founder, authority,

@@ -17,8 +17,11 @@ from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
     AttemptState,
+    CostMode,
     EvidenceReferenceState,
     EvidenceState,
+    HealthState,
+    ProviderSessionState,
     ReservationMode,
     ReservationState,
     ReviewState,
@@ -31,10 +34,12 @@ from keeper.pass_b.models import (
     DeliveredInputRecord,
     EvidenceBundleRecord,
     EvidenceReferenceRecord,
+    ExecutionProfileRecord,
     PassBRecord,
     PauseReasonRecord,
     ProviderAccountRecord,
     ProviderRecord,
+    ProviderSelectionRecord,
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     ReviewRecord,
@@ -44,7 +49,10 @@ from keeper.pass_b.models import (
     WorkspaceReservationRecord,
     WriteReservationRecord,
 )
-
+from keeper.pass_b.providers import (
+    ProviderSelectionPolicy,
+    provider_selection_policy_digest,
+)
 
 R = TypeVar("R", bound=PassBRecord)
 PASS_B_SCHEMA_VERSION = 6
@@ -394,6 +402,237 @@ class PassBRepository:
             _validate_assignment_binding(workflow, work_item, record)
             self._insert(connection, record)
 
+    def insert_execution_profile_bound(
+        self,
+        record: ExecutionProfileRecord,
+        supplied_work_item: WorkItemRecord,
+    ) -> bool:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            work_item = self._get(
+                connection, WorkItemRecord, record.work_item_id
+            )
+            if work_item != supplied_work_item:
+                raise PermissionError(
+                    "execution profile work item differs from durable state"
+                )
+            workflow = self._get(
+                connection, WorkflowRecord, record.workflow_id
+            )
+            _validate_execution_profile(workflow, work_item, record)
+            rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND project_id=?",
+                (ExecutionProfileRecord.KIND, record.project_id),
+            ).fetchall()
+            existing = [
+                self._decode(ExecutionProfileRecord, row)
+                for row in rows
+                if self._decode(
+                    ExecutionProfileRecord, row
+                ).work_item_id
+                == record.work_item_id
+            ]
+            if existing:
+                return False
+            self._insert(connection, record)
+        return True
+
+    def claim_prepared_assignment(
+        self,
+        *,
+        profile: ExecutionProfileRecord,
+        selection: ProviderSelectionRecord,
+        assignment: AssignmentRecord,
+        supplied_work_item: WorkItemRecord,
+    ) -> bool:
+        """Atomically claim one dependency-ready work item without launching."""
+
+        if assignment.state != AssignmentState.READY:
+            raise ValueError("prepared assignment must begin ready")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            durable_profile = self._get(
+                connection,
+                ExecutionProfileRecord,
+                profile.execution_profile_id,
+            )
+            work_item = self._get(
+                connection, WorkItemRecord, profile.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, profile.workflow_id
+            )
+            if durable_profile != profile:
+                raise PermissionError(
+                    "prepared assignment differs from durable profile"
+                )
+            if work_item != supplied_work_item:
+                rows = connection.execute(
+                    "SELECT payload,payload_hash FROM pass_b_records "
+                    "WHERE kind=? AND project_id=?",
+                    (AssignmentRecord.KIND, assignment.project_id),
+                ).fetchall()
+                if any(
+                    self._decode(AssignmentRecord, row).work_item_id
+                    == work_item.work_item_id
+                    for row in rows
+                ):
+                    return False
+                raise PermissionError(
+                    "prepared assignment work item changed without a winner"
+                )
+            _validate_execution_profile(workflow, work_item, profile)
+            _validate_assignment_binding(workflow, work_item, assignment)
+            if (
+                work_item.state != WorkItemState.READY
+                or selection.execution_profile_id
+                != profile.execution_profile_id
+                or selection.assignment_id != assignment.assignment_id
+                or selection.project_id != profile.project_id
+                or selection.charter_id != profile.charter_id
+                or selection.charter_revision != profile.charter_revision
+                or selection.workflow_id != profile.workflow_id
+                or selection.work_item_id != profile.work_item_id
+                or selection.role != profile.role
+                or selection.provider_id != assignment.provider_id
+                or selection.account_id != assignment.account_id
+                or selection.session_id != assignment.session_id
+                or selection.model_id != assignment.model_id
+                or selection.effort_level != profile.effort_level
+                or selection.privacy_classification
+                != profile.privacy_classification
+                or assignment.workspace_id != profile.workspace_id
+                or assignment.expected_evidence != profile.expected_evidence
+                or assignment.authority_envelope_digest
+                != profile.authority_envelope_digest
+            ):
+                raise PermissionError("prepared assignment binding is not exact")
+            for dependency_id in work_item.dependencies:
+                dependency = self._get(
+                    connection, WorkItemRecord, dependency_id
+                )
+                if (
+                    dependency.workflow_id != workflow.workflow_id
+                    or dependency.project_id != workflow.project_id
+                    or dependency.charter_id != workflow.charter_id
+                    or dependency.charter_revision
+                    != workflow.charter_revision
+                    or dependency.state != WorkItemState.COMPLETED
+                ):
+                    raise PermissionError(
+                        "work item dependencies are not durably complete"
+                    )
+            rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND project_id=?",
+                (AssignmentRecord.KIND, assignment.project_id),
+            ).fetchall()
+            if any(
+                self._decode(AssignmentRecord, row).work_item_id
+                == work_item.work_item_id
+                for row in rows
+            ):
+                return False
+            provider = self._get(
+                connection, ProviderRecord, selection.provider_id
+            )
+            account = self._get(
+                connection, ProviderAccountRecord, selection.account_id
+            )
+            session = self._get(
+                connection, ProviderSessionRecord, selection.session_id
+            )
+            capabilities = {
+                item.casefold() for item in provider.capabilities
+            }
+            expected_exclusions: set[str] = set()
+            if profile.review_of_assignment_id:
+                producer = self._get(
+                    connection,
+                    AssignmentRecord,
+                    profile.review_of_assignment_id,
+                )
+                expected_exclusions.update(
+                    {
+                        producer.independence_key,
+                        producer.provider_id,
+                        f"provider:{producer.provider_id}",
+                        producer.account_id,
+                        f"account:{producer.account_id}",
+                        producer.session_id,
+                        f"session:{producer.session_id}",
+                    }
+                )
+            expected_policy_digest = provider_selection_policy_digest(
+                profile.role,
+                ProviderSelectionPolicy(
+                    allowed_provider_ids=frozenset(
+                        selection.allowed_provider_ids
+                    ),
+                    required_capabilities=frozenset(
+                        selection.required_capabilities
+                    ),
+                    allow_substitution=profile.allow_substitution,
+                    allow_paid=False,
+                    privacy_classification=profile.privacy_classification,
+                    excluded_independence_keys=frozenset(
+                        selection.excluded_independence_keys
+                    ),
+                    preferred_provider_id=profile.preferred_provider_id,
+                ),
+            )
+            if (
+                account.provider_id != provider.provider_id
+                or selection.provider_id
+                not in selection.allowed_provider_ids
+                or set(selection.required_capabilities)
+                != set(profile.required_capabilities)
+                or set(selection.excluded_independence_keys)
+                != expected_exclusions
+                or selection.policy_digest != expected_policy_digest
+                or session.provider_id != provider.provider_id
+                or session.account_id != account.account_id
+                or session.model_id != selection.model_id
+                or account.usage_pool_id != selection.usage_pool_id
+                or account.cost_mode != selection.cost_mode
+                or account.privacy_classification
+                != selection.privacy_classification
+                or provider.cost_mode == CostMode.PAID
+                or account.cost_mode == CostMode.PAID
+                or profile.allow_paid
+                or not provider.authentication_ready
+                or not account.authentication_ready
+                or not account.enabled
+                or provider.health != HealthState.READY
+                or session.state != ProviderSessionState.READY
+                or session.active_assignments >= session.concurrency_limit
+                or (
+                    profile.role.casefold() not in capabilities
+                    and "all-roles" not in capabilities
+                )
+                or not {
+                    item.casefold()
+                    for item in profile.required_capabilities
+                }.issubset(capabilities)
+            ):
+                raise PermissionError(
+                    "selected provider session no longer satisfies policy"
+                )
+            self._insert(connection, assignment)
+            self._insert(connection, selection)
+            self._replace(
+                connection,
+                replace(
+                    work_item,
+                    state=WorkItemState.ASSIGNED,
+                    updated_at=assignment.created_at,
+                    revision=work_item.revision + 1,
+                ),
+                work_item.revision,
+            )
+        return True
+
     def assignment_launch_binding(
         self, assignment_id: str
     ) -> tuple[WorkflowRecord, WorkItemRecord, AssignmentRecord]:
@@ -423,6 +662,29 @@ class PassBRepository:
             )
             if assignment.workspace_id != record.workspace_id:
                 raise PermissionError("workspace identity differs from assignment")
+            profile_id = assignment.usage_policy.get(
+                "execution_profile_id"
+            )
+            if isinstance(profile_id, str):
+                profile = self._get(
+                    connection, ExecutionProfileRecord, profile_id
+                )
+                if (
+                    profile.project_id != assignment.project_id
+                    or profile.charter_id != assignment.charter_id
+                    or profile.charter_revision
+                    != assignment.charter_revision
+                    or profile.workflow_id != assignment.workflow_id
+                    or profile.work_item_id != assignment.work_item_id
+                    or profile.workspace_id != assignment.workspace_id
+                    or profile.canonical_workspace_path
+                    != record.canonical_path
+                    or profile.expected_evidence
+                    != assignment.expected_evidence
+                ):
+                    raise PermissionError(
+                        "workspace differs from durable execution profile"
+                    )
             if assignment.read_only and record.mode != ReservationMode.READ_ONLY:
                 raise PermissionError("read-only assignment cannot reserve a writer")
             claims = connection.execute(
@@ -477,6 +739,23 @@ class PassBRepository:
                 for scope in record.scope
             ) != record.scope_keys:
                 raise PermissionError("write reservation scope is not canonical")
+            profile_id = assignment.usage_policy.get(
+                "execution_profile_id"
+            )
+            if isinstance(profile_id, str):
+                profile = self._get(
+                    connection, ExecutionProfileRecord, profile_id
+                )
+                if (
+                    profile.workspace_id != workspace.workspace_id
+                    or profile.canonical_workspace_path
+                    != workspace.canonical_path
+                    or profile.write_scopes != record.scope
+                    or profile.write_scope_keys != record.scope_keys
+                ):
+                    raise PermissionError(
+                        "write scope differs from durable execution profile"
+                    )
             if (
                 assignment.read_only
                 or workspace.mode != ReservationMode.WRITE
@@ -2149,6 +2428,41 @@ def _validate_workflow_work_item(
     ):
         raise PermissionError(
             "work item is not bound to an active durable workflow"
+        )
+
+
+def _validate_execution_profile(
+    workflow: WorkflowRecord,
+    work_item: WorkItemRecord,
+    profile: ExecutionProfileRecord,
+) -> None:
+    _validate_workflow_work_item(workflow, work_item)
+    if (
+        profile.workflow_id != workflow.workflow_id
+        or profile.work_item_id != work_item.work_item_id
+        or profile.project_id != workflow.project_id
+        or profile.charter_id != workflow.charter_id
+        or profile.charter_revision != workflow.charter_revision
+        or profile.authority_envelope_digest
+        != workflow.authority_envelope_digest
+        or (
+            work_item.required_roles
+            and profile.role not in work_item.required_roles
+        )
+        or canonical_workspace_path(
+            Path(profile.canonical_workspace_path)
+        )
+        != profile.canonical_workspace_path
+        or tuple(
+            canonical_scope(
+                profile.canonical_workspace_path, item
+            )
+            for item in profile.write_scopes
+        )
+        != profile.write_scope_keys
+    ):
+        raise PermissionError(
+            "execution profile is not bound to its durable work item"
         )
 
 
