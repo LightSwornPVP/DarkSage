@@ -8,7 +8,9 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, NoReturn, TypedDict, cast
+from typing import Any, Callable, NoReturn, Protocol, TypedDict, cast
+
+from keeper.executive.models import ApprovalRecord, ProposedAction
 
 from keeper.evidence_input import (
     PROVIDER_INPUT_SCHEMA_VERSION,
@@ -52,6 +54,7 @@ from keeper.pass_b.models import (
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     ReviewRecord,
+    UncertaintyReconciliationRecord,
     UsagePoolRecord,
     WorkflowRecord,
     WorkItemRecord,
@@ -98,6 +101,16 @@ class _EvidenceLineageFields(TypedDict):
 Clock = Callable[[], datetime]
 
 
+class RecoveryActionAuthority(Protocol):
+    def reserve_action_authority(
+        self,
+        action: ProposedAction,
+        *,
+        approval_id: str,
+        task_id: str | None = None,
+    ) -> tuple[ApprovalRecord, str | None]: ...
+
+
 class OrchestrationService:
     def __init__(
         self,
@@ -108,6 +121,7 @@ class OrchestrationService:
         authority_reservation: AuthorityAttemptReservation | None = None,
         usage_reset_verifier: UsageResetVerifier | None = None,
         project_status: ProjectStatusReader | None = None,
+        recovery_action_authority: RecoveryActionAuthority | None = None,
     ) -> None:
         self.repository = repository
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -122,6 +136,7 @@ class OrchestrationService:
             usage_reset_verifier or UnavailableUsageResetVerifier()
         )
         self.project_status = project_status
+        self.recovery_action_authority = recovery_action_authority
         self.adapters: dict[str, ProviderAdapter] = {}
 
     def register_provider(
@@ -2166,6 +2181,225 @@ class OrchestrationService:
                     "immutable evidence review copy was modified"
                 )
 
+    def uncertainty_reconciliation_action(
+        self,
+        assignment_id: str,
+        *,
+        observation_digest: str,
+    ) -> ProposedAction:
+        if len(observation_digest) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in observation_digest
+        ):
+            raise ValueError(
+                "external cancellation observation digest is invalid"
+            )
+        assignment = self.repository.get(
+            AssignmentRecord, assignment_id
+        )
+        workflow = self.repository.get(
+            WorkflowRecord, assignment.workflow_id
+        )
+        work_item = self.repository.get(
+            WorkItemRecord, assignment.work_item_id
+        )
+        attempts = [
+            item
+            for item in self.repository.list(AttemptRecord)
+            if item.assignment_id == assignment.assignment_id
+            and item.state == AttemptState.UNCERTAIN
+        ]
+        workspaces = [
+            item
+            for item in self.repository.list(
+                WorkspaceReservationRecord,
+                project_id=assignment.project_id,
+            )
+            if item.assignment_id == assignment.assignment_id
+            and item.state == ReservationState.UNCERTAIN
+        ]
+        if (
+            assignment.state != AssignmentState.UNCERTAIN
+            or len(attempts) != 1
+            or len(workspaces) != 1
+            or attempts[0].uncertainty_kind
+            != "CANCELLATION_OUTCOME_AMBIGUOUS"
+            or attempts[0].external_execution_id is None
+            or workflow.project_id != assignment.project_id
+            or workflow.charter_id != assignment.charter_id
+            or workflow.charter_revision != assignment.charter_revision
+            or work_item.workflow_id != workflow.workflow_id
+            or work_item.project_id != assignment.project_id
+            or work_item.charter_id != assignment.charter_id
+            or work_item.charter_revision != assignment.charter_revision
+        ):
+            raise PermissionError(
+                "assignment has no exact uncertain cancellation to reconcile"
+            )
+        self._require_current_charter(
+            assignment.project_id,
+            assignment.charter_id,
+            assignment.charter_revision,
+            assignment.authority_envelope_digest,
+        )
+        attempt = attempts[0]
+        workspace = workspaces[0]
+        return ProposedAction(
+            action_id=(
+                f"pass-b-confirm-canceled:{attempt.attempt_id}:"
+                f"{observation_digest}"
+            ),
+            project_id=assignment.project_id,
+            charter_revision=assignment.charter_revision,
+            category="REPAIR",
+            target_resource=(
+                "keeper-pass-b-uncertain-cancellation:"
+                f"{assignment.project_id}:{assignment.charter_id}:"
+                f"{assignment.charter_revision}:{assignment.workflow_id}:"
+                f"{assignment.work_item_id}:{assignment.assignment_id}:"
+                f"{attempt.attempt_id}:{attempt.authority_attempt_id}:"
+                f"{attempt.external_execution_id}"
+            ),
+            provider=assignment.provider_id,
+            tool="keeper-confirm-canceled",
+            workspace=workspace.canonical_path,
+            scope=(),
+            cost=0.0,
+            reversible=False,
+            risk="HIGH",
+            data_classification="INTERNAL",
+            external_side_effect=False,
+            objective=(
+                "Reconcile one exact ambiguous provider cancellation as "
+                "Founder-confirmed canceled without accepting completion "
+                "or retrying external work."
+            ),
+            currency=None,
+            publication=False,
+            deployment=False,
+            spending=False,
+            git_mutation=None,
+            security_boundary_impact=False,
+            trusted_source="DURABLE_WORKFLOW_TASK",
+            effect_classes=("LOCAL_WRITE",),
+            repository=None,
+            branch=None,
+        )
+
+    def reconcile_uncertain_cancellation(
+        self,
+        assignment_id: str,
+        *,
+        observation_digest: str,
+        approval_id: str,
+    ) -> AttemptRecord:
+        authority = self.recovery_action_authority
+        if authority is None:
+            raise PermissionError(
+                "Founder recovery action authority is unavailable"
+            )
+        action = self.uncertainty_reconciliation_action(
+            assignment_id,
+            observation_digest=observation_digest,
+        )
+        assignment = self.repository.get(
+            AssignmentRecord, assignment_id
+        )
+        attempts = [
+            item
+            for item in self.repository.list(AttemptRecord)
+            if item.assignment_id == assignment.assignment_id
+            and item.state == AttemptState.UNCERTAIN
+        ]
+        if len(attempts) != 1:
+            raise PermissionError(
+                "uncertain cancellation attempt changed before approval"
+            )
+        attempt = attempts[0]
+        approval, budget_reservation_id = (
+            authority.reserve_action_authority(
+                action,
+                approval_id=approval_id,
+                task_id=attempt.attempt_id,
+            )
+        )
+        if (
+            approval.approval_id != approval_id
+            or approval.project_id != assignment.project_id
+            or approval.charter_id != assignment.charter_id
+            or approval.charter_revision != assignment.charter_revision
+            or approval.kind != "ONE_TIME"
+            or approval.action_category != "REPAIR"
+            or approval.consumed_at is None
+            or budget_reservation_id is not None
+        ):
+            raise PermissionError(
+                "Founder reconciliation approval receipt is invalid"
+            )
+        self._require_current_charter(
+            assignment.project_id,
+            assignment.charter_id,
+            assignment.charter_revision,
+            assignment.authority_envelope_digest,
+        )
+        workspaces = [
+            item
+            for item in self.repository.list(
+                WorkspaceReservationRecord,
+                project_id=assignment.project_id,
+            )
+            if item.assignment_id == assignment.assignment_id
+            and item.state == ReservationState.UNCERTAIN
+        ]
+        if len(workspaces) != 1:
+            raise PermissionError(
+                "uncertain workspace changed before reconciliation"
+            )
+        now = self._now()
+        return self.repository.reconcile_uncertain_cancellation(
+            UncertaintyReconciliationRecord(
+                reconciliation_id=f"reconcile:{attempt.attempt_id}",
+                project_id=assignment.project_id,
+                charter_id=assignment.charter_id,
+                charter_revision=assignment.charter_revision,
+                workflow_id=assignment.workflow_id,
+                work_item_id=assignment.work_item_id,
+                assignment_id=assignment.assignment_id,
+                attempt_id=attempt.attempt_id,
+                provider_id=assignment.provider_id,
+                account_id=assignment.account_id,
+                session_id=assignment.session_id,
+                model_id=assignment.model_id,
+                authority_attempt_id=attempt.authority_attempt_id,
+                launch_token=attempt.launch_token,
+                external_execution_id=cast(
+                    str, attempt.external_execution_id
+                ),
+                workspace_reservation_id=(
+                    workspaces[0].workspace_reservation_id
+                ),
+                canonical_workspace_path=workspaces[0].canonical_path,
+                resolution="CONFIRMED_CANCELED",
+                observation_digest=observation_digest,
+                action_id=action.action_id,
+                action_digest=hashlib.sha256(
+                    json.dumps(
+                        action.to_dict(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                approval_id=approval.approval_id,
+                approval_event_id=approval.source_interaction_id,
+                founder_identity=approval.approver,
+                state="APPLIED",
+                reconciled_at=now,
+                created_at=now,
+                updated_at=now,
+                revision=1,
+            )
+        )
+
     def cancel_assignment(self, assignment_id: str) -> AttemptRecord:
         assignment = self.repository.get(AssignmentRecord, assignment_id)
         provider = self.repository.get(
@@ -2184,10 +2418,21 @@ class OrchestrationService:
         external_execution_id = claimed.external_execution_id
         if external_execution_id is None:
             raise RuntimeError("claimed cancellation lacks external identity")
-        adapter.cancel(external_execution_id)
-        return self.repository.complete_cancellation(
-            claimed.attempt_id, self._now()
-        )
+        try:
+            adapter.cancel(external_execution_id)
+            return self.repository.complete_cancellation(
+                claimed.attempt_id, self._now()
+            )
+        except BaseException as error:
+            self.repository.mark_cancellation_uncertain(
+                claimed.attempt_id,
+                detail=(
+                    "provider cancellation outcome is uncertain after "
+                    f"{type(error).__name__}"
+                ),
+                updated_at=self._now(),
+            )
+            raise
 
     def validate_evidence(
         self, evidence_id: str, workspace_path: Path

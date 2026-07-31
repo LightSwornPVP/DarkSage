@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.executive.authority_gateway import (
@@ -38,6 +38,7 @@ from keeper.pass_b.enums import (
     SessionModel,
 )
 from keeper.pass_b.models import (
+    AssignmentRecord,
     PresentationStateRecord,
     ProviderAccountRecord,
     ProviderRecord,
@@ -50,6 +51,7 @@ from keeper.pass_b.launch_authority import (
 )
 from keeper.pass_b.orchestration import (
     OrchestrationService,
+    RecoveryActionAuthority,
     authority_envelope_digest,
 )
 from keeper.pass_b.providers import LocalMockAdapter, ProviderAdapter
@@ -81,6 +83,9 @@ class PassBApplication:
         _test_launch_authority: LaunchAuthority | None = None,
         _test_authority_reservation: (
             AuthorityAttemptReservation | None
+        ) = None,
+        _test_recovery_action_authority: (
+            RecoveryActionAuthority | None
         ) = None,
     ) -> None:
         self.data_directory = (
@@ -151,12 +156,26 @@ class PassBApplication:
             )
         else:
             authority_reservation = None
+        if _test_recovery_action_authority is not None:
+            if _test_launch_authority is None:
+                raise TypeError(
+                    "test recovery authority requires test launch composition"
+                )
+            recovery_action_authority = _test_recovery_action_authority
+        elif type(self.executive) is KeeperExecutive:
+            recovery_action_authority = cast(
+                RecoveryActionAuthority, self.executive
+            )
+        else:
+            recovery_action_authority = None
+        self.recovery_action_authority = recovery_action_authority
         self.orchestration = OrchestrationService(
             self.repository,
             launch_authority=launch_authority,
             authority_reservation=authority_reservation,
             usage_reset_verifier=usage_reset_verifier,
             project_status=self.project_status,
+            recovery_action_authority=recovery_action_authority,
         )
         self.conversation = DurableConversationService(
             self.repository, self.executive
@@ -179,6 +198,7 @@ class PassBApplication:
         authority_reservation: (
             AuthorityAttemptReservation | None
         ) = None,
+        recovery_action_authority: RecoveryActionAuthority | None = None,
     ) -> PassBApplication:
         """Build an explicitly non-production deterministic composition."""
 
@@ -188,7 +208,82 @@ class PassBApplication:
             usage_reset_verifier=usage_reset_verifier,
             _test_launch_authority=launch_authority,
             _test_authority_reservation=authority_reservation,
+            _test_recovery_action_authority=recovery_action_authority,
         )
+
+    def request_uncertain_cancellation_approval(
+        self,
+        assignment_id: str,
+        *,
+        observation_digest: str,
+    ) -> dict[str, Any]:
+        authority = self.recovery_action_authority
+        if authority is None or not hasattr(
+            authority, "request_action_approval"
+        ):
+            raise PermissionError(
+                "Founder recovery approval composition is unavailable"
+            )
+        action = self.orchestration.uncertainty_reconciliation_action(
+            assignment_id,
+            observation_digest=observation_digest,
+        )
+        assignment = self.repository.get(
+            AssignmentRecord, assignment_id
+        )
+        approval_authority = cast(Any, authority)
+        challenge = approval_authority.request_action_approval(
+            action,
+            charter_id=assignment.charter_id,
+            scope=action.scope,
+            limits={
+                "action_id": action.action_id,
+                "provider": action.provider,
+                "tool": action.tool,
+                "workspace": action.workspace,
+            },
+        )
+        return {
+            "action": action.to_dict(),
+            "challenge": challenge.to_dict(),
+        }
+
+    def confirm_uncertain_cancellation_approval(
+        self,
+        challenge: FounderApprovalChallenge,
+    ) -> dict[str, Any]:
+        authority = self.recovery_action_authority
+        if (
+            authority is None
+            or not hasattr(authority, "authenticate_founder")
+            or not hasattr(authority, "confirm_action_approval")
+        ):
+            raise PermissionError(
+                "Founder recovery approval composition is unavailable"
+            )
+        approval_authority = cast(Any, authority)
+        confirmation = approval_authority.authenticate_founder(challenge)
+        approval, event = approval_authority.confirm_action_approval(
+            challenge.challenge_id, confirmation
+        )
+        return {
+            "approval": approval.to_dict(),
+            "event": event.to_dict(),
+        }
+
+    def apply_uncertain_cancellation_approval(
+        self,
+        assignment_id: str,
+        *,
+        observation_digest: str,
+        approval_id: str,
+    ) -> dict[str, Any]:
+        attempt = self.orchestration.reconcile_uncertain_cancellation(
+            assignment_id,
+            observation_digest=observation_digest,
+            approval_id=approval_id,
+        )
+        return attempt.to_dict()
 
     def begin_conversation(self, message: str) -> Any:
         outcome = self.conversation.begin(message)

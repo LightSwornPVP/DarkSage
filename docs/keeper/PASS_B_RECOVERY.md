@@ -24,6 +24,26 @@ transaction that records completed attempt, evidence, and assignment state.
 The partial unique launch index prevents a second active, completed, or
 uncertain launch for the assignment.
 
+## Provider cancellation
+
+Cancellation first claims the exact running assignment and attempt in one
+transaction. Only that claimant may call the provider adapter. If the adapter
+raises after the cancellation effect, or the terminal commit fails after the
+adapter returns, Keeper records `CANCELLATION_OUTCOME_AMBIGUOUS` and keeps the
+session slot, usage, workspace, write reservation, and launch claim reserved.
+Restart classifies an interrupted cancellation claim the same way. Automatic
+retry and automatic cleanup remain prohibited.
+
+A confirmed cancellation can be reconciled only through the native one-use
+Founder action-approval flow. The action binds the current Founder-approved
+charter, workflow, WorkItem, assignment, attempt, Authority attempt, provider,
+external execution, canonical workspace, and a SHA-256 digest of the external
+observation. Reconciliation records that binding durably, changes only the exact
+attempt and assignment to `CANCELED`, releases the session slot, consumes the
+already reserved usage conservatively, and returns workspace/write reservations
+to the existing explicit release lifecycle. It never marks work complete,
+creates evidence, or authorizes a retry.
+
 ## Usage reset
 
 Insufficient capacity is not failure. The reservation transaction changes the

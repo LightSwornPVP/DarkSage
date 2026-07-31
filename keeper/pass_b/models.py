@@ -487,6 +487,8 @@ class AttemptRecord(PassBRecord):
     provider_input_digest: str | None = None
     authority_reservation_state: str = "LOCAL_PREPARED"
     authority_reservation_plan_digest: str = "legacy-unbound"
+    uncertainty_kind: str | None = None
+    cancellation_requested_at: str | None = None
 
     KIND = "attempt"
     ID_FIELD = "attempt_id"
@@ -500,6 +502,8 @@ class AttemptRecord(PassBRecord):
         "provider_input_digest": None,
         "authority_reservation_state": "AUTHORIZED",
         "authority_reservation_plan_digest": "legacy-unbound",
+        "uncertainty_kind": None,
+        "cancellation_requested_at": None,
     }
 
     def __post_init__(self) -> None:
@@ -535,6 +539,73 @@ class AttemptRecord(PassBRecord):
             raise ValueError("attempt delivered-input binding is incomplete")
         _optional_timestamp(self.started_at, "started_at")
         _optional_timestamp(self.finished_at, "finished_at")
+        _optional_timestamp(
+            self.cancellation_requested_at, "cancellation_requested_at"
+        )
+        if self.uncertainty_kind not in {
+            None,
+            "AUTHORITY_RESERVATION_OUTCOME_AMBIGUOUS",
+            "CANCELLATION_OUTCOME_AMBIGUOUS",
+            "EXTERNAL_EXECUTION_OUTCOME_AMBIGUOUS",
+        }:
+            raise ValueError("attempt uncertainty kind is invalid")
+        _timestamp(self.created_at, "created_at")
+        _timestamp(self.updated_at, "updated_at")
+        _positive_revision(self.revision)
+
+
+@dataclass(frozen=True, slots=True)
+class UncertaintyReconciliationRecord(PassBRecord):
+    reconciliation_id: str
+    project_id: str
+    charter_id: str
+    charter_revision: int
+    workflow_id: str
+    work_item_id: str
+    assignment_id: str
+    attempt_id: str
+    provider_id: str
+    account_id: str
+    session_id: str
+    model_id: str
+    authority_attempt_id: str
+    launch_token: str
+    external_execution_id: str
+    workspace_reservation_id: str
+    canonical_workspace_path: str
+    resolution: str
+    observation_digest: str
+    action_id: str
+    action_digest: str
+    approval_id: str
+    approval_event_id: str
+    founder_identity: str
+    state: str
+    reconciled_at: str
+    created_at: str
+    updated_at: str
+    revision: int
+
+    KIND = "uncertainty_reconciliation"
+    ID_FIELD = "reconciliation_id"
+
+    def __post_init__(self) -> None:
+        if (
+            self.charter_revision < 1
+            or self.resolution != "CONFIRMED_CANCELED"
+            or self.state != "APPLIED"
+            or any(
+                len(value) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in value
+                )
+                for value in (self.observation_digest, self.action_digest)
+            )
+            or not self.founder_identity.startswith("S-1-")
+        ):
+            raise ValueError("uncertainty reconciliation binding is invalid")
+        _timestamp(self.reconciled_at, "reconciled_at")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -1064,6 +1135,7 @@ PASS_B_RECORD_TYPES: tuple[type[PassBRecord], ...] = (
     ExecutionProfileRecord,
     ProviderSelectionRecord,
     AttemptRecord,
+    UncertaintyReconciliationRecord,
     DeliveredInputRecord,
     ReviewRecord,
     EvidenceBundleRecord,

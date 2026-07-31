@@ -17,11 +17,12 @@ from keeper.executive.models import (
     FounderApprovalChallenge,
     FounderApprovalEvent,
     MemoryRecord,
+    ProposedAction,
     ProjectCharter,
     ProjectRecord,
     utc_now,
 )
-from keeper.executive.enums import FounderApprovalIntent
+from keeper.executive.enums import ApprovalKind, FounderApprovalIntent
 from keeper.executive.founder_auth import ProductionApprovalConfirmation
 from keeper.executive.repository import ProductionExecutiveRepository, new_id
 from keeper.executive.runtime import ExecutiveRuntime
@@ -168,6 +169,46 @@ class KeeperExecutive:
 
     def activate_charter(self, charter: ProjectCharter) -> ProjectRecord:
         return self.__charters.activate(charter)
+
+    def request_action_approval(
+        self,
+        action: ProposedAction,
+        *,
+        charter_id: str,
+        scope: tuple[str, ...],
+        limits: dict[str, Any],
+    ) -> FounderApprovalChallenge:
+        return self.__charters.request_action_approval(
+            action,
+            charter_id=charter_id,
+            kind=ApprovalKind.ONE_TIME,
+            scope=scope,
+            limits=limits,
+        )
+
+    def confirm_action_approval(
+        self,
+        challenge_id: str,
+        confirmation: ProductionApprovalConfirmation,
+    ) -> tuple[ApprovalRecord, FounderApprovalEvent]:
+        return self.__charters.confirm_action_approval(
+            challenge_id,
+            confirmation=confirmation,
+            intent=FounderApprovalIntent.APPROVE_ACTION,
+        )
+
+    def reserve_action_authority(
+        self,
+        action: ProposedAction,
+        *,
+        approval_id: str,
+        task_id: str | None = None,
+    ) -> tuple[ApprovalRecord, str | None]:
+        return self._trusted_repository().reserve_action_authority(
+            action,
+            approval_id=approval_id,
+            task_id=task_id,
+        )
 
     def status(self, project_id: str) -> ProjectStatusView:
         return StatusSurface(self._trusted_repository()).project(project_id)

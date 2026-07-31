@@ -51,6 +51,7 @@ from keeper.recovery import (
     process_identity_matches,
     retain_process_handle,
 )
+from keeper.state_machine import TaskStatus
 from keeper.workspace import WorkspaceManager
 
 _ORIGINAL_PROCESS_EXISTS = process_exists
@@ -832,15 +833,35 @@ class WorkflowCoordinator:
             router,
             observer,
         )
-        result = engine.run_task(
-            domain_task,
-            retry_stage=retry_stage,
-            stage_attempt_id=(
-                str(self._run(run_id).get("active_stage_attempt_id", ""))
-                if retry_stage is not None
-                else None
-            ),
-        )
+        try:
+            result = engine.run_task(
+                domain_task,
+                retry_stage=retry_stage,
+                stage_attempt_id=(
+                    str(self._run(run_id).get("active_stage_attempt_id", ""))
+                    if retry_stage is not None
+                    else None
+                ),
+            )
+        except Exception:
+            if cancel.is_set() and domain_task.status in {
+                TaskStatus.BUILDING,
+                TaskStatus.SELF_VERIFYING,
+                TaskStatus.INDEPENDENT_AUDIT,
+                TaskStatus.REPAIRING,
+                TaskStatus.FINAL_VERIFY,
+            }:
+                previous = domain_task.status
+                domain_task.status = TaskStatus.FAILED
+                domain_task.transition_history.append(
+                    {
+                        "from": previous.value,
+                        "to": TaskStatus.FAILED.value,
+                        "timestamp": _now(),
+                    }
+                )
+                engine.save_task(domain_task)
+            raise
         self._complete_routing_attempt(run_id, result.status.value)
         if cancel.is_set():
             return

@@ -43,6 +43,7 @@ from keeper.pass_b.models import (
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     ReviewRecord,
+    UncertaintyReconciliationRecord,
     UsagePoolRecord,
     WorkflowRecord,
     WorkItemRecord,
@@ -2035,6 +2036,7 @@ class PassBRepository:
                 attempt,
                 state=AttemptState.UNCERTAIN,
                 last_error=detail,
+                uncertainty_kind="AUTHORITY_RESERVATION_OUTCOME_AMBIGUOUS",
                 updated_at=updated_at,
                 revision=attempt.revision + 1,
             )
@@ -2322,6 +2324,7 @@ class PassBRepository:
             updated_attempt = replace(
                 attempt,
                 state=AttemptState.CANCELLATION_CLAIMED,
+                cancellation_requested_at=claimed_at,
                 updated_at=claimed_at,
                 revision=attempt.revision + 1,
             )
@@ -2333,6 +2336,277 @@ class PassBRepository:
             )
             self._replace(connection, updated_attempt, attempt.revision)
             self._replace(connection, updated_assignment, assignment.revision)
+        return updated_attempt
+
+    def mark_cancellation_uncertain(
+        self,
+        attempt_id: str,
+        *,
+        detail: str,
+        updated_at: str,
+    ) -> AttemptRecord:
+        """Preserve every claimed resource after an ambiguous cancel effect."""
+
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            if (
+                attempt.state != AttemptState.CANCELLATION_CLAIMED
+                or assignment.state
+                != AssignmentState.CANCELLATION_CLAIMED
+            ):
+                raise PermissionError(
+                    "cancellation uncertainty claim changed concurrently"
+                )
+            uncertain_attempt = replace(
+                attempt,
+                state=AttemptState.UNCERTAIN,
+                last_error=detail,
+                uncertainty_kind="CANCELLATION_OUTCOME_AMBIGUOUS",
+                updated_at=updated_at,
+                revision=attempt.revision + 1,
+            )
+            uncertain_assignment = replace(
+                assignment,
+                state=AssignmentState.UNCERTAIN,
+                updated_at=updated_at,
+                revision=assignment.revision + 1,
+            )
+            self._replace(connection, uncertain_attempt, attempt.revision)
+            self._replace(
+                connection, uncertain_assignment, assignment.revision
+            )
+            workspace_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='ACTIVE'",
+                (WorkspaceReservationRecord.KIND,),
+            ).fetchall()
+            for row in workspace_rows:
+                workspace = self._decode(
+                    WorkspaceReservationRecord, row
+                )
+                if workspace.assignment_id != assignment.assignment_id:
+                    continue
+                self._replace(
+                    connection,
+                    replace(
+                        workspace,
+                        state=ReservationState.UNCERTAIN,
+                        updated_at=updated_at,
+                        revision=workspace.revision + 1,
+                    ),
+                    workspace.revision,
+                )
+            write_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='ACTIVE'",
+                (WriteReservationRecord.KIND,),
+            ).fetchall()
+            for row in write_rows:
+                write = self._decode(WriteReservationRecord, row)
+                if write.assignment_id != assignment.assignment_id:
+                    continue
+                self._replace(
+                    connection,
+                    replace(
+                        write,
+                        state=ReservationState.UNCERTAIN,
+                        updated_at=updated_at,
+                        revision=write.revision + 1,
+                    ),
+                    write.revision,
+                )
+            cursor = connection.execute(
+                "UPDATE pass_b_launch_claims "
+                "SET state='UNCERTAIN',updated_at=? "
+                "WHERE attempt_id=? AND state='RUNNING'",
+                (updated_at, attempt.attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "cancellation launch claim changed concurrently"
+                )
+            connection.execute(
+                "UPDATE pass_b_workspace_claims SET state='UNCERTAIN' "
+                "WHERE assignment_id=? AND state='ACTIVE'",
+                (assignment.assignment_id,),
+            )
+            connection.execute(
+                "UPDATE pass_b_write_claims SET state='UNCERTAIN' "
+                "WHERE assignment_id=? AND state='ACTIVE'",
+                (assignment.assignment_id,),
+            )
+        return uncertain_attempt
+
+    def reconcile_uncertain_cancellation(
+        self,
+        record: UncertaintyReconciliationRecord,
+    ) -> AttemptRecord:
+        """Apply one exact Founder-approved confirmed-cancel decision."""
+
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(
+                connection, AttemptRecord, record.attempt_id
+            )
+            assignment = self._get(
+                connection, AssignmentRecord, record.assignment_id
+            )
+            work_item = self._get(
+                connection, WorkItemRecord, record.work_item_id
+            )
+            workflow = self._get(
+                connection, WorkflowRecord, record.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
+            session = self._get(
+                connection, ProviderSessionRecord, assignment.session_id
+            )
+            workspace_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='UNCERTAIN'",
+                (WorkspaceReservationRecord.KIND,),
+            ).fetchall()
+            workspaces: list[WorkspaceReservationRecord] = []
+            for row in workspace_rows:
+                workspace = self._decode(WorkspaceReservationRecord, row)
+                if workspace.assignment_id == assignment.assignment_id:
+                    workspaces.append(workspace)
+            reconciliation_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=?",
+                (UncertaintyReconciliationRecord.KIND,),
+            ).fetchall()
+            existing: list[UncertaintyReconciliationRecord] = []
+            for row in reconciliation_rows:
+                reconciliation = self._decode(
+                    UncertaintyReconciliationRecord, row
+                )
+                if reconciliation.attempt_id == attempt.attempt_id:
+                    existing.append(reconciliation)
+            if (
+                attempt.assignment_id != assignment.assignment_id
+                or attempt.state != AttemptState.UNCERTAIN
+                or assignment.state != AssignmentState.UNCERTAIN
+                or attempt.uncertainty_kind
+                != "CANCELLATION_OUTCOME_AMBIGUOUS"
+                or attempt.external_execution_id
+                != record.external_execution_id
+                or len(workspaces) != 1
+                or workspaces[0].workspace_reservation_id
+                != record.workspace_reservation_id
+                or workspaces[0].canonical_path
+                != record.canonical_workspace_path
+                or record.project_id != assignment.project_id
+                or record.charter_id != assignment.charter_id
+                or record.charter_revision != assignment.charter_revision
+                or record.workflow_id != assignment.workflow_id
+                or record.work_item_id != assignment.work_item_id
+                or record.provider_id != assignment.provider_id
+                or record.account_id != assignment.account_id
+                or record.session_id != assignment.session_id
+                or record.model_id != assignment.model_id
+                or record.authority_attempt_id
+                != attempt.authority_attempt_id
+                or record.launch_token != attempt.launch_token
+                or not attempt.session_slot_claimed
+                or session.active_assignments < 1
+                or existing
+            ):
+                raise PermissionError(
+                    "uncertain cancellation reconciliation binding is invalid"
+                )
+            remaining = max(0, session.active_assignments - 1)
+            updated_attempt = replace(
+                attempt,
+                state=AttemptState.CANCELED,
+                finished_at=record.reconciled_at,
+                last_error=None,
+                updated_at=record.reconciled_at,
+                revision=attempt.revision + 1,
+            )
+            updated_assignment = replace(
+                assignment,
+                state=AssignmentState.CANCELED,
+                updated_at=record.reconciled_at,
+                revision=assignment.revision + 1,
+            )
+            updated_session = replace(
+                session,
+                active_assignments=remaining,
+                state=(
+                    "BUSY"
+                    if remaining >= session.concurrency_limit
+                    else "READY"
+                ),
+                last_seen_at=record.reconciled_at,
+                updated_at=record.reconciled_at,
+                revision=session.revision + 1,
+            )
+            self._insert(connection, record)
+            self._replace(connection, updated_attempt, attempt.revision)
+            self._replace(
+                connection, updated_assignment, assignment.revision
+            )
+            self._replace(connection, updated_session, session.revision)
+            for workspace in workspaces:
+                self._replace(
+                    connection,
+                    replace(
+                        workspace,
+                        state=ReservationState.ACTIVE,
+                        updated_at=record.reconciled_at,
+                        revision=workspace.revision + 1,
+                    ),
+                    workspace.revision,
+                )
+            write_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='UNCERTAIN'",
+                (WriteReservationRecord.KIND,),
+            ).fetchall()
+            for row in write_rows:
+                write = self._decode(WriteReservationRecord, row)
+                if write.assignment_id != assignment.assignment_id:
+                    continue
+                self._replace(
+                    connection,
+                    replace(
+                        write,
+                        state=ReservationState.ACTIVE,
+                        updated_at=record.reconciled_at,
+                        revision=write.revision + 1,
+                    ),
+                    write.revision,
+                )
+            cursor = connection.execute(
+                "UPDATE pass_b_launch_claims "
+                "SET state='CANCELED',updated_at=? "
+                "WHERE attempt_id=? AND state='UNCERTAIN'",
+                (record.reconciled_at, attempt.attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "uncertain cancellation launch claim changed"
+                )
+            connection.execute(
+                "UPDATE pass_b_workspace_claims SET state='ACTIVE' "
+                "WHERE assignment_id=? AND state='UNCERTAIN'",
+                (assignment.assignment_id,),
+            )
+            connection.execute(
+                "UPDATE pass_b_write_claims SET state='ACTIVE' "
+                "WHERE assignment_id=? AND state='UNCERTAIN'",
+                (assignment.assignment_id,),
+            )
+            self._consume_usage(
+                connection,
+                assignment.assignment_id,
+                record.reconciled_at,
+            )
         return updated_attempt
 
     def complete_cancellation(
@@ -2531,7 +2805,18 @@ class PassBRepository:
                 uncertain_attempt = replace(
                     attempt,
                     state=AttemptState.UNCERTAIN,
-                    last_error="external execution outcome is uncertain after restart",
+                    last_error=(
+                        "cancellation outcome is uncertain after restart"
+                        if attempt.state
+                        == AttemptState.CANCELLATION_CLAIMED
+                        else "external execution outcome is uncertain after restart"
+                    ),
+                    uncertainty_kind=(
+                        "CANCELLATION_OUTCOME_AMBIGUOUS"
+                        if attempt.state
+                        == AttemptState.CANCELLATION_CLAIMED
+                        else "EXTERNAL_EXECUTION_OUTCOME_AMBIGUOUS"
+                    ),
                     updated_at=recovered_at,
                     revision=attempt.revision + 1,
                     session_slot_claimed=(
