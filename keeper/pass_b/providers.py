@@ -12,7 +12,12 @@ from keeper.evidence_input import (
     structured_digest,
     validate_provider_input,
 )
-from keeper.pass_b.enums import AssignmentRole, CostMode, HealthState
+from keeper.pass_b.enums import (
+    AssignmentRole,
+    CostMode,
+    HealthState,
+    ProviderSessionState,
+)
 from keeper.pass_b.models import (
     AssignmentRecord,
     ProviderAccountRecord,
@@ -394,6 +399,64 @@ class ProviderSelectionPolicy:
     allow_paid: bool
     privacy_classification: str
     excluded_independence_keys: frozenset[str] = frozenset()
+    preferred_provider_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSelectionDecision:
+    session: ProviderSessionRecord
+    policy_digest: str
+
+
+class PolicyDrivenSelector:
+    """Pure policy selector; callers persist the decision before execution."""
+
+    def select(
+        self,
+        *,
+        assignment_role: str,
+        providers: list[ProviderRecord],
+        accounts: list[ProviderAccountRecord],
+        sessions: list[ProviderSessionRecord],
+        policy: ProviderSelectionPolicy,
+        selection_counts: dict[str, int] | None = None,
+    ) -> ProviderSelectionDecision:
+        session = select_provider_session(
+            assignment_role,
+            providers,
+            accounts,
+            sessions,
+            policy,
+            selection_counts=selection_counts,
+        )
+        return ProviderSelectionDecision(
+            session=session,
+            policy_digest=provider_selection_policy_digest(
+                assignment_role, policy
+            ),
+        )
+
+
+def provider_selection_policy_digest(
+    assignment_role: str, policy: ProviderSelectionPolicy
+) -> str:
+    payload = {
+        "allowed_provider_ids": sorted(policy.allowed_provider_ids),
+        "required_capabilities": sorted(policy.required_capabilities),
+        "allow_substitution": policy.allow_substitution,
+        "allow_paid": policy.allow_paid,
+        "privacy_classification": policy.privacy_classification,
+        "excluded_independence_keys": sorted(
+            policy.excluded_independence_keys
+        ),
+        "preferred_provider_id": policy.preferred_provider_id,
+        "assignment_role": AssignmentRole(assignment_role).value,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def select_provider_session(
@@ -402,8 +465,10 @@ def select_provider_session(
     accounts: list[ProviderAccountRecord],
     sessions: list[ProviderSessionRecord],
     policy: ProviderSelectionPolicy,
+    *,
+    selection_counts: dict[str, int] | None = None,
 ) -> ProviderSessionRecord:
-    AssignmentRole(assignment_role)
+    role = AssignmentRole(assignment_role)
     if not policy.allow_substitution:
         raise PermissionError("provider substitution is not charter-approved")
     account_by_id = {item.account_id: item for item in accounts}
@@ -426,9 +491,17 @@ def select_provider_session(
         if (
             provider.provider_id not in policy.allowed_provider_ids
             or not independence_keys.isdisjoint(policy.excluded_independence_keys)
+            or not provider.authentication_ready
             or not account.enabled
             or not account.authentication_ready
             or provider.health != HealthState.READY
+            or session.state != ProviderSessionState.READY
+            or (
+                role.value.casefold()
+                not in {item.casefold() for item in provider.capabilities}
+                and "all-roles"
+                not in {item.casefold() for item in provider.capabilities}
+            )
             or not policy.required_capabilities.issubset(
                 provider.capabilities
             )
@@ -446,6 +519,8 @@ def select_provider_session(
         raise RuntimeError("no already-approved provider session satisfies policy")
     candidates.sort(
         key=lambda item: (
+            0 if item.provider_id == policy.preferred_provider_id else 1,
+            (selection_counts or {}).get(item.session_id, 0),
             item.active_assignments,
             item.provider_id,
             item.account_id,

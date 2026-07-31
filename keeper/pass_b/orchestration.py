@@ -16,7 +16,10 @@ from keeper.evidence_input import (
     validate_provider_input,
     validate_review_input_declaration,
 )
-from keeper.pass_b.conversation import WorkflowBlueprint
+from keeper.pass_b.conversation import (
+    WorkflowBlueprint,
+    validate_delegated_action,
+)
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
@@ -37,9 +40,11 @@ from keeper.pass_b.models import (
     DeliveredInputRecord,
     EvidenceBundleRecord,
     EvidenceReferenceRecord,
+    ExecutionProfileRecord,
     PauseReasonRecord,
     ProviderAccountRecord,
     ProviderRecord,
+    ProviderSelectionRecord,
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     ReviewRecord,
@@ -56,7 +61,9 @@ from keeper.pass_b.launch_authority import (
 )
 from keeper.pass_b.providers import (
     AdapterResult,
+    PolicyDrivenSelector,
     ProviderAdapter,
+    ProviderSelectionPolicy,
     assignment_to_adapter,
 )
 from keeper.pass_b.repository import (
@@ -411,6 +418,375 @@ class OrchestrationService:
         )
         self.repository.insert_work_item_bound(record)
         return record
+
+    def register_execution_profile(
+        self,
+        *,
+        work_item_id: str,
+        role: str,
+        workspace_path: Path,
+        write_scopes: tuple[str, ...],
+        expected_evidence: tuple[str, ...],
+        usage_amount: float,
+        effort_level: str,
+        required_capabilities: tuple[str, ...],
+        privacy_classification: str,
+        preferred_provider_id: str | None = None,
+        allow_substitution: bool = True,
+        review_of_assignment_id: str | None = None,
+    ) -> ExecutionProfileRecord:
+        work_item = self.repository.get(WorkItemRecord, work_item_id)
+        workflow = self.repository.get(
+            WorkflowRecord, work_item.workflow_id
+        )
+        charter = self._current_charter_data(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
+        selected_role = AssignmentRole(role)
+        if (
+            work_item.state != WorkItemState.READY
+            or (
+                work_item.required_roles
+                and selected_role not in work_item.required_roles
+            )
+            or not allow_substitution
+        ):
+            raise PermissionError(
+                "execution profile is not eligible for automated preparation"
+            )
+        canonical_path = canonical_workspace_path(workspace_path)
+        envelope = charter.get("authority_envelope")
+        charter_workspaces = charter.get("workspaces")
+        envelope_workspaces = (
+            envelope.get("allowed_workspaces")
+            if isinstance(envelope, dict)
+            else None
+        )
+        if (
+            not _workspace_is_allowed(canonical_path, charter_workspaces)
+            or not _workspace_is_allowed(canonical_path, envelope_workspaces)
+        ):
+            raise PermissionError(
+                "execution profile workspace is outside current charter"
+            )
+        approved = charter.get("approved_providers")
+        envelope_providers = (
+            envelope.get("allowed_providers")
+            if isinstance(envelope, dict)
+            else None
+        )
+        if (
+            not isinstance(approved, (list, tuple))
+            or not isinstance(envelope_providers, (list, tuple))
+            or not set(approved).intersection(envelope_providers)
+            or (
+                preferred_provider_id is not None
+                and (
+                    preferred_provider_id not in approved
+                    or preferred_provider_id not in envelope_providers
+                )
+            )
+        ):
+            raise PermissionError(
+                "execution profile provider policy is outside current charter"
+            )
+        normalized_capabilities = tuple(
+            dict.fromkeys(item.casefold() for item in required_capabilities)
+        )
+        role_capability = selected_role.value.casefold()
+        if role_capability not in normalized_capabilities:
+            normalized_capabilities = (
+                role_capability,
+                *normalized_capabilities,
+            )
+        if selected_role == AssignmentRole.REVIEWER:
+            if not review_of_assignment_id:
+                raise PermissionError(
+                    "review execution profile requires its producer assignment"
+                )
+            producer = self.repository.get(
+                AssignmentRecord, review_of_assignment_id
+            )
+            if (
+                producer.project_id != workflow.project_id
+                or producer.charter_id != workflow.charter_id
+                or producer.charter_revision != workflow.charter_revision
+                or producer.workflow_id != workflow.workflow_id
+                or producer.role == AssignmentRole.REVIEWER
+            ):
+                raise PermissionError(
+                    "review execution profile crosses producer lineage"
+                )
+        elif review_of_assignment_id is not None:
+            raise PermissionError(
+                "non-review execution profile cannot bind a review target"
+            )
+        canonical_scopes = tuple(
+            canonical_scope(canonical_path, item) for item in write_scopes
+        )
+        now = self._now()
+        record = ExecutionProfileRecord(
+            execution_profile_id=uuid.uuid4().hex,
+            project_id=work_item.project_id,
+            charter_id=work_item.charter_id,
+            charter_revision=work_item.charter_revision,
+            workflow_id=work_item.workflow_id,
+            work_item_id=work_item.work_item_id,
+            role=selected_role,
+            review_of_assignment_id=review_of_assignment_id,
+            workspace_id=(
+                "workspace-"
+                + hashlib.sha256(
+                    canonical_path.encode("utf-8")
+                ).hexdigest()[:24]
+            ),
+            canonical_workspace_path=canonical_path,
+            write_scopes=write_scopes,
+            write_scope_keys=canonical_scopes,
+            expected_evidence=expected_evidence,
+            usage_amount=usage_amount,
+            effort_level=effort_level.upper(),
+            required_capabilities=normalized_capabilities,
+            privacy_classification=privacy_classification,
+            preferred_provider_id=preferred_provider_id,
+            allow_substitution=allow_substitution,
+            allow_paid=False,
+            authority_envelope_digest=workflow.authority_envelope_digest,
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        if self.repository.insert_execution_profile_bound(record, work_item):
+            return record
+        existing = [
+            item
+            for item in self.repository.list(
+                ExecutionProfileRecord, project_id=work_item.project_id
+            )
+            if item.work_item_id == work_item.work_item_id
+        ]
+        if len(existing) != 1 or not _same_execution_profile(
+            existing[0], record
+        ):
+            raise PermissionError(
+                "work item already has a different durable execution profile"
+            )
+        return existing[0]
+
+    def prepare_assignment_from_profile(
+        self,
+        execution_profile_id: str,
+        *,
+        delegated_mode_grant_id: str,
+    ) -> tuple[AssignmentRecord, ProviderSelectionRecord]:
+        if self.project_status is None:
+            raise RuntimeError(
+                "automated assignment preparation requires project authority"
+            )
+        profile = self.repository.get(
+            ExecutionProfileRecord, execution_profile_id
+        )
+        work_item = self.repository.get(
+            WorkItemRecord, profile.work_item_id
+        )
+        workflow = self.repository.get(
+            WorkflowRecord, profile.workflow_id
+        )
+        charter = self._current_charter_data(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
+        envelope = charter.get("authority_envelope")
+        approved = charter.get("approved_providers")
+        envelope_providers = (
+            envelope.get("allowed_providers")
+            if isinstance(envelope, dict)
+            else None
+        )
+        if (
+            not isinstance(approved, (list, tuple))
+            or not isinstance(envelope_providers, (list, tuple))
+        ):
+            raise PermissionError("current charter provider policy is invalid")
+        allowed_provider_ids = frozenset(approved).intersection(
+            envelope_providers
+        )
+        excluded: set[str] = set()
+        if profile.review_of_assignment_id:
+            producer = self.repository.get(
+                AssignmentRecord, profile.review_of_assignment_id
+            )
+            excluded.update(
+                {
+                    producer.independence_key,
+                    producer.provider_id,
+                    f"provider:{producer.provider_id}",
+                    producer.account_id,
+                    f"account:{producer.account_id}",
+                    producer.session_id,
+                    f"session:{producer.session_id}",
+                }
+            )
+        counts: dict[str, int] = {}
+        for item in self.repository.list(ProviderSelectionRecord):
+            counts[item.session_id] = counts.get(item.session_id, 0) + 1
+        decision = PolicyDrivenSelector().select(
+            assignment_role=profile.role,
+            providers=self.repository.list(ProviderRecord),
+            accounts=self.repository.list(ProviderAccountRecord),
+            sessions=self.repository.list(ProviderSessionRecord),
+            policy=ProviderSelectionPolicy(
+                allowed_provider_ids=allowed_provider_ids,
+                required_capabilities=frozenset(
+                    profile.required_capabilities
+                ),
+                allow_substitution=profile.allow_substitution,
+                allow_paid=False,
+                privacy_classification=profile.privacy_classification,
+                excluded_independence_keys=frozenset(excluded),
+                preferred_provider_id=profile.preferred_provider_id,
+            ),
+            selection_counts=counts,
+        )
+        session = decision.session
+        account = self.repository.get(
+            ProviderAccountRecord, session.account_id
+        )
+        validate_delegated_action(
+            self.repository,
+            delegated_mode_grant_id,
+            project_status=self.project_status,
+            project_id=profile.project_id,
+            charter_id=profile.charter_id,
+            charter_revision=profile.charter_revision,
+            action="SELECT_APPROVED_PROVIDER",
+            action_scope={"provider_id": session.provider_id},
+        )
+        assignment_action = (
+            "ASSIGN_READ_ONLY_REVIEW"
+            if profile.role == AssignmentRole.REVIEWER
+            else "ASSIGN_IMPLEMENTATION"
+        )
+        validate_delegated_action(
+            self.repository,
+            delegated_mode_grant_id,
+            project_status=self.project_status,
+            project_id=profile.project_id,
+            charter_id=profile.charter_id,
+            charter_revision=profile.charter_revision,
+            action=assignment_action,
+            action_scope={
+                "provider_id": session.provider_id,
+                "workspace": profile.canonical_workspace_path,
+            },
+        )
+        now = self._now()
+        assignment_id = uuid.uuid4().hex
+        selection_id = uuid.uuid4().hex
+        independence_key = (
+            f"{session.provider_id}:{session.account_id}:{session.session_id}"
+        )
+        usage_policy: dict[str, object] = {
+            "reservation_required": True,
+            "paid_fallback": False,
+            "requested_amount": profile.usage_amount,
+            "execution_profile_id": profile.execution_profile_id,
+            "provider_selection_id": selection_id,
+            "effort_level": profile.effort_level,
+        }
+        if profile.review_of_assignment_id:
+            usage_policy["review_of_assignment_id"] = (
+                profile.review_of_assignment_id
+            )
+        assignment = AssignmentRecord(
+            assignment_id=assignment_id,
+            project_id=profile.project_id,
+            charter_id=profile.charter_id,
+            charter_revision=profile.charter_revision,
+            workflow_id=profile.workflow_id,
+            work_item_id=profile.work_item_id,
+            provider_id=session.provider_id,
+            account_id=session.account_id,
+            session_id=session.session_id,
+            role=profile.role,
+            model_id=session.model_id,
+            workspace_id=profile.workspace_id,
+            authority_envelope_digest=profile.authority_envelope_digest,
+            expected_evidence=profile.expected_evidence,
+            usage_policy=usage_policy,
+            state=AssignmentState.READY,
+            read_only=profile.role == AssignmentRole.REVIEWER,
+            independence_key=independence_key,
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        selection = ProviderSelectionRecord(
+            provider_selection_id=selection_id,
+            execution_profile_id=profile.execution_profile_id,
+            assignment_id=assignment_id,
+            project_id=profile.project_id,
+            charter_id=profile.charter_id,
+            charter_revision=profile.charter_revision,
+            workflow_id=profile.workflow_id,
+            work_item_id=profile.work_item_id,
+            role=profile.role,
+            provider_id=session.provider_id,
+            account_id=session.account_id,
+            session_id=session.session_id,
+            model_id=session.model_id,
+            usage_pool_id=account.usage_pool_id,
+            cost_mode=account.cost_mode,
+            privacy_classification=account.privacy_classification,
+            independence_key=independence_key,
+            effort_level=profile.effort_level,
+            allowed_provider_ids=tuple(sorted(allowed_provider_ids)),
+            required_capabilities=tuple(
+                sorted(profile.required_capabilities)
+            ),
+            excluded_independence_keys=tuple(sorted(excluded)),
+            policy_digest=decision.policy_digest,
+            delegated_mode_grant_id=delegated_mode_grant_id,
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        if self.repository.claim_prepared_assignment(
+            profile=profile,
+            selection=selection,
+            assignment=assignment,
+            supplied_work_item=work_item,
+        ):
+            return assignment, selection
+        existing_assignments = [
+            item
+            for item in self.repository.list(
+                AssignmentRecord, project_id=profile.project_id
+            )
+            if item.work_item_id == profile.work_item_id
+        ]
+        if len(existing_assignments) != 1:
+            raise PermissionError(
+                "dependency-ready assignment claim changed concurrently"
+            )
+        existing_selections = [
+            item
+            for item in self.repository.list(
+                ProviderSelectionRecord, project_id=profile.project_id
+            )
+            if item.assignment_id == existing_assignments[0].assignment_id
+            and item.execution_profile_id == profile.execution_profile_id
+        ]
+        if len(existing_selections) != 1:
+            raise PermissionError(
+                "durable provider selection is missing after claim"
+            )
+        return existing_assignments[0], existing_selections[0]
 
     def create_assignment(
         self,
@@ -1000,6 +1376,41 @@ class OrchestrationService:
                 "assignment needs exactly one active workspace"
             )
         workspace = workspaces[0]
+        profile_id = assignment.usage_policy.get("execution_profile_id")
+        profile = (
+            self.repository.get(ExecutionProfileRecord, profile_id)
+            if isinstance(profile_id, str)
+            else None
+        )
+        active_writes = [
+            item
+            for item in self.repository.list(WriteReservationRecord)
+            if item.assignment_id == assignment.assignment_id
+            and item.state == ReservationState.ACTIVE
+        ]
+        if profile is not None and (
+            profile.project_id != assignment.project_id
+            or profile.charter_id != assignment.charter_id
+            or profile.charter_revision != assignment.charter_revision
+            or profile.workflow_id != assignment.workflow_id
+            or profile.work_item_id != assignment.work_item_id
+            or profile.workspace_id != assignment.workspace_id
+            or profile.canonical_workspace_path != workspace.canonical_path
+            or profile.expected_evidence != assignment.expected_evidence
+            or (
+                profile.write_scopes
+                and (
+                    len(active_writes) != 1
+                    or active_writes[0].scope != profile.write_scopes
+                    or active_writes[0].scope_keys
+                    != profile.write_scope_keys
+                )
+            )
+            or (not profile.write_scopes and active_writes)
+        ):
+            raise PermissionError(
+                "launch differs from durable execution profile"
+            )
         if (
             workspace.workspace_id != assignment.workspace_id
             or canonical_workspace_path(
@@ -1885,6 +2296,26 @@ class OrchestrationService:
             provider_input_digest=attempt.provider_input_digest,
         )
 
+    def _current_charter_data(
+        self,
+        project_id: str,
+        charter_id: str,
+        charter_revision: int,
+        authority_envelope_digest: str,
+    ) -> dict[str, Any]:
+        if self.project_status is None:
+            raise RuntimeError("current project authority is unavailable")
+        self._require_current_charter(
+            project_id,
+            charter_id,
+            charter_revision,
+            authority_envelope_digest,
+        )
+        charter = self.project_status(project_id).get("active_charter")
+        if not isinstance(charter, dict):
+            raise PermissionError("current charter detail is unavailable")
+        return charter
+
     def _require_current_charter(
         self,
         project_id: str,
@@ -1923,6 +2354,42 @@ class OrchestrationService:
         if value.tzinfo is None:
             raise ValueError("orchestration clock must be timezone aware")
         return value.isoformat()
+
+
+def _workspace_is_allowed(
+    canonical_path: str, raw_roots: object
+) -> bool:
+    if not isinstance(raw_roots, (list, tuple)) or not raw_roots:
+        return False
+    for raw_root in raw_roots:
+        if not isinstance(raw_root, str) or not raw_root:
+            continue
+        try:
+            root = canonical_workspace_path(Path(raw_root))
+        except (OSError, PermissionError, ValueError):
+            continue
+        if (
+            canonical_path == root
+            or canonical_path.startswith(root.rstrip("/") + "/")
+        ):
+            return True
+    return False
+
+
+def _same_execution_profile(
+    left: ExecutionProfileRecord, right: ExecutionProfileRecord
+) -> bool:
+    left_payload = left.to_dict()
+    right_payload = right.to_dict()
+    for key in (
+        "execution_profile_id",
+        "created_at",
+        "updated_at",
+        "revision",
+    ):
+        left_payload.pop(key)
+        right_payload.pop(key)
+    return left_payload == right_payload
 
 
 def evidence_content_digest(

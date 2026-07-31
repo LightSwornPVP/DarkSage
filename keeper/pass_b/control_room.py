@@ -17,10 +17,12 @@ from keeper.pass_b.models import (
     DelegatedModeGrantRecord,
     EvidenceBundleRecord,
     EvidenceReferenceRecord,
+    ExecutionProfileRecord,
     PauseReasonRecord,
     PresentationStateRecord,
     ProviderAccountRecord,
     ProviderRecord,
+    ProviderSelectionRecord,
     ProviderSessionRecord,
     ResumeCheckpointRecord,
     ReviewRecord,
@@ -74,6 +76,12 @@ class ControlRoomService:
             AssignmentRecord, project_id=project_id
         )
         work_items = self.repository.list(WorkItemRecord, project_id=project_id)
+        execution_profiles = self.repository.list(
+            ExecutionProfileRecord, project_id=project_id
+        )
+        provider_selections = self.repository.list(
+            ProviderSelectionRecord, project_id=project_id
+        )
         assignment_ids = {
             item.assignment_id for item in assignments
         }
@@ -219,6 +227,12 @@ class ControlRoomService:
                     else None
                 ),
                 "work_items": [item.to_dict() for item in work_items],
+                "execution_profiles": [
+                    item.to_dict() for item in execution_profiles
+                ],
+                "provider_selections": [
+                    item.to_dict() for item in provider_selections
+                ],
                 "assignments": [
                     {
                         **item.to_dict(),
