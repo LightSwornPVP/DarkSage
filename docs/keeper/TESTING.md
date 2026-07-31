@@ -23,6 +23,16 @@ descendants, executable replacement, registration changes, truthful retry instan
 IDs, actual-execution-only reporting, independent-connection authorization races,
 and exact one-use reroute authority.
 
+Pass B provider-recovery tests deterministically synchronize concurrent
+cancellation claims and prove one external effect. Fault injection covers
+cancel-side-effect-then-exception, terminal-commit failure, and restart during a
+claimed cancellation. The suite verifies durable uncertainty, retained session,
+usage, workspace, write and launch claims, blocked automatic retry, exact
+one-use Founder action approval, current-charter and observation binding,
+conservative usage consumption, explicit cleanup, composition separation, and
+rejection of ordinary execution uncertainty. The controlled-provider workflow
+regression also proves a cancelled author stage is durably stopped before retry.
+
 Release-gate tests use Windows `spawn` workers with independent database
 connections. Executable race tests pause after validation and retained-handle
 acquisition but before `CreateProcess`, then attempt same-path, same-size, and

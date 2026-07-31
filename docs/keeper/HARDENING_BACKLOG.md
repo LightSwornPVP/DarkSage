@@ -21,8 +21,11 @@ Nonblocking future work:
   and transactional review/workflow completion if the Executive and Pass B
   stores gain a shared atomic validation boundary. Production Authority launch
   remains independently current-charter-bound.
-- Make cancel-then-immediate-retry wait for the stopped-stage transition rather
-  than occasionally failing closed with `task is not stopped for stage retry`.
+- If Executive and Pass B records move into one transaction domain, make
+  Founder reconciliation approval consumption and the terminal Pass B
+  cancellation transition atomic. Today a rare Pass B commit failure consumes
+  the one-use approval but leaves the attempt safely `UNCERTAIN`, requiring a
+  fresh approval.
 - If Keeper becomes public, multi-user, or accepts unknown plugins, isolate the
   Executive as a separate service between the Desktop/UI and KeeperAuthority.
   That version requires a new threat model for hostile same-user clients and

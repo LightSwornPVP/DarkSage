@@ -23,8 +23,11 @@ from keeper.evidence_input import (
     structured_digest,
 )
 from keeper.executive.charters import CharterService
-from keeper.executive.enums import FounderApprovalIntent
-from keeper.executive.founder_auth import TestFounderAuthenticator
+from keeper.executive.enums import ApprovalKind, FounderApprovalIntent
+from keeper.executive.founder_auth import (
+    TestApprovalConfirmation,
+    TestFounderAuthenticator,
+)
 from keeper.executive.founder_capability import (
     FounderAuthorizationCapability,
     FounderCapabilityClaims,
@@ -33,8 +36,11 @@ from keeper.executive.founder_capability import (
 )
 from keeper.executive.intake import ConversationIntake, IntakeResult
 from keeper.executive.models import (
+    ApprovalRecord,
     FounderApprovalChallenge,
+    FounderApprovalEvent,
     MemoryRecord,
+    ProposedAction,
     ProjectCharter,
     ProjectRecord,
     utc_now,
@@ -152,6 +158,54 @@ class PilotConversationExecutive:
         self, charter: ProjectCharter
     ) -> FounderApprovalChallenge:
         return self.charters.request_approval(charter)
+
+    def request_action_approval(
+        self,
+        action: ProposedAction,
+        *,
+        charter_id: str,
+        scope: tuple[str, ...],
+        limits: dict[str, Any],
+    ) -> FounderApprovalChallenge:
+        return self.charters.request_action_approval(
+            action,
+            charter_id=charter_id,
+            kind=ApprovalKind.ONE_TIME,
+            scope=scope,
+            limits=limits,
+        )
+
+    def authenticate_founder(
+        self, challenge: FounderApprovalChallenge
+    ) -> TestApprovalConfirmation:
+        confirmation = self.charters.authenticate(challenge)
+        if type(confirmation) is not TestApprovalConfirmation:
+            raise RuntimeError("pilot Founder confirmation type is invalid")
+        return confirmation
+
+    def confirm_action_approval(
+        self,
+        challenge_id: str,
+        confirmation: TestApprovalConfirmation,
+    ) -> tuple[ApprovalRecord, FounderApprovalEvent]:
+        return self.charters.confirm_action_approval(
+            challenge_id,
+            confirmation=confirmation,
+            intent=FounderApprovalIntent.APPROVE_ACTION,
+        )
+
+    def reserve_action_authority(
+        self,
+        action: ProposedAction,
+        *,
+        approval_id: str,
+        task_id: str | None = None,
+    ) -> tuple[ApprovalRecord, str | None]:
+        return self.repository.reserve_action_authority(
+            action,
+            approval_id=approval_id,
+            task_id=task_id,
+        )
 
     def approve_and_activate(
         self, challenge: FounderApprovalChallenge
@@ -349,6 +403,7 @@ def run_darksage_pilot(
         executive=executive,
         launch_authority=launch_gate,
         usage_reset_verifier=usage_reset_verifier,
+        recovery_action_authority=executive,
     )
     production_rejected_test_reset_verifier = False
     try:
