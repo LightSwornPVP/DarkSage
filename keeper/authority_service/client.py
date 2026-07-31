@@ -66,10 +66,26 @@ class AuthorityServiceClient:
             )
         return validate_provenance_report(result["report"], request)
 
-    def register_provider(self, provider_id: str, executable: Path) -> dict[str, Any]:
+    def register_provider(
+        self,
+        provider_id: str,
+        executable: Path,
+        *,
+        executive_capabilities: list[str],
+        project_types: list[str],
+        effort_levels: list[str],
+        pricing_authority: dict[str, Any],
+    ) -> dict[str, Any]:
         return self.request(
             Operation.REGISTER_PROVIDER,
-            {"provider_id": provider_id, "executable": str(executable.resolve())},
+            {
+                "provider_id": provider_id,
+                "executable": str(executable.resolve()),
+                "executive_capabilities": executive_capabilities,
+                "project_types": project_types,
+                "effort_levels": effort_levels,
+                "pricing_authority": pricing_authority,
+            },
         )
 
     def qualify_provider(self, registration_id: str) -> dict[str, Any]:

@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.app.service import KeeperApplication
 from keeper.app.storage import KeeperStore
 from keeper.cli import main
@@ -331,7 +333,7 @@ def test_standalone_commands_accept_complete_current_registration(
         encoding="utf-8",
     )
     authority = KeeperApplication(tmp_path / "protected")
-    authority.register_provider("codex", executable, "standalone-test")
+    authority.register_provider("codex", executable, "standalone-test", **provider_authority_kwargs())
     registration = authority.qualify_provider("codex", "standalone-test")
     monkeypatch.setattr(
         "keeper.cli.authority_client_factory",
@@ -463,7 +465,7 @@ def test_crash_after_authority_reservation_blocks_duplicate_attempt(
         "exit /b 0\r\n",
         encoding="utf-8",
     )
-    app.register_provider("codex", provider, "test")
+    app.register_provider("codex", provider, "test", **provider_authority_kwargs())
     registration = app.qualify_provider("codex", "test")
     exchange = Path(
         str(app.authority.diagnostics()["client_exchange_root"])

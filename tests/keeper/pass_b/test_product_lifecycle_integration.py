@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 
 import pytest
 
 from keeper.executive.service import KeeperExecutive
-from keeper.executive.models import ProjectCharter
-from keeper.pass_b.application import PassBApplication
+from keeper.executive.models import ProjectCharter, ProjectRecord
+from keeper.pass_b.application import PassBApplication, _activate_and_reload_charter
 from keeper.pass_b.conversation import DynamicWorkflowDesigner
 from keeper.pass_b.models import (
     PassBRecord,
@@ -155,3 +156,28 @@ def test_approval_rejects_displayed_charter_identity_mismatch_before_auth(
 
     assert application.conversation.current_context(project_id).state == "PROPOSED"
     assert executive.status(project_id).pending_approvals == ()
+
+
+def test_activation_returns_the_durable_active_charter(tmp_path: Path) -> None:
+    application, active_charter = _approved(tmp_path)
+    status = application.project_status(active_charter.project_id)
+    project_data = status["project_summary"]
+    assert isinstance(project_data, dict)
+    project = ProjectRecord.from_dict(project_data)
+    approved = replace(active_charter, status="APPROVED")
+    activated_with: list[ProjectCharter] = []
+
+    class Activator:
+        @staticmethod
+        def activate_charter(charter: ProjectCharter) -> ProjectRecord:
+            activated_with.append(charter)
+            return project
+
+    durable_project, durable_charter = _activate_and_reload_charter(
+        Activator(), application.project_status, approved
+    )
+
+    assert activated_with == [approved]
+    assert durable_project == project
+    assert durable_charter == active_charter
+    assert durable_charter.status == "ACTIVE"

@@ -145,11 +145,25 @@ class ServiceProviderObserver:
         )
 
     def register_provider(
-        self, provider_id: str, executable: Path, client_sid: str
+        self,
+        provider_id: str,
+        executable: Path,
+        client_sid: str,
+        *,
+        executive_capabilities: list[str],
+        project_types: list[str],
+        effort_levels: list[str],
+        pricing_authority: dict[str, Any],
     ) -> dict[str, Any]:
         with impersonate_token(self._client_token()):
             return create_provider_registration(
-                provider_id, executable, authorized_by=client_sid
+                provider_id,
+                executable,
+                authorized_by=client_sid,
+                executive_capabilities=executive_capabilities,
+                project_types=project_types,
+                effort_levels=effort_levels,
+                pricing_authority=pricing_authority,
             )
 
     def execute_provider(

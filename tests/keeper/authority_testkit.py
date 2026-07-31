@@ -32,6 +32,43 @@ from keeper.providers.adapters import create_provider_registration
 def _text_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
+def provider_authority_kwargs(provider_id: str = "codex") -> dict[str, Any]:
+    """Explicit safe declarations used by Authority contract tests."""
+    return {
+        "executive_capabilities": sorted(
+            {
+                "acceptance", "architecture", "critical analysis",
+                "implementation", "packaging", "planning", "production",
+                "report writing", "requirements", "research design",
+                "review", "security", "source collection", "source review",
+                "synthesis", "testing",
+            }
+        ),
+        "project_types": sorted(
+            {
+                "business_operations", "design", "general", "marketing",
+                "music", "research", "software", "video", "writing",
+            }
+        ),
+        "effort_levels": ["high", "medium"],
+        "pricing_authority": {
+            "pricing_identity": f"test-pricing:{provider_id}",
+            "pricing_version": "2026-07",
+            "currency": "USD",
+            "estimated_cost": 0.0,
+            "maximum_cost": 0.0,
+            "billing_unit": "included-test-session",
+            "included_plan": True,
+            "marginally_free": True,
+            "quoted_at": "2026-07-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "source": "TEST_AUTHORITY_REGISTRATION",
+            "cost_tier": 0,
+        },
+    }
+
+
+
 
 def make_test_founder_capability(
     project_id: str,
@@ -152,10 +189,24 @@ class _TestObserver:
         )
 
     def register_provider(
-        self, provider_id: str, executable: Path, client_sid: str
+        self,
+        provider_id: str,
+        executable: Path,
+        client_sid: str,
+        *,
+        executive_capabilities: list[str],
+        project_types: list[str],
+        effort_levels: list[str],
+        pricing_authority: dict[str, Any],
     ) -> dict[str, Any]:
         return create_provider_registration(
-            provider_id, executable, authorized_by=client_sid
+            provider_id,
+            executable,
+            authorized_by=client_sid,
+            executive_capabilities=executive_capabilities,
+            project_types=project_types,
+            effort_levels=effort_levels,
+            pricing_authority=pricing_authority,
         )
 
     def execute_provider(

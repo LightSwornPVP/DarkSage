@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.app.lifecycle import RunStage
 from keeper.app.service import KeeperApplication
 from keeper.providers.adapters import (
@@ -68,7 +70,7 @@ def test_discovery_registration_mismatch_fails_without_execution(
     _marker_provider(executable, marker)
     registration = create_provider_registration(
         "codex", executable, authorized_by="test-authority"
-    )
+    , **provider_authority_kwargs('codex'))
     if mutation == "stale":
         registration["script_sha256"] = "0" * 64
     elif mutation == "malformed":
@@ -99,7 +101,7 @@ def test_registration_remains_unqualified_without_execution(
         "codex",
         executable,
         authorized_by="test-authority",
-    )
+     **provider_authority_kwargs('codex'))
     diagnostic = next(
         item
         for item in ProviderDiscovery(
@@ -129,7 +131,7 @@ def test_batch_constructor_rejects_authoritative_component_mismatch(
     _marker_provider(executable, tmp_path / "never.txt")
     registration = create_provider_registration(
         "codex", executable, authorized_by="test-authority"
-    )
+    , **provider_authority_kwargs('codex'))
     registration[field] = value
     with pytest.raises(PermissionError):
         CodexCommandAdapter(str(executable), registration)
@@ -143,7 +145,7 @@ def test_batch_constructor_does_not_rederive_changed_script_into_trust(
     _marker_provider(executable, tmp_path / "original.txt")
     registration = create_provider_registration(
         "codex", executable, authorized_by="test-authority"
-    )
+    , **provider_authority_kwargs('codex'))
     original_configuration = registration["configuration_digest"]
     content = executable.read_bytes()
     executable.write_bytes(b"X" + content[1:])

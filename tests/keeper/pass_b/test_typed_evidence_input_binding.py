@@ -10,6 +10,8 @@ from typing import Any, Callable, cast
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.authority_service.client import TestAuthorityServiceClient
 from keeper.authority_service.protocol import Operation
 from keeper.authority_service.core import (
@@ -515,7 +517,7 @@ def _authority_bound_reviewer(
         lambda request: core.dispatch(request, "S-1-5-21-TYPED-INPUT")
     )
     registration_id = str(
-        client.register_provider("codex", executable)["registration_id"]
+        client.register_provider("codex", executable, **provider_authority_kwargs())["registration_id"]
     )
     client.qualify_provider(registration_id)
     launch = _launch_authority(client, "typed-project")

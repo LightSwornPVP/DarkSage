@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.app import workflow
 from tests.keeper.authority_testkit import TestAuthorityClient
 from keeper.providers.adapters import (
@@ -29,7 +31,7 @@ def diagnostic(identifier: str, root: Path) -> ProviderDiagnostic:
             identifier,
             executable,
             authorized_by="routing-test",
-        ),
+         **provider_authority_kwargs(identifier)),
         discovery_state="qualified",
         role_eligibility=(
             "builder",

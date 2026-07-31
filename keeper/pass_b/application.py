@@ -14,12 +14,14 @@ from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.executive.models import (
     FounderApprovalChallenge,
     ProjectCharter,
+    ProjectRecord,
 )
 from keeper.executive.service import KeeperExecutive
 from keeper.pass_b.authority_reservation import (
     AuthorityAttemptReservation,
     ProductionAuthorityAttemptReservation,
 )
+from keeper.pass_b.completion import CompletionCoordinator, CompletionStepResult
 from keeper.pass_b.control_room import ControlRoomService
 from keeper.pass_b.conversation import (
     CharterDraftContextRecord,
@@ -65,6 +67,12 @@ from keeper.pass_b.usage_authority import (
 
 class AuthorityHealthClient(Protocol):
     def require_live_identity(self) -> dict[str, Any]: ...
+
+
+class CharterActivator(Protocol):
+    def activate_charter(self, charter: ProjectCharter) -> ProjectRecord: ...
+
+
 
 
 class PassBApplication:
@@ -185,6 +193,12 @@ class PassBApplication:
             authority_health=self._authority_health,
             project_status=self.project_status,
         )
+        self.completion = CompletionCoordinator(
+            self.repository,
+            self.orchestration,
+            self.project_status,
+            self.data_directory,
+        )
         self._ensure_presentation_state()
 
     @classmethod
@@ -289,6 +303,23 @@ class PassBApplication:
         outcome = self.conversation.begin(message)
         self.select_project(outcome.project.project_id)
         return outcome
+
+    def continue_conversation(self, project_id: str, message: str) -> Any:
+        outcome = self.conversation.continue_project(project_id, message)
+        self.select_project(project_id)
+        return outcome
+
+    def advance_delegated_completion(
+        self, project_id: str
+    ) -> CompletionStepResult:
+        return self.completion.advance(project_id)
+
+    def run_delegated_completion(
+        self, project_id: str, *, max_steps: int = 100
+    ) -> tuple[CompletionStepResult, ...]:
+        return self.completion.run_until_blocked(
+            project_id, max_steps=max_steps
+        )
 
     def project_catalog(self) -> tuple[dict[str, Any], ...]:
         project_ids = tuple(
@@ -434,15 +465,9 @@ class PassBApplication:
         if durable_charters:
             charter = ProjectCharter.from_dict(durable_charters[0])
             if charter.status == "APPROVED":
-                self.executive.activate_charter(charter)
-                active = self.project_status(project_id).get(
-                    "active_charter"
+                _, charter = _activate_and_reload_charter(
+                    self.executive, self.project_status, charter
                 )
-                if not isinstance(active, dict):
-                    raise RuntimeError(
-                        "approved charter activation was not durable"
-                    )
-                charter = ProjectCharter.from_dict(active)
             if context.state != "APPROVED":
                 self.conversation.record_approval(charter)
         elif context.state == "APPROVED":
@@ -485,7 +510,9 @@ class PassBApplication:
                     challenge.challenge_id, confirmation
                 )
             )
-            project = self.executive.activate_charter(charter)
+            project, charter = _activate_and_reload_charter(
+                self.executive, self.project_status, charter
+            )
             self.conversation.record_approval(charter)
             if (
                 approval.project_id != project.project_id
@@ -741,6 +768,18 @@ class PassBApplication:
                 revision=1,
             )
         )
+
+
+def _activate_and_reload_charter(
+    executive: CharterActivator,
+    project_status: ProjectStatusReader,
+    charter: ProjectCharter,
+) -> tuple[ProjectRecord, ProjectCharter]:
+    project = executive.activate_charter(charter)
+    active = project_status(project.project_id).get("active_charter")
+    if not isinstance(active, dict):
+        raise RuntimeError("approved charter activation was not durable")
+    return project, ProjectCharter.from_dict(active)
 
 
 def _project_status(

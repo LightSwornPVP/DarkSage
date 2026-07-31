@@ -92,6 +92,18 @@ class ProductionUsageResetVerifier:
             raise ValueError("at least one production usage observer key is required")
         self.__verification_keys = MappingProxyType(keys)
 
+    @classmethod
+    def unavailable(cls) -> ProductionUsageResetVerifier:
+        """Return an exact production verifier that rejects every reset.
+
+        This permits production execution for unlimited/local pools while
+        keeping usage-reset behavior fail closed until an authenticated
+        provider/account observer key is explicitly configured.
+        """
+        verifier = object.__new__(cls)
+        verifier.__verification_keys = MappingProxyType({})
+        return verifier
+
     def verify(
         self,
         pool: UsagePoolRecord,

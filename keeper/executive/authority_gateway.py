@@ -398,8 +398,8 @@ class AuthorityBackedSpecialistGateway:
                 or provider_id not in charter.approved_providers
             ):
                 continue
-            capabilities = registration.get("capability_set")
-            project_types = registration.get("role_eligibility")
+            capabilities = registration.get("executive_capability_set")
+            project_types = registration.get("project_types")
             model_id = registration.get("model_or_service_identity")
             independence = registration.get("independence_classification")
             effort_levels = registration.get("effort_levels")
@@ -418,33 +418,42 @@ class AuthorityBackedSpecialistGateway:
                 or not isinstance(effort_levels, list)
                 or not effort_levels
                 or not isinstance(pricing, dict)
+                or set(pricing) != {
+                    "pricing_identity", "pricing_version", "currency",
+                    "estimated_cost", "maximum_cost", "billing_unit",
+                    "included_plan", "marginally_free", "quoted_at",
+                    "expires_at", "source", "cost_tier",
+                }
             ):
                 continue
-            profile = SpecialistProfile(
-                provider_id,
-                model_id,
-                session_id,
-                tuple(capabilities),
-                tuple(project_types),
-                True,
-                True,
-                f"{independence}:{binding.registration_id}:{session_id}",
-                int(pricing.get("cost_tier", -1)),
-                tuple(str(item) for item in effort_levels),
-                True,
-                1.0,
-                str(pricing["pricing_identity"]) if pricing.get("pricing_identity") else None,
-                str(pricing["pricing_version"]) if pricing.get("pricing_version") else None,
-                str(pricing["currency"]) if pricing.get("currency") else None,
-                float(pricing["estimated_cost"]) if isinstance(pricing.get("estimated_cost"), (int, float)) else None,
-                float(pricing["maximum_cost"]) if isinstance(pricing.get("maximum_cost"), (int, float)) else None,
-                str(pricing["billing_unit"]) if pricing.get("billing_unit") else None,
-                pricing.get("included_plan") is True,
-                pricing.get("marginally_free") is True,
-                str(pricing["quoted_at"]) if pricing.get("quoted_at") else None,
-                str(pricing["expires_at"]) if pricing.get("expires_at") else None,
-                str(pricing["source"]) if pricing.get("source") else None,
-            )
+            try:
+                profile = SpecialistProfile(
+                    provider_id,
+                    model_id,
+                    session_id,
+                    tuple(capabilities),
+                    tuple(project_types),
+                    True,
+                    True,
+                    f"{independence}:{binding.registration_id}:{session_id}",
+                    int(pricing.get("cost_tier", -1)),
+                    tuple(str(item) for item in effort_levels),
+                    True,
+                    1.0,
+                    str(pricing["pricing_identity"]),
+                    str(pricing["pricing_version"]),
+                    str(pricing["currency"]),
+                    float(pricing["estimated_cost"]),
+                    float(pricing["maximum_cost"]),
+                    str(pricing["billing_unit"]),
+                    pricing.get("included_plan") is True,
+                    pricing.get("marginally_free") is True,
+                    str(pricing["quoted_at"]),
+                    str(pricing["expires_at"]),
+                    str(pricing["source"]),
+                )
+            except (TypeError, ValueError):
+                continue
             key = (profile.provider_id, profile.model_id, profile.session_id)
             self._resolved[key] = (binding, registration)
             profiles.append(profile)

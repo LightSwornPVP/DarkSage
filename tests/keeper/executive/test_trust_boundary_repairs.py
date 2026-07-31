@@ -810,7 +810,7 @@ def test_prelaunch_reservation_failure_releases_approval_and_budget(
         }
     )
     authority.registrations["registration-reviewer"][
-        "capability_set"
+        "executive_capability_set"
     ] = ["review"]
     gateway, _ = semantic_gateway(tmp_path, transport=authority)
     runtime = ExecutiveRuntime(service.repository, gateway)

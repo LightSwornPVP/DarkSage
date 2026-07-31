@@ -141,6 +141,39 @@ class ConversationService:
             True,
         )
 
+    def continue_project(
+        self, project_id: str, message: str
+    ) -> ConversationOutcome | None:
+        """Continue one selected project without silently creating another."""
+        if not message.strip():
+            raise ValueError("conversation message cannot be empty")
+        current = self.current_context(project_id)
+        self._message(project_id, "FOUNDER", message, "PROJECT_CONTINUATION")
+        if current.state == "APPROVAL_REQUESTED":
+            raise PermissionError(
+                "charter approval is already pending; approve or revise it explicitly"
+            )
+        if current.state == "APPROVED":
+            self._message(
+                project_id,
+                "KEEPER",
+                "Continuation recorded. Execution remains bound to the current "
+                "Founder-approved charter; changed scope requires a new revision.",
+                "CHARTER_BOUND_CONTINUATION",
+            )
+            return None
+        extracted = ConversationIntake().extract(message)
+        replacements = {
+            name: item.value
+            for name, item in extracted.fields.items()
+            if item.provenance == "EXPLICIT"
+        }
+        if not replacements:
+            raise ValueError(
+                "continuation did not provide an explicit charter clarification"
+            )
+        return self.revise(project_id, replacements)
+
     def revise(
         self, project_id: str, replacements: dict[str, Any]
     ) -> ConversationOutcome:
@@ -300,12 +333,10 @@ class DynamicWorkflowDesigner:
                 ("Plan", "PLANNER", "Translate charter into bounded work", False),
                 ("Implement", "IMPLEMENTER", "Create assigned deliverables", False),
                 ("Test", "TESTER", "Verify behavior and failure paths", True),
-                ("Review", "REVIEWER", "Independently assess evidence", True),
             ),
             "research": (
                 ("Research plan", "PLANNER", "Bound questions and sources", False),
                 ("Investigate", "RESEARCHER", "Collect structured evidence", False),
-                ("Review sources", "REVIEWER", "Assess provenance and gaps", True),
                 (
                     "Synthesize",
                     "DOCUMENTATION_SPECIALIST",
@@ -321,7 +352,6 @@ class DynamicWorkflowDesigner:
                     "Create charter-approved media assets",
                     False,
                 ),
-                ("Quality review", "REVIEWER", "Review delivery evidence", True),
             ),
             "writing": (
                 ("Outline", "PLANNER", "Design structure and voice", False),
@@ -331,7 +361,6 @@ class DynamicWorkflowDesigner:
                     "Create the manuscript",
                     False,
                 ),
-                ("Editorial review", "REVIEWER", "Independently review", True),
                 (
                     "Revise",
                     "DOCUMENTATION_SPECIALIST",
@@ -345,7 +374,6 @@ class DynamicWorkflowDesigner:
             (
                 ("Plan", "PLANNER", "Design a charter-specific workflow", False),
                 ("Produce", "IMPLEMENTER", "Create the deliverables", False),
-                ("Review", "REVIEWER", "Independently review evidence", True),
             ),
         )
         steps: list[WorkflowStepBlueprint] = []

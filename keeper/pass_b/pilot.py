@@ -242,12 +242,24 @@ class _PilotAuthorityObserver:
         self.reviewer_commit_receipt_digest: str | None = None
 
     def register_provider(
-        self, provider_id: str, executable: Path, client_sid: str
+        self,
+        provider_id: str,
+        executable: Path,
+        client_sid: str,
+        *,
+        executive_capabilities: list[str],
+        project_types: list[str],
+        effort_levels: list[str],
+        pricing_authority: dict[str, Any],
     ) -> dict[str, Any]:
         return create_provider_registration(
             provider_id,
             executable,
             authorized_by=client_sid,
+            executive_capabilities=executive_capabilities,
+            project_types=project_types,
+            effort_levels=effort_levels,
+            pricing_authority=pricing_authority,
         )
 
     def qualify(
@@ -1174,7 +1186,31 @@ def _register_provider(
     executable.write_bytes(f"safe:{provider_id}".encode("utf-8"))
     registration_id = str(
         authority_client.register_provider(
-            authority_provider_id, executable
+            authority_provider_id,
+            executable,
+            executive_capabilities=sorted(
+                {
+                    "acceptance", "architecture", "implementation", "packaging",
+                    "planning", "production", "requirements", "review",
+                    "security", "testing",
+                }
+            ),
+            project_types=["general", "software"],
+            effort_levels=["high", "medium"],
+            pricing_authority={
+                "pricing_identity": f"pilot-pricing:{provider_id}",
+                "pricing_version": "2026-07",
+                "currency": "USD",
+                "estimated_cost": 0.0,
+                "maximum_cost": 0.0,
+                "billing_unit": "included-pilot-session",
+                "included_plan": True,
+                "marginally_free": True,
+                "quoted_at": "2026-07-01T00:00:00+00:00",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "source": "TEST_AUTHORITY_REGISTRATION",
+                "cost_tier": 0,
+            },
         )["registration_id"]
     )
     authority_client.qualify_provider(registration_id)

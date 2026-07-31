@@ -159,13 +159,28 @@ class KeeperApplication:
         return result
 
     def register_provider(
-        self, provider_id: str, executable: Path, authorizer: str
+        self,
+        provider_id: str,
+        executable: Path,
+        authorizer: str,
+        *,
+        executive_capabilities: list[str],
+        project_types: list[str],
+        effort_levels: list[str],
+        pricing_authority: dict[str, Any],
     ) -> dict[str, Any]:
         if provider_id not in {"codex", "claude"} or not authorizer.strip():
             raise PermissionError(
                 "provider registration requires a supported identity and authorizer"
             )
-        protected = self.authority.register_provider(provider_id, executable)
+        protected = self.authority.register_provider(
+            provider_id,
+            executable,
+            executive_capabilities=executive_capabilities,
+            project_types=project_types,
+            effort_levels=effort_levels,
+            pricing_authority=pricing_authority,
+        )
         registration = protected.get("registration")
         if not isinstance(registration, dict):
             raise RuntimeError(

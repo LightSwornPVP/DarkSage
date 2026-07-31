@@ -634,6 +634,105 @@ class PassBRepository:
             )
         return True
 
+    def claim_repair_assignment(
+        self,
+        *,
+        review: ReviewRecord,
+        original: AssignmentRecord,
+        work_item: WorkItemRecord,
+        profile: ExecutionProfileRecord,
+        selection: ProviderSelectionRecord,
+        repair: AssignmentRecord,
+    ) -> bool:
+        """Atomically bind one fresh production-runnable repair assignment."""
+
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            durable_review = self._get(connection, ReviewRecord, review.review_id)
+            durable_original = self._get(
+                connection, AssignmentRecord, original.assignment_id
+            )
+            durable_item = self._get(
+                connection, WorkItemRecord, work_item.work_item_id
+            )
+            durable_profile = self._get(
+                connection, ExecutionProfileRecord, profile.execution_profile_id
+            )
+            if any(
+                current != supplied
+                for current, supplied in (
+                    (durable_review, review),
+                    (durable_original, original),
+                    (durable_item, work_item),
+                    (durable_profile, profile),
+                )
+            ):
+                raise PermissionError("repair claim differs from durable state")
+            rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND project_id=?",
+                (AssignmentRecord.KIND, original.project_id),
+            ).fetchall()
+            existing = [
+                self._decode(AssignmentRecord, row)
+                for row in rows
+                if self._decode(AssignmentRecord, row).usage_policy.get(
+                    "repair_review_id"
+                )
+                == review.review_id
+            ]
+            if existing:
+                return False
+            workflow = self._get(
+                connection, WorkflowRecord, original.workflow_id
+            )
+            _validate_execution_profile(workflow, work_item, profile)
+            _validate_assignment_binding(workflow, work_item, repair)
+            provider = self._get(connection, ProviderRecord, repair.provider_id)
+            account = self._get(
+                connection, ProviderAccountRecord, repair.account_id
+            )
+            session = self._get(
+                connection, ProviderSessionRecord, repair.session_id
+            )
+            if (
+                review.state != ReviewState.REPAIR_REQUIRED
+                or review.assignment_id != original.assignment_id
+                or original.state != AssignmentState.REPAIR_REQUIRED
+                or work_item.state != WorkItemState.REPAIR_REQUIRED
+                or repair.state != AssignmentState.READY
+                or repair.assignment_id == original.assignment_id
+                or repair.usage_policy.get("repair_of_assignment_id")
+                != original.assignment_id
+                or repair.usage_policy.get("repair_review_id") != review.review_id
+                or repair.usage_policy.get("execution_profile_id")
+                != profile.execution_profile_id
+                or repair.usage_policy.get("provider_selection_id")
+                != selection.provider_selection_id
+                or selection.assignment_id != repair.assignment_id
+                or selection.execution_profile_id != profile.execution_profile_id
+                or selection.provider_id != repair.provider_id
+                or selection.account_id != repair.account_id
+                or selection.session_id != repair.session_id
+                or selection.model_id != repair.model_id
+                or provider.health != HealthState.READY
+                or provider.cost_mode == CostMode.PAID
+                or not provider.authentication_ready
+                or account.provider_id != provider.provider_id
+                or account.cost_mode == CostMode.PAID
+                or not account.authentication_ready
+                or not account.enabled
+                or session.provider_id != provider.provider_id
+                or session.account_id != account.account_id
+                or session.model_id != repair.model_id
+                or session.state != ProviderSessionState.READY
+                or session.active_assignments >= session.concurrency_limit
+            ):
+                raise PermissionError("repair assignment binding is invalid")
+            self._insert(connection, repair)
+            self._insert(connection, selection)
+        return True
+
     def assignment_launch_binding(
         self, assignment_id: str
     ) -> tuple[WorkflowRecord, WorkItemRecord, AssignmentRecord]:

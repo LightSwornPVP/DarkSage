@@ -11,6 +11,8 @@ from typing import Any, cast
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.authority_service.client import AuthorityServiceClient
 from keeper.authority_service.core import (
     AuthorityServiceCore,
@@ -190,13 +192,71 @@ def _authorize_generation(
     )
     return cast(dict[str, Any], response["authorization"])
 
+def test_project_launch_authorization_verification_is_exact_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    authorization = _authorize_generation(
+        client, "verification-project", 1, "verification"
+    )
+
+    assert client.verify("project-launch-authorization", authorization) is True
+
+    altered = dict(authorization)
+    altered["project_id"] = "other-project"
+    assert client.verify("project-launch-authorization", altered) is False
+    assert client.verify("provider-launch-authorization", authorization) is False
+    assert client.verify("project-launch-authorization", {"malformed": True}) is False
+
+    with pytest.raises((PermissionError, ValueError), match="unsupported"):
+        client.verify("project-launch-authorization-v2", authorization)
+
+    replay = Request.create(
+        Operation.VERIFY_EVIDENCE,
+        {
+            "purpose": "project-launch-authorization",
+            "record": authorization,
+        },
+    )
+    assert core.dispatch(replay, "S-1-5-21-1000")["valid"] is True
+    with pytest.raises(PermissionError, match="replay"):
+        core.dispatch(replay, "S-1-5-21-1000")
+
+
+
+def test_existing_signed_verification_purposes_remain_exact(
+    tmp_path: Path,
+) -> None:
+    core, client = _service(tmp_path)
+    purposes = (
+        "provider-registration",
+        "provider-qualification-start",
+        "provider-qualification",
+        "provider-launch-authorization",
+        "provider-input-binding",
+        "provider-launch-claim",
+        "provider-start",
+        "provider-completion",
+        "executive-restore-reconciliation",
+        "executive-restore-reconciliation-fence",
+        "executive-restore-fence-confirmation",
+        "executive-restore-fence-outcome",
+        "authority-provenance-report",
+    )
+    for purpose in purposes:
+        record = core.keys.sign(purpose, {"id": f"test:{purpose}"})
+        assert client.verify(purpose, record) is True
+        assert client.verify(
+            purpose, {**record, "id": f"altered:{purpose}"}
+        ) is False
+
 
 def test_service_constructs_qualification_and_completion_records(
     tmp_path: Path,
 ) -> None:
     core, client = _service(tmp_path)
     executable = tmp_path / "controlled-provider.exe"
-    registered = client.register_provider("codex", executable)
+    registered = client.register_provider("codex", executable, **provider_authority_kwargs())
     registration_id = str(registered["registration_id"])
 
     qualified = client.qualify_provider(registration_id)
@@ -241,7 +301,7 @@ def test_cancel_claim_precedes_side_effect_and_blocks_stale_resume(
     core, client = _service(tmp_path)
     executable = tmp_path / "controlled-provider.exe"
     registration_id = str(
-        client.register_provider("codex", executable)["registration_id"]
+        client.register_provider("codex", executable, **provider_authority_kwargs())["registration_id"]
     )
     client.qualify_provider(registration_id)
     reserved = client.reserve_attempt(
@@ -307,7 +367,7 @@ def test_service_rejects_arbitrary_signing_and_duplicate_launch(
 ) -> None:
     core, client = _service(tmp_path)
     executable = tmp_path / "controlled-provider.exe"
-    registered = client.register_provider("codex", executable)
+    registered = client.register_provider("codex", executable, **provider_authority_kwargs())
     registration_id = str(registered["registration_id"])
     client.qualify_provider(registration_id)
     reserved = client.reserve_attempt(
@@ -349,7 +409,7 @@ def test_revoked_launch_generation_invalidates_reserved_attempt(
     core, client = _service(tmp_path)
     executable = tmp_path / "controlled-provider.exe"
     registration_id = str(
-        client.register_provider("codex", executable)["registration_id"]
+        client.register_provider("codex", executable, **provider_authority_kwargs())["registration_id"]
     )
     client.qualify_provider(registration_id)
     launch = _launch_authority(client, "revoked-project")

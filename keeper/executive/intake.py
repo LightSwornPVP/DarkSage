@@ -84,6 +84,26 @@ class ConversationIntake:
         constraints = self._constraints(text)
         if constraints:
             fields["constraints"] = self._value(constraints, "EXPLICIT", 1.0, text)
+        success_criteria = self._success_criteria(text)
+        if success_criteria:
+            fields["success_criteria"] = self._value(
+                success_criteria, "EXPLICIT", 1.0, text
+            )
+        target_audience = self._target_audience(text)
+        if target_audience:
+            fields["target_audience"] = self._value(
+                target_audience, "EXPLICIT", 1.0, text
+            )
+        approved_providers = self._approved_items(text, "providers?")
+        if approved_providers:
+            fields["approved_providers"] = self._value(
+                approved_providers, "EXPLICIT", 1.0, text
+            )
+        approved_tools = self._approved_items(text, "tools?")
+        if approved_tools:
+            fields["approved_tools"] = self._value(
+                approved_tools, "EXPLICIT", 1.0, text
+            )
         if any(marker in lower for marker in ("no spending", "no purchases", "zero budget", "do not spend")):
             fields["budget_policy"] = self._value("spending prohibited", "EXPLICIT", 1.0, text)
             fields["budget_limit"] = self._value(0.0, "EXPLICIT", 1.0, text)
@@ -184,6 +204,46 @@ class ConversationIntake:
             if marker in lower:
                 values.append(value)
         return tuple(values)
+
+    @staticmethod
+    def _success_criteria(text: str) -> tuple[str, ...]:
+        match = re.search(
+            r"success criteria\s*(?:are|:)\s*(.+?)(?:\.\s|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return ()
+        return tuple(
+            item.strip(" .")
+            for item in re.split(r";|,|\band\b", match.group(1))
+            if item.strip(" .")
+        )
+
+    @staticmethod
+    def _target_audience(text: str) -> str | None:
+        match = re.search(
+            r"(?:primary\s+)?(?:user|audience)\s*(?:is|:)\s*([^.;]+)",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else None
+
+    @staticmethod
+    def _approved_items(text: str, item_pattern: str) -> tuple[str, ...]:
+        match = re.search(
+            rf"approved {item_pattern}\s*(?:are|:)\s*(.+?)(?:\.\s|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return ()
+        return tuple(
+            item.strip(" .").casefold()
+            for item in re.split(r",|\band\b", match.group(1))
+            if item.strip(" .")
+        )
+
 
     @staticmethod
     def _delegation(lower: str) -> str | None:
