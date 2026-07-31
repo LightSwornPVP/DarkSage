@@ -6,6 +6,7 @@ import os
 import secrets
 import sys
 import uuid
+from ctypes import wintypes
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,6 +30,20 @@ from keeper.executive.models import (
 APPLICATION_IDENTITY: Final = "KEEPER_EXECUTIVE"
 PROOF_VERSION: Final = 2
 CONFIRMATION_LIFETIME: Final = timedelta(minutes=2)
+ERROR_CANCELLED: Final = 1223
+CREDUIWIN_GENERIC: Final = 0x1
+
+
+class _CREDUI_INFOW(ctypes.Structure):
+    """Native CREDUI_INFOW from the Windows SDK's wincred.h."""
+
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hwndParent", wintypes.HWND),
+        ("pszMessageText", wintypes.LPCWSTR),
+        ("pszCaptionText", wintypes.LPCWSTR),
+        ("hbmBanner", wintypes.HBITMAP),
+    ]
 
 
 class _UnsignedConfirmation(TypedDict):
@@ -150,6 +165,8 @@ class ProductionFounderAuthenticator:
     ) -> ProductionApprovalConfirmation:
         try:
             principal_sid, account_name, logon_session = _credential_ui_logon()
+        except PermissionError:
+            raise
         except OSError as error:
             raise RuntimeError(
                 "Windows Founder authentication is unavailable"
@@ -503,13 +520,16 @@ def _windows_machine_identity() -> str:
 
 def _credential_ui_logon() -> tuple[str, str, str]:
     """Prompt for Windows credentials, validate them, and return token identity."""
-    from ctypes import wintypes
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "Windows Founder authentication requires local Windows APIs"
+        )
 
     credui = ctypes.windll.credui
     advapi = ctypes.windll.advapi32
     kernel = ctypes.windll.kernel32
     credui.CredUIPromptForWindowsCredentialsW.argtypes = [
-        ctypes.c_void_p,
+        ctypes.POINTER(_CREDUI_INFOW),
         wintypes.DWORD,
         ctypes.POINTER(wintypes.ULONG),
         ctypes.c_void_p,
@@ -544,9 +564,20 @@ def _credential_ui_logon() -> tuple[str, str, str]:
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
 
-    package = wintypes.ULONG()
-    output = ctypes.c_void_p()
-    output_size = wintypes.ULONG()
+    caption = ctypes.create_unicode_buffer("Keeper Founder Authentication")
+    message = ctypes.create_unicode_buffer(
+        "Confirm the Windows identity authorized to approve this Keeper action."
+    )
+    ui_info = _CREDUI_INFOW(
+        cbSize=ctypes.sizeof(_CREDUI_INFOW),
+        hwndParent=None,
+        pszMessageText=ctypes.cast(message, wintypes.LPCWSTR),
+        pszCaptionText=ctypes.cast(caption, wintypes.LPCWSTR),
+        hbmBanner=None,
+    )
+    package = wintypes.ULONG(0)
+    output = ctypes.c_void_p(None)
+    output_size = wintypes.ULONG(0)
     save = wintypes.BOOL(False)
     username = ctypes.create_unicode_buffer(512)
     domain = ctypes.create_unicode_buffer(512)
@@ -557,12 +588,25 @@ def _credential_ui_logon() -> tuple[str, str, str]:
     token = wintypes.HANDLE()
     try:
         result = credui.CredUIPromptForWindowsCredentialsW(
-            None, 0, ctypes.byref(package), None, 0, ctypes.byref(output),
-            ctypes.byref(output_size), ctypes.byref(save), 0x1,
+            ctypes.byref(ui_info), 0, ctypes.byref(package), None, 0,
+            ctypes.byref(output), ctypes.byref(output_size),
+            ctypes.byref(save), CREDUIWIN_GENERIC,
         )
-        if result != 0:
+        if result == ERROR_CANCELLED:
             raise PermissionError(
-                "Windows Founder authentication was canceled or failed"
+                "Windows Founder authentication was canceled"
+            )
+        if result != 0:
+            raise OSError(
+                result, "Windows Founder credential prompt failed"
+            )
+        if not output.value:
+            raise OSError(
+                "Windows Founder credential prompt returned no credential buffer"
+            )
+        if output_size.value == 0:
+            raise OSError(
+                "Windows Founder credential prompt returned an empty credential buffer"
             )
         if not credui.CredUnPackAuthenticationBufferW(
             0, output, output_size, username, ctypes.byref(username_size),
