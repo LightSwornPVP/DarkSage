@@ -81,7 +81,7 @@ it contains no state and is not a second database-plus-file commit protocol. Man
 same-user replacement of the database outside this workflow remains outside the
 Keeper 1.0 personal-use threat model.
 
-The source candidate uses Authority protocol 3 and schema 5. This repair does not
+The source candidate uses Authority protocol 5 and schema 5. This repair does not
 install, restart, or update the Windows service. A separately authorized release or
 installation step must deploy the matching KeeperAuthority build before production
 restore can use the fence operations; an older installed service fails the protocol

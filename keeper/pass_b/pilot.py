@@ -1185,6 +1185,7 @@ def _reserve_authority_attempt(
         timeout_seconds=60,
         reasoning_level="medium",
         environment={},
+        provider_input_required=assignment.role == AssignmentRole.REVIEWER,
         launch_authorization_id=launch_authorization["id"],
         authorization_generation=launch_authorization[
             "authorization_generation"

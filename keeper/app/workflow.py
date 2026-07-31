@@ -1546,12 +1546,16 @@ class WorkflowCoordinator:
                 + os.pathsep
                 + provider_environment.get("PATH", "")
             )
+            authority_role = {
+                "reviewer": "executive_reviewer",
+                "post_repair_reviewer": "executive_post_repair_reviewer",
+            }.get(str(event["role"]), str(event["role"]))
             reservation = self.authority.reserve_attempt(
                 registration_id=str(registration["trusted_registration_id"]),
                 keeper_run_id=run_id,
                 task_id=str(event["task_id"]),
                 stage_id=str(event["stage_id"]),
-                role=str(event["role"]),
+                role=authority_role,
                 attempt_number=int(latest_route["attempt_number"]),
                 provider_run_id=provider_run_id,
                 provider_instance_id=str(event["provider_instance_id"]),
@@ -1563,6 +1567,7 @@ class WorkflowCoordinator:
                 timeout_seconds=int(event["timeout_seconds"]),
                 reasoning_level=str(event["reasoning_level"]),
                 environment=provider_environment,
+                provider_input_required=False,
             )
             authority_attempt = reservation.get("attempt")
             authority_attempt_id = reservation.get("attempt_id")
@@ -1589,6 +1594,7 @@ class WorkflowCoordinator:
                     "authority_launch_challenge": authority_attempt.get(
                         "launch_challenge"
                     ),
+                    "authority_role": authority_role,
                     "status": "EXECUTION_RESERVED",
                 }
             )
@@ -1791,7 +1797,7 @@ class WorkflowCoordinator:
             "keeper_run_id": run.get("id"),
             "task_id": attempt.get("task_id"),
             "stage_id": attempt.get("stage_id"),
-            "role": attempt.get("role"),
+            "role": attempt.get("authority_role", attempt.get("role")),
             "attempt_number": attempt.get("attempt_number"),
             "provider_run_id": attempt.get("provider_run_id"),
             "provider_instance_id": attempt.get("provider_instance_id"),

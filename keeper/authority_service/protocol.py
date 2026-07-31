@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any, Callable
 
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 MAX_MESSAGE_BYTES = 1_048_576
 REQUEST_FIELDS = frozenset(
     {

@@ -33,7 +33,7 @@
 - The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
   attempt histories require a future paged signed-snapshot/fence protocol.
-- This source candidate requires KeeperAuthority protocol 3 and schema 5. The repair
+- This source candidate requires KeeperAuthority protocol 5 and schema 5. The repair
   does not install or restart the Windows service; the currently installed older
   service must be upgraded only by a separately authorized installation/release step.
 - Keeper 1.0 is a personal-use, single-Founder product. It does not claim to

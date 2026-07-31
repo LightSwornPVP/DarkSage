@@ -811,6 +811,13 @@ class OrchestrationService:
             self.validate_evidence_reference(item, assignment_id)
             for item in evidence_reference_ids
         )
+        if (
+            assignment.role == AssignmentRole.REVIEWER
+            and not references
+        ):
+            raise PermissionError(
+                "reviewer launch requires a nonempty durable evidence set"
+            )
         adapter = self.adapters.get(assignment.provider_id)
         if adapter is None:
             raise RuntimeError("assignment provider adapter is unavailable")
@@ -1319,13 +1326,9 @@ class OrchestrationService:
                 and "review_input_declaration" in artifact
             ]
             if delivered_input is None:
-                if (
-                    attempt.delivered_input_id is not None
-                    or declaration_artifacts
-                ):
-                    errors.append(
-                        "reviewer evidence has an invalid delivered-input binding"
-                    )
+                errors.append(
+                    "reviewer evidence has an invalid delivered-input binding"
+                )
             elif (
                 evidence.delivered_input_id
                 != delivered_input.delivered_input_id

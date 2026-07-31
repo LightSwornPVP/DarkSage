@@ -24,6 +24,7 @@ from keeper.evidence_input import (
     validate_provider_input,
 )
 from keeper.executive.founder_capability import TestFounderCapabilityVerifier
+from keeper.pass_b.launch_authority import ExecutiveAuthorityLaunchGate
 from keeper.pass_b.models import (
     AttemptRecord,
     DeliveredInputRecord,
@@ -429,6 +430,8 @@ class _CapturingPilotObserver(_PilotAuthorityObserver):
 
 def _authority_bound_reviewer(
     tmp_path: Path,
+    *,
+    bind_input: bool = True,
 ) -> tuple[
     AuthorityServiceCore,
     TestAuthorityServiceClient,
@@ -529,14 +532,15 @@ def _authority_bound_reviewer(
             authorization_generation=1,
         )
     )
-    bound = client.bind_provider_input(
-        attempt_id,
-        provider_input,
-        provider_digest,
-        delivered_digest,
-        str(provider_input["manifest_digest"]),
-    )
-    assert bound["attempt"]["service_state"] == "INPUT_BOUND"
+    if bind_input:
+        bound = client.bind_provider_input(
+            attempt_id,
+            provider_input,
+            provider_digest,
+            delivered_digest,
+            str(provider_input["manifest_digest"]),
+        )
+        assert bound["attempt"]["service_state"] == "INPUT_BOUND"
     return core, client, observer, attempt_id, provider_input, provider_digest
 
 
@@ -607,3 +611,152 @@ def test_authority_input_cannot_be_rebound_or_omitted(
     assert client.query_state("attempts", attempt_id)["record"][
         "provider_input_digest"
     ] == provider_digest
+
+
+def test_reviewer_launch_without_durable_evidence_rejects_before_adapter(
+    tmp_path: Path,
+) -> None:
+    service, provider, _, _, _, _ = _typed_reference_stack(tmp_path)
+    reference = service.repository.list(EvidenceReferenceRecord)[0]
+    reviewer = service.repository.assignment_launch_binding(
+        reference.assignment_id
+    )[2]
+    capture = _CaptureAdapter(provider.provider_id)
+    service.adapters[provider.provider_id] = capture
+    workspace = tmp_path / "empty-reviewer"
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "empty-reviewer"
+    )
+
+    with pytest.raises(PermissionError, match="nonempty durable evidence"):
+        service.run_assignment(
+            reviewer.assignment_id,
+            workspace,
+            authority_attempt_id=authority_id,
+            global_context={},
+            task_context={"objective": "review without evidence"},
+            evidence_reference_ids=(),
+            side_effect_class="READ_ONLY_REVIEW",
+        )
+
+    assert capture.last_request is None
+    assert not [
+        attempt
+        for attempt in service.repository.list(AttemptRecord)
+        if attempt.assignment_id == reviewer.assignment_id
+    ]
+
+
+def test_reviewer_evidence_without_delivered_input_is_rejected(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _, evidence, _ = _completed_typed_review(
+        tmp_path, reference_count=1
+    )
+    attempt = service.repository.get(AttemptRecord, evidence.attempt_id)
+    service.repository.replace(
+        replace(
+            attempt,
+            delivered_input_id=None,
+            delivered_input_digest=None,
+            provider_input_digest=None,
+            updated_at=datetime.now(UTC).isoformat(),
+            revision=attempt.revision + 1,
+        ),
+        expected_revision=attempt.revision,
+    )
+    artifacts = tuple(
+        {
+            key: value
+            for key, value in artifact.items()
+            if key != "review_input_declaration"
+        }
+        for artifact in evidence.artifacts
+    )
+    unbound = replace(
+        evidence,
+        artifacts=artifacts,
+        content_digest=evidence_content_digest(
+            project_id=evidence.project_id,
+            assignment_id=evidence.assignment_id,
+            attempt_id=evidence.attempt_id,
+            producer_provider_id=evidence.producer_provider_id,
+            producer_session_id=evidence.producer_session_id,
+            schema_version=evidence.schema_version,
+            artifacts=artifacts,
+            summary=evidence.summary,
+        ),
+        state="UNTRUSTED",
+        validation_errors=(),
+        delivered_input_id=None,
+        delivered_input_digest=None,
+        provider_input_digest=None,
+        updated_at=datetime.now(UTC).isoformat(),
+        revision=evidence.revision + 1,
+    )
+    service.repository.replace(unbound, expected_revision=evidence.revision)
+
+    rejected = service.validate_evidence(
+        evidence.evidence_bundle_id, tmp_path / "reviewer"
+    )
+    assert rejected.state == "REJECTED"
+    assert "reviewer evidence has an invalid delivered-input binding" in (
+        rejected.validation_errors
+    )
+
+
+def test_authority_reserved_reviewer_cannot_execute_without_bound_input(
+    tmp_path: Path,
+) -> None:
+    _, client, observer, attempt_id, _, _ = _authority_bound_reviewer(
+        tmp_path, bind_input=False
+    )
+    assert client.query_state("attempts", attempt_id)["record"][
+        "service_state"
+    ] == "RESERVED"
+
+    with pytest.raises(PermissionError, match="input-bound"):
+        client.execute_provider(attempt_id)
+    with pytest.raises(PermissionError, match="Authority-bound"):
+        client.record_provider_start(attempt_id, 7777)
+
+    assert observer.executed_attempt is None
+    assert client.query_state("attempts", attempt_id)["record"][
+        "service_state"
+    ] == "RESERVED"
+
+    restarted_core = AuthorityServiceCore(
+        tmp_path / "authority",
+        observer=cast(TrustedObserver, observer),
+        founder_capability_verifier=TestFounderCapabilityVerifier(),
+    )
+    restarted_client = TestAuthorityServiceClient(
+        lambda request: restarted_core.dispatch(
+            request, "S-1-5-21-TYPED-INPUT"
+        )
+    )
+    with pytest.raises(PermissionError, match="input-bound"):
+        restarted_client.execute_provider(attempt_id)
+    assert observer.executed_attempt is None
+
+
+def test_production_reviewer_context_cannot_be_omitted(
+    tmp_path: Path,
+) -> None:
+    service, _, reviewer, _, _, _ = _completed_typed_review(
+        tmp_path, reference_count=1
+    )
+    capture = cast(_CaptureAdapter, service.adapters[reviewer.provider_id])
+    request = capture.last_request
+    authorization = service.launch_authority.last_launch_authorization
+    assert request is not None
+    assert authorization is not None
+    omitted_context = dict(request.task_context)
+    omitted_context.pop("keeper_provider_input", None)
+    omitted_context.pop("keeper_provider_input_digest", None)
+    omitted = replace(request, task_context=omitted_context)
+
+    with pytest.raises(PermissionError, match="provider input was omitted"):
+        ExecutiveAuthorityLaunchGate._validate_production_evidence_delivery(
+            authorization, omitted
+        )

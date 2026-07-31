@@ -464,7 +464,10 @@ class ExecutiveAuthorityLaunchGate:
             "keeper_provider_input_digest"
         )
         if provider_input is None:
-            if authorization.provider_input is not None:
+            if (
+                request.role.casefold() == "reviewer"
+                or authorization.provider_input is not None
+            ):
                 raise PermissionError("reserved provider input was omitted")
             return
         try:
@@ -719,6 +722,13 @@ class TestLaunchAuthority:
         adapter: ProviderAdapter,
     ) -> AdapterResult:
         self.last_launch_authorization = authorization
+        if (
+            request.role.casefold() == "reviewer"
+            and authorization.provider_input is None
+        ):
+            raise PermissionError(
+                "reviewer launch requires Authority-bound provider input"
+            )
         if request.task_context.get("keeper_provider_input") != (
             authorization.provider_input
         ) or request.task_context.get("keeper_provider_input_digest") != (

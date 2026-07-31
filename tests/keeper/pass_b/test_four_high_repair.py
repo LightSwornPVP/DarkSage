@@ -832,12 +832,15 @@ def test_reviewer_parent_revalidated_immediately_before_adapter(
     tmp_path: Path,
 ) -> None:
     _, service, _, provider, account, _, sessions, adapter = _stack(tmp_path)
-    reviewer = _assignment(
-        service,
-        provider,
-        account,
-        sessions[0],
-        role=AssignmentRole.REVIEWER,
+    _, _, evidence_run = _protected_tree(tmp_path)
+    source_artifact = evidence_run / "source.json"
+    source_artifact.write_bytes(b'{"validated":true}\n')
+    reviewer, source = _reviewer_with_validated_source(
+        service, provider, account, sessions, tmp_path, "parent-race"
+    )
+    reference = service.create_local_evidence_reference(
+        reviewer.assignment_id, source_artifact,
+        source_evidence_bundle_id=source.evidence_bundle_id,
     )
     workspace = tmp_path / "reviewer-parent"
     workspace.mkdir()
@@ -860,6 +863,7 @@ def test_reviewer_parent_revalidated_immediately_before_adapter(
         snapshot["bytes"] = artifact.read_bytes()
         snapshot["mtime_ns"] = artifact.stat().st_mtime_ns
 
+    launched_before = adapter.health()["launched"]
     with pytest.raises(PermissionError, match="pilot evidence"):
         service.run_assignment(
             reviewer.assignment_id,
@@ -867,9 +871,10 @@ def test_reviewer_parent_revalidated_immediately_before_adapter(
             authority_attempt_id=authority_id,
             global_context={},
             task_context={},
+            evidence_reference_ids=(reference.evidence_reference_id,),
             after_launch_claim=expose_protected_evidence,
         )
-    assert adapter.health()["launched"] == 0
+    assert adapter.health()["launched"] == launched_before
     assert artifact.read_bytes() == snapshot["bytes"]
     assert artifact.stat().st_mtime_ns == snapshot["mtime_ns"]
 
@@ -1089,9 +1094,26 @@ def test_normal_writer_and_reviewer_workspaces_remain_usable(
         _, service, _, provider, account, _, sessions, adapter = _stack(
             tmp_path / str(index)
         )
-        assignment = _assignment(
-            service, provider, account, sessions[0], role=role
-        )
+        reference_ids: tuple[str, ...] = ()
+        if role == AssignmentRole.REVIEWER:
+            root = tmp_path / str(index)
+            _, _, evidence_run = _protected_tree(root)
+            artifact = evidence_run / "normal-source.json"
+            artifact.write_bytes(b'{"validated":true}\n')
+            assignment, source = _reviewer_with_validated_source(
+                service, provider, account, sessions, root, "normal-reviewer"
+            )
+            reference = service.create_local_evidence_reference(
+                assignment.assignment_id,
+                artifact,
+                source_evidence_bundle_id=source.evidence_bundle_id,
+            )
+            reference_ids = (reference.evidence_reference_id,)
+        else:
+            assignment = _assignment(
+                service, provider, account, sessions[0], role=role
+            )
+        launched_before = adapter.health()["launched"]
         workspace = tmp_path / str(index) / "isolated"
         _, authority_id = _launch_ready(
             service, assignment, workspace, f"normal-{index}"
@@ -1102,6 +1124,7 @@ def test_normal_writer_and_reviewer_workspaces_remain_usable(
             authority_attempt_id=authority_id,
             global_context={},
             task_context={},
+            evidence_reference_ids=reference_ids,
         )
         assert result.assignment_id == assignment.assignment_id
-        assert adapter.health()["launched"] == 1
+        assert adapter.health()["launched"] == launched_before + 1

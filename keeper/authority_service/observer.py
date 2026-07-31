@@ -199,11 +199,15 @@ class ServiceProviderObserver:
                 )
             )
         role = str(attempt["role"])
+        schema_role = {
+            "executive_reviewer": "reviewer",
+            "executive_post_repair_reviewer": "post_repair_reviewer",
+        }.get(role.casefold(), role)
 
         def provider_output_schema() -> dict[str, Any]:
             from keeper.providers.adapters import _domain_schema
 
-            schema = _domain_schema(role)
+            schema = _domain_schema(schema_role)
             if provider_input is None or role.casefold() != "reviewer":
                 return schema
             properties = schema.get("properties")

@@ -623,7 +623,12 @@ class AuthorityServiceCore:
             "founder_authenticated_session_id",
             "founder_principal_sid",
         }
-        _exact(payload, fields)
+        optional_fields = fields | {"provider_input_required"}
+        if set(payload) not in {
+            frozenset(fields),
+            frozenset(optional_fields),
+        }:
+            raise ValueError("authority operation payload fields are invalid")
         registration_id = _text(payload["registration_id"], "registration ID")
         registration = self.store.get("registrations", registration_id)
         if registration is None or registration.pop("service_state", None) != "QUALIFIED":
@@ -659,6 +664,19 @@ class AuthorityServiceCore:
             raise PermissionError(
                 "attempt launch authorization generation is invalid"
             )
+        role = _text(payload["role"], "role")
+        stage_id = _text(payload["stage_id"], "stage ID")
+        provider_input_required_value = payload.get("provider_input_required")
+        if provider_input_required_value is None:
+            provider_input_required = role.casefold() == "reviewer"
+        elif type(provider_input_required_value) is not bool:
+            raise ValueError(
+                "authority provider input requirement is invalid"
+            )
+        else:
+            provider_input_required = provider_input_required_value
+        if role.casefold() == "reviewer" and not provider_input_required:
+            raise PermissionError("reviewer provider input cannot be optional")
         attempt_id = (
             f"provider-attempt:{_text(payload['keeper_run_id'], 'run ID')}:"
             f"{_text(payload['provider_run_id'], 'provider run ID')}"
@@ -674,8 +692,8 @@ class AuthorityServiceCore:
                 "registration_digest": registration["configuration_digest"],
                 "keeper_run_id": payload["keeper_run_id"],
                 "task_id": _text(payload["task_id"], "task ID"),
-                "stage_id": _text(payload["stage_id"], "stage ID"),
-                "role": _text(payload["role"], "role"),
+                "stage_id": stage_id,
+                "role": role,
                 "attempt_number": _positive_int(
                     payload["attempt_number"], "attempt number"
                 ),
@@ -704,6 +722,7 @@ class AuthorityServiceCore:
                     {"low", "medium", "high", "extra-high"},
                 ),
                 "environment": _safe_environment(payload["environment"]),
+                "provider_input_required": provider_input_required,
                 "launch_challenge": challenge,
                 "authorized_client_sid": client_sid,
                 "reserved_at": _now(),
@@ -869,18 +888,32 @@ class AuthorityServiceCore:
         if attempt is None:
             raise PermissionError("provider launch is not reserved")
         state = attempt.pop("service_state", None)
+        provider_input = attempt.get("provider_input")
+        input_binding_valid = False
+        if state == "INPUT_BOUND" and isinstance(provider_input, dict):
+            try:
+                validated_input = validate_provider_input(provider_input)
+            except ValueError:
+                pass
+            else:
+                input_binding_valid = (
+                    self.keys.verify("provider-input-binding", attempt)
+                    and structured_digest(validated_input)
+                    == attempt.get("provider_input_digest")
+                    and validated_input["delivered_input_digest"]
+                    == attempt.get("delivered_input_digest")
+                    and validated_input["manifest_digest"]
+                    == attempt.get("manifest_digest")
+                )
         if (
             state not in {"RESERVED", "INPUT_BOUND"}
             or (
+                _provider_input_is_required(attempt)
+                and state != "INPUT_BOUND"
+            )
+            or (
                 state == "INPUT_BOUND"
-                and (
-                    not self.keys.verify(
-                        "provider-input-binding", attempt
-                    )
-                    or not isinstance(attempt.get("provider_input"), dict)
-                    or structured_digest(attempt["provider_input"])
-                    != attempt.get("provider_input_digest")
-                )
+                and not input_binding_valid
             )
         ):
             raise PermissionError(
@@ -1021,7 +1054,7 @@ class AuthorityServiceCore:
         state = attempt.pop("service_state", None)
         if state not in {"RESERVED", "INPUT_BOUND"}:
             raise PermissionError("provider launch is not reserved")
-        if state == "INPUT_BOUND":
+        if _provider_input_is_required(attempt):
             raise PermissionError(
                 "typed reviewer execution must use Authority-bound provider input"
             )
@@ -1559,6 +1592,15 @@ class AuthorityServiceCore:
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
         raise PermissionError("qualification finalization is service-internal")
+
+
+def _provider_input_is_required(attempt: dict[str, Any]) -> bool:
+    value = attempt.get("provider_input_required")
+    if value is None:
+        return str(attempt.get("role", "")).casefold() == "reviewer"
+    if type(value) is not bool:
+        raise PermissionError("provider input requirement is invalid")
+    return value
 
 
 def _exact(payload: dict[str, Any], fields: set[str]) -> None:

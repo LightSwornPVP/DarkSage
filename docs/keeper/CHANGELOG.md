@@ -12,7 +12,7 @@
 - Add a signed, bounded, project-scoped KeeperAuthority reconciliation fence. Covered
   attempt and launch-authority mutations are blocked until compare-and-confirm and
   live replacement complete; expiry and interruption require explicit conservative
-  recovery. Executive schema 10, Authority schema 5, and Authority protocol 3 carry
+  recovery. Executive schema 10, Authority schema 5, and Authority protocol 5 carry
   the new maintenance and fence state.
 
 ## 0.5.9
