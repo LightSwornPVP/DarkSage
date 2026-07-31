@@ -30,6 +30,9 @@ class ProductViewModel:
     project_title: str
     project_status: str
     charter_revision: int | None
+    project_catalog: tuple[dict[str, Any], ...]
+    charter_detail: dict[str, Any]
+    controls: tuple[str, ...]
     composition: str
     timeline: tuple[TimelineItem, ...]
     project_cards: tuple[dict[str, Any], ...]
@@ -53,6 +56,8 @@ def build_product_view(
     conversation = _mapping(snapshot.get("conversation"))
     control = _mapping(snapshot.get("control_room"))
     project = _mapping(snapshot.get("project"))
+    executive = _mapping(snapshot.get("executive"))
+    executive_project = _mapping(executive.get("project_summary"))
     providers = _mapping(snapshot.get("providers"))
     safety = _mapping(snapshot.get("safety"))
     sage = _mapping(snapshot.get("presentation"))
@@ -66,16 +71,27 @@ def build_product_view(
     )
     proposal = _mapping(conversation.get("charter_proposal"))
     intake = _mapping(proposal.get("intake"))
+    active_charter = _mapping(executive.get("active_charter"))
+    proposed_charter = _mapping(intake.get("__charter__"))
+    charter_detail = active_charter or proposed_charter
     project_id = _optional_text(
-        project.get("project_id") or proposal.get("project_id")
+        executive_project.get("project_id")
+        or project.get("project_id")
+        or proposal.get("project_id")
     )
     project_title = str(
-        intake.get("title")
+        executive_project.get("name")
+        or charter_detail.get("title")
+        or intake.get("title")
         or intake.get("project_name")
         or project_id
         or "No active project"
     )
-    project_status = str(proposal.get("state") or "NOT_STARTED")
+    project_status = str(
+        executive_project.get("state")
+        or proposal.get("state")
+        or "NOT_STARTED"
+    )
 
     timeline: list[TimelineItem] = []
     for message in _rows(conversation.get("messages")):
@@ -151,11 +167,46 @@ def build_product_view(
             "title": project_title,
             "status": project_status,
             "project_id": project_id,
-            "charter_revision": project.get("charter_revision"),
-            "goals": tuple(intake.get("goals") or intake.get("objectives") or ()),
-            "exclusions": tuple(intake.get("exclusions") or ()),
+            "charter_revision": (
+                charter_detail.get("revision")
+                or project.get("charter_revision")
+            ),
+            "goals": tuple(
+                charter_detail.get("deliverables")
+                or intake.get("goals")
+                or intake.get("objectives")
+                or ()
+            ),
+            "exclusions": tuple(
+                charter_detail.get("non_goals")
+                or intake.get("exclusions")
+                or ()
+            ),
+            "constraints": tuple(charter_detail.get("constraints") or ()),
+            "budget_limit": charter_detail.get("budget_limit"),
+            "budget_currency": charter_detail.get("budget_currency"),
+            "approved_providers": tuple(
+                charter_detail.get("approved_providers") or ()
+            ),
+            "approved_tools": tuple(
+                charter_detail.get("approved_tools") or ()
+            ),
+            "workspaces": tuple(charter_detail.get("workspaces") or ()),
+            "data_classifications": tuple(
+                _mapping(charter_detail.get("authority_envelope")).get(
+                    "data_classifications"
+                )
+                or ()
+            ),
+            "delegation_mode": charter_detail.get("delegation_mode"),
+            "unresolved_questions": tuple(
+                charter_detail.get("unresolved_questions") or ()
+            ),
             "progress": _progress(work_items),
-            "last_activity": proposal.get("updated_at"),
+            "last_activity": (
+                executive_project.get("updated_at")
+                or proposal.get("updated_at")
+            ),
         },
     ) if project_id else ()
 
@@ -293,7 +344,13 @@ def build_product_view(
         project_id=project_id,
         project_title=project_title,
         project_status=project_status,
-        charter_revision=_optional_int(project.get("charter_revision")),
+        charter_revision=_optional_int(
+            charter_detail.get("revision")
+            or project.get("charter_revision")
+        ),
+        project_catalog=tuple(_rows(snapshot.get("projects"))),
+        charter_detail=charter_detail,
+        controls=tuple(str(item) for item in executive.get("controls", ())),
         composition=composition,
         timeline=tuple(timeline),
         project_cards=project_cards,

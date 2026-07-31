@@ -74,7 +74,15 @@ class ControlRoomService:
             AssignmentRecord, project_id=project_id
         )
         work_items = self.repository.list(WorkItemRecord, project_id=project_id)
-        attempts = self.repository.list(AttemptRecord)
+        assignment_ids = {
+            item.assignment_id for item in assignments
+        }
+        attempts = [
+            item
+            for item in self.repository.list(AttemptRecord)
+            if project_id is None
+            or item.assignment_id in assignment_ids
+        ]
         reviews = self.repository.list(ReviewRecord, project_id=project_id)
         evidence = self.repository.list(
             EvidenceBundleRecord, project_id=project_id
@@ -86,8 +94,15 @@ class ControlRoomService:
             WorkspaceReservationRecord, project_id=project_id
         )
         writes = self.repository.list(WriteReservationRecord)
-        pauses = self.repository.list(PauseReasonRecord)
-        checkpoints = self.repository.list(ResumeCheckpointRecord)
+        pauses = [
+            item
+            for item in self.repository.list(PauseReasonRecord)
+            if project_id is None
+            or item.assignment_id in assignment_ids
+        ]
+        checkpoints = self.repository.list(
+            ResumeCheckpointRecord, project_id=project_id
+        )
         messages = self.repository.list(
             ConversationMessageRecord, project_id=project_id
         )

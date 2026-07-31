@@ -7,10 +7,16 @@ from typing import Any, Protocol
 
 from keeper.app.storage import KeeperStore, default_data_directory
 from keeper.authority_service.client import ProductionAuthorityServiceClient
+from keeper.executive.models import (
+    FounderApprovalChallenge,
+    ProjectCharter,
+)
 from keeper.executive.service import KeeperExecutive
 from keeper.pass_b.control_room import ControlRoomService
 from keeper.pass_b.conversation import (
+    CharterDraftContextRecord,
     ConversationExecutive,
+    DynamicWorkflowDesigner,
     ProjectStatusReader,
 )
 from keeper.pass_b.conversation_runtime import DurableConversationService
@@ -34,7 +40,10 @@ from keeper.pass_b.launch_authority import (
     ExecutiveAuthorityLaunchGate,
     LaunchAuthority,
 )
-from keeper.pass_b.orchestration import OrchestrationService
+from keeper.pass_b.orchestration import (
+    OrchestrationService,
+    authority_envelope_digest,
+)
 from keeper.pass_b.providers import LocalMockAdapter, ProviderAdapter
 from keeper.pass_b.repository import PassBRepository
 from keeper.pass_b.usage_authority import (
@@ -141,7 +150,201 @@ class PassBApplication:
         )
 
     def begin_conversation(self, message: str) -> Any:
-        return self.conversation.begin(message)
+        outcome = self.conversation.begin(message)
+        self.select_project(outcome.project.project_id)
+        return outcome
+
+    def project_catalog(self) -> tuple[dict[str, Any], ...]:
+        project_ids = tuple(
+            dict.fromkeys(
+                item.project_id
+                for item in self.repository.list(CharterDraftContextRecord)
+            )
+        )
+        catalog: list[dict[str, Any]] = []
+        for project_id in project_ids:
+            try:
+                status = self.project_status(project_id)
+            except (KeyError, PermissionError, RuntimeError, ValueError):
+                catalog.append(
+                    {
+                        "project_id": project_id,
+                        "title": project_id,
+                        "state": "RECOVERY_REQUIRED",
+                        "charter_id": None,
+                        "charter_revision": None,
+                        "updated_at": None,
+                    }
+                )
+                continue
+            project = dict(status.get("project_summary") or {})
+            charter = dict(status.get("active_charter") or {})
+            catalog.append(
+                {
+                    "project_id": project_id,
+                    "title": project.get("name") or project_id,
+                    "state": project.get("state") or "UNKNOWN",
+                    "charter_id": charter.get("charter_id"),
+                    "charter_revision": charter.get("revision"),
+                    "updated_at": project.get("updated_at"),
+                }
+            )
+        return tuple(catalog)
+
+    def selected_project_id(self) -> str | None:
+        setting = self.store.get("settings", "pass_b_active_project")
+        selected = (
+            str(setting.get("project_id"))
+            if isinstance(setting, dict) and setting.get("project_id")
+            else None
+        )
+        if selected is None:
+            return None
+        if any(
+            item["project_id"] == selected for item in self.project_catalog()
+        ):
+            return selected
+        return None
+
+    def select_project(self, project_id: str) -> None:
+        if not any(
+            item["project_id"] == project_id
+            for item in self.project_catalog()
+        ):
+            raise KeyError("Keeper project is unavailable")
+        self.store.upsert(
+            "settings",
+            "pass_b_active_project",
+            {"project_id": project_id},
+        )
+
+    def product_snapshot(
+        self, project_id: str | None = None
+    ) -> dict[str, Any]:
+        catalog = self.project_catalog()
+        selected = project_id or self.selected_project_id()
+        if selected is None and catalog:
+            selected = str(
+                max(
+                    catalog,
+                    key=lambda item: str(item.get("updated_at") or ""),
+                )["project_id"]
+            )
+            self.select_project(selected)
+        snapshot = self.control_room.snapshot(selected).to_dict()
+        snapshot["projects"] = list(catalog)
+        if selected is None:
+            snapshot["executive"] = {}
+        else:
+            try:
+                snapshot["executive"] = self.project_status(selected)
+            except (KeyError, PermissionError, RuntimeError, ValueError):
+                snapshot["executive"] = {
+                    "project_summary": {
+                        "project_id": selected,
+                        "name": selected,
+                        "state": "RECOVERY_REQUIRED",
+                    },
+                    "active_charter": None,
+                    "charter_history": (),
+                    "controls": (),
+                    "blockers": (
+                        "Authoritative project state is unavailable; "
+                        "preserve data and use supported recovery.",
+                    ),
+                }
+        return snapshot
+
+    def approve_and_plan_current_charter(
+        self, project_id: str
+    ) -> dict[str, Any]:
+        if type(self.executive) is not KeeperExecutive:
+            raise RuntimeError(
+                "Founder approval requires the production Executive composition"
+            )
+        context = self.conversation.current_context(project_id)
+        status = self.project_status(project_id)
+        durable_charters = [
+            item
+            for item in (
+                status.get("active_charter"),
+                *status.get("charter_history", ()),
+            )
+            if isinstance(item, dict)
+            and item.get("project_id") == project_id
+            and item.get("charter_id") == context.charter_id
+            and item.get("revision") == context.charter_revision
+            and item.get("status") in {"APPROVED", "ACTIVE"}
+            and item.get("founder_approval_record_id")
+            and item.get("founder_authorization_capability_digest")
+        ]
+        if durable_charters:
+            charter = ProjectCharter.from_dict(durable_charters[0])
+            if charter.status == "APPROVED":
+                self.executive.activate_charter(charter)
+                active = self.project_status(project_id).get(
+                    "active_charter"
+                )
+                if not isinstance(active, dict):
+                    raise RuntimeError(
+                        "approved charter activation was not durable"
+                    )
+                charter = ProjectCharter.from_dict(active)
+            if context.state != "APPROVED":
+                self.conversation.record_approval(charter)
+        elif context.state == "APPROVED":
+            raise PermissionError("active charter is unavailable")
+        else:
+            if context.state == "PROPOSED":
+                challenge = self.conversation.request_approval(project_id)
+            elif context.state == "APPROVAL_REQUESTED":
+                status = self.project_status(project_id)
+                pending = [
+                    item
+                    for item in status.get("pending_approvals", ())
+                    if isinstance(item, dict)
+                    and item.get("project_id") == project_id
+                    and item.get("charter_id") == context.charter_id
+                    and item.get("charter_revision")
+                    == context.charter_revision
+                ]
+                if len(pending) != 1:
+                    raise PermissionError(
+                        "exact pending Founder approval is unavailable"
+                    )
+                challenge = FounderApprovalChallenge.from_dict(pending[0])
+            else:
+                raise PermissionError(
+                    "current charter is not available for approval"
+                )
+            confirmation = self.executive.authenticate_founder(challenge)
+            charter, approval, event = (
+                self.executive.confirm_charter_approval(
+                    challenge.challenge_id, confirmation
+                )
+            )
+            project = self.executive.activate_charter(charter)
+            self.conversation.record_approval(charter)
+            if (
+                approval.project_id != project.project_id
+                or event.project_id != project.project_id
+            ):
+                raise RuntimeError("Founder approval activation binding failed")
+
+        blueprint = DynamicWorkflowDesigner().design(charter)
+        workflow, work_items = self.orchestration.create_workflow_plan(
+            blueprint,
+            authority_envelope_digest=authority_envelope_digest(
+                charter.authority_envelope.to_dict()
+            ),
+        )
+        self.select_project(project_id)
+        return {
+            "project_id": project_id,
+            "charter": charter.to_dict(),
+            "workflow": workflow.to_dict(),
+            "work_items": [item.to_dict() for item in work_items],
+        }
 
     def register_local_mock(
         self,

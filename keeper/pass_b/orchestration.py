@@ -16,6 +16,7 @@ from keeper.evidence_input import (
     validate_provider_input,
     validate_review_input_declaration,
 )
+from keeper.pass_b.conversation import WorkflowBlueprint
 from keeper.pass_b.enums import (
     AssignmentRole,
     AssignmentState,
@@ -209,6 +210,170 @@ class OrchestrationService:
         )
         self.repository.insert_workflow(record)
         return record
+
+    def create_workflow_plan(
+        self,
+        blueprint: WorkflowBlueprint,
+        *,
+        authority_envelope_digest: str,
+    ) -> tuple[WorkflowRecord, tuple[WorkItemRecord, ...]]:
+        """Create one complete current-charter plan in a single transaction."""
+
+        self._require_current_charter(
+            blueprint.project_id,
+            blueprint.charter_id,
+            blueprint.charter_revision,
+            authority_envelope_digest,
+        )
+        existing = [
+            item
+            for item in self.repository.list(
+                WorkflowRecord, project_id=blueprint.project_id
+            )
+            if item.charter_id == blueprint.charter_id
+            and item.charter_revision == blueprint.charter_revision
+        ]
+        if existing:
+            if len(existing) != 1:
+                raise RuntimeError(
+                    "current charter has multiple durable workflows"
+                )
+            workflow = existing[0]
+            items = tuple(
+                item
+                for item in self.repository.list(
+                    WorkItemRecord, project_id=blueprint.project_id
+                )
+                if item.workflow_id == workflow.workflow_id
+            )
+            by_title = {item.title: item for item in items}
+            if (
+                workflow.strategy != blueprint.strategy
+                or workflow.authority_envelope_digest
+                != authority_envelope_digest
+                or len(by_title) != len(blueprint.steps)
+                or any(
+                    step.title not in by_title
+                    or by_title[step.title].objective != step.objective
+                    or by_title[step.title].required_roles != (step.role,)
+                    or by_title[step.title].dependencies
+                    != tuple(
+                        by_title[dependency].work_item_id
+                        for dependency in step.dependencies
+                        if dependency in by_title
+                    )
+                    or any(
+                        dependency not in by_title
+                        for dependency in step.dependencies
+                    )
+                    for step in blueprint.steps
+                )
+            ):
+                raise PermissionError(
+                    "durable workflow differs from the current charter plan"
+                )
+            return workflow, tuple(
+                by_title[step.title] for step in blueprint.steps
+            )
+
+        now = self._now()
+        workflow_id = uuid.uuid4().hex
+        workflow = WorkflowRecord(
+            workflow_id=workflow_id,
+            project_id=blueprint.project_id,
+            charter_id=blueprint.charter_id,
+            charter_revision=blueprint.charter_revision,
+            strategy=blueprint.strategy,
+            authority_envelope_digest=authority_envelope_digest,
+            state=WorkflowState.ACTIVE,
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        item_ids = {
+            step.title: uuid.uuid4().hex for step in blueprint.steps
+        }
+        if len(item_ids) != len(blueprint.steps):
+            raise ValueError("workflow step titles must be unique")
+        try:
+            items = tuple(
+                WorkItemRecord(
+                    work_item_id=item_ids[step.title],
+                    project_id=blueprint.project_id,
+                    charter_id=blueprint.charter_id,
+                    charter_revision=blueprint.charter_revision,
+                    workflow_id=workflow_id,
+                    title=step.title,
+                    objective=step.objective,
+                    dependencies=tuple(
+                        item_ids[dependency]
+                        for dependency in step.dependencies
+                    ),
+                    required_roles=(step.role,),
+                    state=WorkItemState.READY,
+                    created_at=now,
+                    updated_at=now,
+                    revision=1,
+                )
+                for step in blueprint.steps
+            )
+        except KeyError as error:
+            raise ValueError(
+                "workflow dependency does not name a plan step"
+            ) from error
+        inserted = self.repository.insert_workflow_plan(workflow, items)
+        if not inserted:
+            concurrent = [
+                item
+                for item in self.repository.list(
+                    WorkflowRecord, project_id=blueprint.project_id
+                )
+                if item.charter_id == blueprint.charter_id
+                and item.charter_revision == blueprint.charter_revision
+            ]
+            if len(concurrent) != 1:
+                raise RuntimeError(
+                    "concurrent workflow plan did not resolve exactly"
+                )
+            workflow = concurrent[0]
+            items = tuple(
+                item
+                for item in self.repository.list(
+                    WorkItemRecord, project_id=blueprint.project_id
+                )
+                if item.workflow_id == workflow.workflow_id
+            )
+            by_title = {item.title: item for item in items}
+            if (
+                workflow.strategy != blueprint.strategy
+                or workflow.authority_envelope_digest
+                != authority_envelope_digest
+                or len(by_title) != len(blueprint.steps)
+                or any(
+                    step.title not in by_title
+                    or by_title[step.title].objective != step.objective
+                    or by_title[step.title].required_roles != (step.role,)
+                    or by_title[step.title].dependencies
+                    != tuple(
+                        by_title[dependency].work_item_id
+                        for dependency in step.dependencies
+                        if dependency in by_title
+                    )
+                    or any(
+                        dependency not in by_title
+                        for dependency in step.dependencies
+                    )
+                    for step in blueprint.steps
+                )
+            ):
+                raise PermissionError(
+                    "durable workflow differs from the current charter plan"
+                )
+            return workflow, tuple(
+                by_title[step.title] for step in blueprint.steps
+            )
+        return workflow, items
+
     def create_work_item(
         self,
         *,

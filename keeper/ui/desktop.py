@@ -101,10 +101,10 @@ class KeeperProductDesktop:
             application.data_directory,
             authority_health_client=authority_health_client,
         )
-        self.project_id: str | None = None
+        self.project_id: str | None = self.pass_b.selected_project_id()
         self.developer_details_enabled = False
         self.root = tk.Tk()
-        self.root.title("Keeper ? Personal Executive")
+        self.root.title("DarkSage Keeper — Executive Control Center")
         self.root.geometry("1440x900")
         self.root.minsize(980, 680)
         configure_ttk(self.root, ttk)
@@ -154,8 +154,25 @@ class KeeperProductDesktop:
         content.grid(row=0, column=1, sticky="nsew", padx=22, pady=18)
         content.grid_rowconfigure(1, weight=1)
         content.grid_columnconfigure(0, weight=1)
-        self.page_title = self.ttk.Label(content, text="Home", style="Title.TLabel")
-        self.page_title.grid(row=0, column=0, sticky="w", pady=(0, 14))
+        header = self.ttk.Frame(content, style="App.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        header.grid_columnconfigure(0, weight=1)
+        self.page_title = self.ttk.Label(
+            header, text="Home", style="Title.TLabel"
+        )
+        self.page_title.grid(row=0, column=0, sticky="w")
+        self.project_choice = self.tk.StringVar(value="No project selected")
+        self.project_selector = self.ttk.Combobox(
+            header,
+            textvariable=self.project_choice,
+            state="readonly",
+            width=38,
+        )
+        self.project_selector.grid(row=0, column=1, sticky="e")
+        self.project_selector.bind(
+            "<<ComboboxSelected>>", self._select_project_from_ui
+        )
+        self._project_labels: dict[str, str] = {}
         self.page_host = self.ttk.Frame(content, style="App.TFrame")
         self.page_host.grid(row=1, column=0, sticky="nsew")
         self.page_host.grid_rowconfigure(0, weight=1)
@@ -179,7 +196,7 @@ class KeeperProductDesktop:
                 holder, text=label.upper(), style="RailHeading.TLabel",
                 font=("Segoe UI Semibold", 8),
             ).pack(anchor="w")
-            value = self.tk.StringVar(value="?")
+            value = self.tk.StringVar(value="—")
             self.ttk.Label(
                 holder, textvariable=value, style="RailBody.TLabel", wraplength=215,
             ).pack(anchor="w")
@@ -251,14 +268,23 @@ class KeeperProductDesktop:
         self.home_summary = self._readonly_text(summary, height=16)
         self.home_summary.pack(fill="both", expand=True, padx=14, pady=(0, 8))
         self.sage_label = self.ttk.Label(
-            summary, text="Sage ? listening", style="Gold.TLabel",
+            summary, text="Sage • listening", style="Gold.TLabel",
         )
         self.sage_label.pack(anchor="w", padx=14)
         self.sage_detail = self.ttk.Label(
-            summary, text="Presentation only ? authority effect NONE",
+            summary, text="Presentation only • authority effect NONE",
             style="Muted.TLabel", wraplength=320,
         )
         self.sage_detail.pack(anchor="w", padx=14, pady=(2, 8))
+        self.approve_charter_button = self.ttk.Button(
+            summary,
+            text="Review Founder approval",
+            style="Accent.TButton",
+            command=self._review_charter_approval,
+        )
+        self.approve_charter_button.pack(
+            anchor="w", padx=14, pady=(2, 8)
+        )
         self.refresh_button = self.ttk.Button(
             summary, text="Refresh durable state", style="Quiet.TButton",
             command=self._refresh_from_ui,
@@ -326,11 +352,13 @@ class KeeperProductDesktop:
         self.developer_text = self._readonly_text(card, height=14)
 
     def refresh(self) -> None:
-        snapshot = self.pass_b.control_room.snapshot(self.project_id).to_dict()
+        snapshot = self.pass_b.product_snapshot(self.project_id)
         view = build_product_view(
             snapshot, developer_details=self.developer_details_enabled
         )
         self.current_view = view
+        self.project_id = view.project_id
+        self._render_project_selector(view)
         self.composition_label.configure(text=view.composition)
         self._render_timeline(self.home_timeline, view)
         self._render_timeline(self.conversation_timeline, view)
@@ -345,6 +373,13 @@ class KeeperProductDesktop:
             if label in self.rail_values:
                 self.rail_values[label].set(value)
         self._render_sage(view.sage)
+        self.approve_charter_button.configure(
+            state=(
+                "normal"
+                if snapshot["conversation"].get("approval_required")
+                else "disabled"
+            )
+        )
         self.status.set("Durable state refreshed")
 
     def _render_sage(self, sage: dict[str, Any]) -> None:
@@ -362,12 +397,12 @@ class KeeperProductDesktop:
                 before=self.refresh_button,
             )
         self.sage_label.configure(
-            text=f"Sage ? {str(sage['mode']).casefold()} ? "
+            text=f"Sage • {str(sage['mode']).casefold()} • "
             f"{str(sage['activity_state']).casefold()}"
         )
         self.sage_detail.configure(
-            text=f"{sage['expression']} ? {sage['mood']} ? "
-            "presentation only ? authority effect NONE"
+            text=f"{sage['expression']} • {sage['mood']} • "
+            "presentation only • authority effect NONE"
         )
 
     def _render_timeline(self, widget: Any, view: ProductViewModel) -> None:
@@ -382,7 +417,7 @@ class KeeperProductDesktop:
             )
         for item in view.timeline:
             widget.insert(
-                "end", f"{item.title.upper()} ? {item.state}\n", item.kind
+                "end", f"{item.title.upper()} • {item.state}\n", item.kind
             )
             widget.insert("end", f"{item.body}\n\n", "body")
         widget.configure(state="disabled")
@@ -394,13 +429,13 @@ class KeeperProductDesktop:
             "PROJECT", view.project_title,
             "", "STATUS", view.project_status,
             "", "WORKFLOW",
-            f"{len(view.workflow_rows)} stages ? "
+            f"{len(view.workflow_rows)} stages • "
             f"{rail.get('Assignments working', '0')} working",
             "", "USAGE",
             f"{rail.get('Usage waits', '0')} waiting for reset",
             "", "LATEST EVIDENCE",
             (
-                f"{recent['state']} ? {recent['kind']}"
+                f"{recent['state']} • {recent['kind']}"
                 if recent else "No evidence yet"
             ),
         ]
@@ -418,10 +453,23 @@ class KeeperProductDesktop:
             str(card["title"]),
             f"Status: {card['status']}",
             f"Charter revision: {card['charter_revision']}",
+            f"Delegation: {card['delegation_mode'] or 'Not configured'}",
+            f"Budget: {card['budget_limit'] or 'No spend authorized'} "
+            f"{card['budget_currency'] or ''}".rstrip(),
             f"Progress: {card['progress']}", "", "Goals",
-            *[f"  ? {item}" for item in card["goals"]],
+            *[f"  • {item}" for item in card["goals"]],
+            "", "Constraints",
+            *[f"  • {item}" for item in card["constraints"]],
             "", "Exclusions",
-            *[f"  ? {item}" for item in card["exclusions"]],
+            *[f"  • {item}" for item in card["exclusions"]],
+            "", "Approved providers",
+            *[f"  • {item}" for item in card["approved_providers"]],
+            "", "Approved tools",
+            *[f"  • {item}" for item in card["approved_tools"]],
+            "", "Workspace boundaries",
+            *[f"  • {item}" for item in card["workspaces"]],
+            "", "Data classifications",
+            *[f"  • {item}" for item in card["data_classifications"]],
             "", f"Work items: {len(view.workflow_rows)}",
             f"Evidence bundles: {len(view.evidence_cards)}",
             f"Reviews: {len(view.review_cards)}",
@@ -442,7 +490,7 @@ class KeeperProductDesktop:
                     (
                         "WAITING_FOR_USAGE_RESET"
                         if assignment.get("state") == "WAITING_FOR_USAGE_RESET"
-                        else "?"
+                        else "—"
                     ),
                 ),
             )
@@ -537,7 +585,7 @@ class KeeperProductDesktop:
     def _render_settings(self, view: ProductViewModel) -> None:
         diagnostics = self.pass_b.diagnostics()
         usage = "\n".join(
-            f"{item['pool_id']}: {item['status']} ? reserved {item['reserved']}"
+            f"{item['pool_id']}: {item['status']} • reserved {item['reserved']}"
             for item in view.usage_cards
         ) or "No usage pools configured"
         self._set_text(
@@ -548,7 +596,7 @@ class KeeperProductDesktop:
                 f"Providers / sessions: {diagnostics['providers']} / "
                 f"{diagnostics['sessions']}",
                 f"KeeperAuthority: {diagnostics['authority']['state']}",
-                f"Sage: {view.sage['mode']} ? authority effect NONE",
+                f"Sage: {view.sage['mode']} • authority effect NONE",
                 "Paid fallback: unavailable", "", usage,
             ]),
         )
@@ -579,6 +627,133 @@ class KeeperProductDesktop:
             "Charter proposal created; explicit Founder approval is required"
         )
         self.refresh()
+
+    def _render_project_selector(
+        self, view: ProductViewModel
+    ) -> None:
+        labels: list[str] = []
+        self._project_labels = {}
+        selected_label = "No project selected"
+        for item in view.project_catalog:
+            project_id = str(item["project_id"])
+            label = f"{item.get('title') or project_id}  •  {item.get('state')}"
+            labels.append(label)
+            self._project_labels[label] = project_id
+            if project_id == view.project_id:
+                selected_label = label
+        self.project_selector.configure(values=tuple(labels))
+        self.project_choice.set(selected_label)
+
+    def _select_project_from_ui(self, _event: Any = None) -> None:
+        project_id = self._project_labels.get(self.project_choice.get())
+        if project_id is None:
+            return
+        try:
+            self.pass_b.select_project(project_id)
+        except (KeyError, PermissionError, RuntimeError, ValueError) as error:
+            self.status.set(f"Project selection blocked: {error}")
+            return
+        self.project_id = project_id
+        self.refresh()
+
+    def _review_charter_approval(self) -> None:
+        view = self.current_view
+        if view is None or view.project_id is None or not view.charter_detail:
+            self.status.set("No current charter is available for approval")
+            return
+        charter = view.charter_detail
+        dialog = self.tk.Toplevel(self.root)
+        dialog.title("Founder approval required")
+        dialog.geometry("760x680")
+        dialog.configure(background=THEME.background)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        self.ttk.Label(
+            dialog,
+            text="FOUNDER APPROVAL REQUIRED",
+            style="Gold.TLabel",
+            font=("Segoe UI Semibold", 16),
+        ).pack(anchor="w", padx=24, pady=(24, 6))
+        self.ttk.Label(
+            dialog,
+            text=(
+                "Review the exact charter below. This window grants no "
+                "authority; approval continues through Windows authentication."
+            ),
+            style="Muted.TLabel",
+            wraplength=700,
+        ).pack(anchor="w", padx=24, pady=(0, 12))
+        detail = self.tk.Text(
+            dialog,
+            bg=THEME.surface_raised,
+            fg=THEME.text,
+            insertbackground=THEME.gold,
+            relief="flat",
+            wrap="word",
+            padx=16,
+            pady=16,
+        )
+        detail.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+        fields = (
+            ("Project", charter.get("title")),
+            ("Revision", charter.get("revision")),
+            ("Purpose", charter.get("purpose")),
+            ("Deliverables", charter.get("deliverables")),
+            ("Constraints", charter.get("constraints")),
+            ("Non-goals", charter.get("non_goals")),
+            ("Delegation", charter.get("delegation_mode")),
+            (
+                "Budget",
+                f"{charter.get('budget_limit')} "
+                f"{charter.get('budget_currency')}",
+            ),
+            ("Providers", charter.get("approved_providers")),
+            ("Tools", charter.get("approved_tools")),
+            ("Workspaces", charter.get("workspaces")),
+            ("Evidence", charter.get("evidence_requirements")),
+            ("Review", charter.get("review_requirements")),
+            ("Unresolved questions", charter.get("unresolved_questions")),
+        )
+        detail.insert(
+            "1.0",
+            "\n\n".join(
+                f"{label.upper()}\n"
+                + (
+                    "\n".join(f"• {item}" for item in value)
+                    if isinstance(value, (list, tuple))
+                    else str(value or "None")
+                )
+                for label, value in fields
+            ),
+        )
+        detail.configure(state="disabled")
+
+        def approve() -> None:
+            dialog.destroy()
+            try:
+                result = self.pass_b.approve_and_plan_current_charter(
+                    view.project_id or ""
+                )
+            except (OSError, PermissionError, RuntimeError, ValueError) as error:
+                self.status.set(f"Founder approval blocked: {error}")
+                self.refresh()
+                return
+            self.status.set(
+                "Founder-approved charter activated; "
+                f"{len(result['work_items'])} workflow stages prepared"
+            )
+            self.refresh()
+
+        buttons = self.ttk.Frame(dialog, style="App.TFrame")
+        buttons.pack(fill="x", padx=24, pady=(0, 20))
+        self.ttk.Button(
+            buttons, text="Not now", style="Quiet.TButton",
+            command=dialog.destroy,
+        ).pack(side="left")
+        self.ttk.Button(
+            buttons, text="Approve with Windows", style="Accent.TButton",
+            command=approve,
+        ).pack(side="right")
 
     def _show_page(self, name: str) -> None:
         self.pages[name].tkraise()
@@ -712,13 +887,13 @@ class KeeperProductDesktop:
                     "it does not rewrite history or push."
                 ),
                 "providers": "Detected or configured providers:\n" + "\n".join(
-                    f"? {item.get('display_name')}: "
+                    f"• {item.get('display_name')}: "
                     f"{item.get('configured_executable') or item.get('detected_executable') or 'not configured'}"
                     for item in providers
                 ),
                 "provider_validation": "Provider verification:\n" + "\n".join(
-                    f"? {item.get('display_name')}: "
-                    f"{item.get('verification_status')} ? "
+                    f"• {item.get('display_name')}: "
+                    f"{item.get('verification_status')} • "
                     f"{item.get('failure_reason') or 'ready'}"
                     for item in providers
                 ),
