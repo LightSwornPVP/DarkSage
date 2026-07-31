@@ -392,13 +392,30 @@ class PassBApplication:
         return snapshot
 
     def approve_and_plan_current_charter(
-        self, project_id: str
+        self,
+        project_id: str,
+        *,
+        expected_charter_id: str | None = None,
+        expected_charter_revision: int | None = None,
     ) -> dict[str, Any]:
         if type(self.executive) is not KeeperExecutive:
             raise RuntimeError(
                 "Founder approval requires the production Executive composition"
             )
         context = self.conversation.current_context(project_id)
+        if (expected_charter_id is None) != (
+            expected_charter_revision is None
+        ):
+            raise ValueError(
+                "expected charter identity must include ID and revision"
+            )
+        if expected_charter_id is not None and (
+            context.charter_id != expected_charter_id
+            or context.charter_revision != expected_charter_revision
+        ):
+            raise PermissionError(
+                "displayed charter is not the current approval target"
+            )
         status = self.project_status(project_id)
         durable_charters = [
             item
@@ -452,6 +469,15 @@ class PassBApplication:
             else:
                 raise PermissionError(
                     "current charter is not available for approval"
+                )
+            if expected_charter_id is not None and (
+                challenge.project_id != project_id
+                or challenge.charter_id != expected_charter_id
+                or challenge.charter_revision
+                != expected_charter_revision
+            ):
+                raise PermissionError(
+                    "Founder challenge does not match the displayed charter"
                 )
             confirmation = self.executive.authenticate_founder(challenge)
             charter, approval, event = (

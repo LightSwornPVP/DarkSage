@@ -12,7 +12,7 @@ Keeper 1.0 path has an authoritative implementation and verification.
 | Provider management | Registration, identity, capability enforcement, multiple sessions, review separation, model evidence, Medium/High effort profiles, durable fair policy selection, cancellation, and conservative recovery | External-provider qualification matrix |
 | Full Delegation | Positive allowlist, current-charter binding, expiry, revocation, replay protection, exceptional-action denials | Founder-facing configuration and status controls |
 | Usage continuity | Atomic pause, durable checkpoint, authenticated reset/resume, shared pools, duplicate prevention | Durable fair queue and richer product controls |
-| Desktop product | Theme, navigation shell, conversation intake, provider/usage/evidence/safety projections, first-run foundation | Authoritative project/charter/workflow controls, receipts/recovery detail, complete settings, executive-command-center composition |
+| Desktop product | Executive dashboard; projects/charters; workflow status; Founder approvals; provider management; audit/typed-reference receipts; recovery; security/settings; first-run setup; system-integrity rail; rendered package smoke | Further decorative polish only; durable services remain authoritative |
 | Recovery | Restart persistence, database interruption, partial delivery, claim-before-effect cancellation, durable cancellation ambiguity, one-use Founder reconciliation, retry/process ownership, and atomic transitions | Consolidated operator UI/runbook |
 | Security | Threat model, confinement, Job Object startup, proof rejection, composition separation, tamper checks, fail-closed behavior | No Critical/High gap found |
 | Packaging | Reproducible `.pyz`, diagnostics, mock workflow, rendered Tk smoke, migrations, integrity checks | Repair-install workflow and fuller rollback/operator tooling |
@@ -20,11 +20,9 @@ Keeper 1.0 path has an authoritative implementation and verification.
 
 ## Dependency-ordered completion backlog
 
-1. Desktop completion: executive dashboard, projects/charters, workflow timeline,
-   approvals, provider management, receipts/audit, recovery, and settings.
-2. Packaging and operations: repair/rollback workflows and supported local
+1. Packaging and operations: repair/rollback workflows and supported local
    installation guidance.
-3. Documentation, diagnostics, external-provider qualification evidence, and
+2. Documentation, diagnostics, external-provider qualification evidence, and
    consolidated minor cleanup.
 
 No Critical or High defect was found in the approved Founder, authority,

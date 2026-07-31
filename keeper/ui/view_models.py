@@ -32,6 +32,8 @@ class ProductViewModel:
     charter_revision: int | None
     project_catalog: tuple[dict[str, Any], ...]
     charter_detail: dict[str, Any]
+    approval_charter_detail: dict[str, Any]
+    approval_required: bool
     controls: tuple[str, ...]
     composition: str
     timeline: tuple[TimelineItem, ...]
@@ -72,7 +74,20 @@ def build_product_view(
     proposal = _mapping(conversation.get("charter_proposal"))
     intake = _mapping(proposal.get("intake"))
     active_charter = _mapping(executive.get("active_charter"))
-    proposed_charter = _mapping(intake.get("__charter__"))
+    approval_required = bool(conversation.get("approval_required"))
+    proposed_charter = next(
+        (
+            _mapping(item)
+            for item in _rows(executive.get("charter_history"))
+            if item.get("project_id") == proposal.get("project_id")
+            and item.get("charter_id") == proposal.get("charter_id")
+            and item.get("revision") == proposal.get("charter_revision")
+        ),
+        _mapping(intake.get("__charter__")),
+    )
+    approval_charter_detail = (
+        proposed_charter if approval_required else {}
+    )
     charter_detail = active_charter or proposed_charter
     project_id = _optional_text(
         executive_project.get("project_id")
@@ -106,7 +121,6 @@ def build_product_view(
             )
         )
     if proposal:
-        approval_required = bool(conversation.get("approval_required"))
         timeline.append(
             TimelineItem(
                 kind="approval" if approval_required else "status",
@@ -349,6 +363,8 @@ def build_product_view(
             or project.get("charter_revision")
         ),
         project_catalog=tuple(_rows(snapshot.get("projects"))),
+        approval_charter_detail=approval_charter_detail,
+        approval_required=approval_required,
         charter_detail=charter_detail,
         controls=tuple(str(item) for item in executive.get("controls", ())),
         composition=composition,

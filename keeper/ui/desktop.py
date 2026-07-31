@@ -376,7 +376,8 @@ class KeeperProductDesktop:
         self.approve_charter_button.configure(
             state=(
                 "normal"
-                if snapshot["conversation"].get("approval_required")
+                if view.approval_required
+                and bool(view.approval_charter_detail)
                 else "disabled"
             )
         )
@@ -656,12 +657,34 @@ class KeeperProductDesktop:
         self.project_id = project_id
         self.refresh()
 
+    def _approve_displayed_charter(
+        self, project_id: str, charter: dict[str, Any]
+    ) -> dict[str, Any]:
+        charter_id = charter.get("charter_id")
+        charter_revision = charter.get("revision")
+        if (
+            not isinstance(charter_id, str)
+            or not charter_id
+            or type(charter_revision) is not int
+        ):
+            raise ValueError(
+                "displayed charter lacks an exact durable identity"
+            )
+        return self.pass_b.approve_and_plan_current_charter(
+            project_id,
+            expected_charter_id=charter_id,
+            expected_charter_revision=charter_revision,
+        )
+
     def _review_charter_approval(self) -> None:
         view = self.current_view
-        if view is None or view.project_id is None or not view.charter_detail:
+        if view is None or view.project_id is None:
             self.status.set("No current charter is available for approval")
             return
-        charter = view.charter_detail
+        charter = view.approval_charter_detail
+        if not charter:
+            self.status.set("No exact pending charter is available for approval")
+            return
         dialog = self.tk.Toplevel(self.root)
         dialog.title("Founder approval required")
         dialog.geometry("760x680")
@@ -731,8 +754,8 @@ class KeeperProductDesktop:
         def approve() -> None:
             dialog.destroy()
             try:
-                result = self.pass_b.approve_and_plan_current_charter(
-                    view.project_id or ""
+                result = self._approve_displayed_charter(
+                    view.project_id or "", charter
                 )
             except (OSError, PermissionError, RuntimeError, ValueError) as error:
                 self.status.set(f"Founder approval blocked: {error}")
