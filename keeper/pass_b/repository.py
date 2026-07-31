@@ -303,6 +303,55 @@ class PassBRepository:
             raise ValueError("new workflows must begin active")
         self.insert(record)
 
+    def insert_workflow_plan(
+        self,
+        workflow: WorkflowRecord,
+        work_items: tuple[WorkItemRecord, ...],
+    ) -> bool:
+        """Commit one charter-derived workflow and all of its work atomically."""
+
+        if workflow.state != WorkflowState.ACTIVE or not work_items:
+            raise ValueError("workflow plan must begin active with work items")
+        by_id = {item.work_item_id: item for item in work_items}
+        if len(by_id) != len(work_items):
+            raise ValueError("workflow plan work-item identities must be unique")
+        positions = {
+            item.work_item_id: index
+            for index, item in enumerate(work_items)
+        }
+        for index, item in enumerate(work_items):
+            _validate_workflow_work_item(workflow, item)
+            if item.state != WorkItemState.READY:
+                raise ValueError("workflow plan work items must begin ready")
+            if any(
+                dependency_id not in by_id
+                or by_id[dependency_id].workflow_id != workflow.workflow_id
+                or positions[dependency_id] >= index
+                for dependency_id in item.dependencies
+            ):
+                raise PermissionError(
+                    "workflow plan dependency is missing, cyclic, or cross-plan"
+                )
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND project_id=?",
+                (WorkflowRecord.KIND, workflow.project_id),
+            ).fetchall()
+            if any(
+                current.charter_id == workflow.charter_id
+                and current.charter_revision == workflow.charter_revision
+                for current in (
+                    self._decode(WorkflowRecord, row) for row in rows
+                )
+            ):
+                return False
+            self._insert(connection, workflow)
+            for item in work_items:
+                self._insert(connection, item)
+        return True
+
     def insert_work_item_bound(self, record: WorkItemRecord) -> None:
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
