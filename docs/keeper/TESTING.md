@@ -82,7 +82,9 @@ tests race independent first-installation processes and interrupt publication to
 prove one valid no-overwrite winner and no partial final key.
 
 `python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
-events, invokes the dashboard Refresh button, verifies the visible status update, and
-writes structured evidence beneath the selected data directory when Tcl/Tk is
-available. Exit code 78 with a JSON `unavailable` result means the Python runtime
-lacks a usable Tcl/Tk installation; it is a skipped gate, not a pass.
+events, verifies all nine executive-command-center pages, selects the Workflows
+page, invokes the dashboard System Check button, verifies the visible status update,
+and writes structured evidence beneath the selected data directory when Tcl/Tk is
+available. Headless tests separately verify entry-point wiring, navigation aliases,
+state colors, theme tokens, and the absence of direct authority bypass methods. Exit
+code 78 with a JSON `unavailable` result means the Python runtime lacks a usable

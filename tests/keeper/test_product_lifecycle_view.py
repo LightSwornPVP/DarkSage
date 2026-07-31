@@ -9,6 +9,8 @@ def test_authoritative_charter_fields_reach_founder_product_view() -> None:
             "messages": [],
             "charter_proposal": {
                 "project_id": "project-1",
+                "charter_id": "charter-2",
+                "charter_revision": 4,
                 "state": "APPROVAL_REQUESTED",
                 "intake": {},
             },
@@ -54,6 +56,16 @@ def test_authoritative_charter_fields_reach_founder_product_view() -> None:
                     "data_classifications": ["INTERNAL"]
                 },
             },
+            "charter_history": [
+                {
+                    "project_id": "project-1",
+                    "charter_id": "charter-2",
+                    "revision": 4,
+                    "status": "PROPOSED",
+                    "title": "Keeper revision 4",
+                    "purpose": "Display the exact pending revision",
+                }
+            ],
             "controls": ["cancel"],
         },
         "providers": {},
@@ -70,6 +82,10 @@ def test_authoritative_charter_fields_reach_founder_product_view() -> None:
     assert view.project_id == "project-1"
     assert view.project_status == "AWAITING_CHARTER_APPROVAL"
     assert view.charter_revision == 3
+    assert view.approval_required is True
+    assert view.approval_charter_detail["charter_id"] == "charter-2"
+    assert view.approval_charter_detail["revision"] == 4
+    assert view.approval_charter_detail["title"] == "Keeper revision 4"
     assert view.controls == ("cancel",)
     assert view.project_catalog[0]["project_id"] == "project-1"
     assert card["constraints"] == ("No deployment",)

@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 
+from keeper.executive.service import KeeperExecutive
 from keeper.executive.models import ProjectCharter
 from keeper.pass_b.application import PassBApplication
 from keeper.pass_b.conversation import DynamicWorkflowDesigner
@@ -129,3 +130,28 @@ def test_atomic_workflow_plan_rolls_back_after_interrupted_insert(
     assert application.repository.list(
         WorkItemRecord, project_id=charter.project_id
     ) == []
+
+
+def test_approval_rejects_displayed_charter_identity_mismatch_before_auth(
+    tmp_path: Path,
+) -> None:
+    executive = KeeperExecutive(tmp_path / "executive.db")
+    application = PassBApplication(tmp_path, executive=executive)
+    outcome = application.begin_conversation(
+        "Build a local software project with no deployment or spending."
+    )
+    project_id = outcome.project.project_id
+    context = application.conversation.current_context(project_id)
+
+    with pytest.raises(
+        PermissionError,
+        match="displayed charter is not the current approval target",
+    ):
+        application.approve_and_plan_current_charter(
+            project_id,
+            expected_charter_id="different-charter",
+            expected_charter_revision=context.charter_revision,
+        )
+
+    assert application.conversation.current_context(project_id).state == "PROPOSED"
+    assert executive.status(project_id).pending_approvals == ()

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from keeper.app.service import KeeperApplication
-from keeper.ui.desktop import KeeperProductDesktop
+from keeper.ui.executive_desktop import KeeperExecutiveDesktop as KeeperProductDesktop
 
 
 class KeeperViewModel:
@@ -675,10 +675,10 @@ def main(arguments: list[str] | None = None) -> int:
         desktop.root.update_idletasks()
         desktop.root.update()
         pages = desktop.navigation_pages
-        if len(pages) != 8:
+        if len(pages) != 9:
             desktop.root.destroy()
             raise RuntimeError("Keeper desktop smoke did not render all pages")
-        desktop._show_page("Workflow")
+        desktop._show_page("Workflows")
         desktop.root.update()
         selected_page = str(desktop.page_title.cget("text"))
         desktop.refresh_button.invoke()
