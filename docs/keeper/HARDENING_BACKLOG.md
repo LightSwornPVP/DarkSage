@@ -13,6 +13,16 @@ Nonblocking future work:
 - Optional Discord notification-only integration with OS credential storage.
 - Expand the completed rendered Windows Tk smoke into broader accessibility and
   long-duration interaction coverage.
+- Make next-stage selection skip an earlier dependency-ready assignment whose
+  active usage, write, or lease prerequisites are incomplete when a later
+  fully reserved independent assignment is runnable. Current behavior fails
+  closed before external reservation but can reduce availability.
+- Close the current-charter bookkeeping window between orchestration validation
+  and transactional review/workflow completion if the Executive and Pass B
+  stores gain a shared atomic validation boundary. Production Authority launch
+  remains independently current-charter-bound.
+- Make cancel-then-immediate-retry wait for the stopped-stage transition rather
+  than occasionally failing closed with `task is not stopped for stage retry`.
 - If Keeper becomes public, multi-user, or accepts unknown plugins, isolate the
   Executive as a separate service between the Desktop/UI and KeeperAuthority.
   That version requires a new threat model for hostile same-user clients and

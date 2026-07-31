@@ -8,7 +8,7 @@ Keeper 1.0 path has an authoritative implementation and verification.
 |---|---|---|
 | Founder and authority | Native Founder identity/authentication; challenge, intent, project, machine, expiry, session and replay binding; Authority reservations; durable receipts; atomic failure; exceptional-action gates | Automatic authority-key rotation is deferred by design; retained verifier migration is future hardening |
 | Project Charters | Creation, validation, approval, versioning, amendment, revocation, budget/provider/authority enforcement; product lifecycle selection, native approval, and atomic planning | Further Founder-facing constraint presentation polish |
-| Workflow orchestration | Durable project creation, independent review, duplicate-delivery prevention, atomic charter-derived planning, durable execution profiles, dependency-gated one-winner assignment preparation, and one exact Authority-reserved assignment execution path with pre-reservation resource claims | Multi-stage progression, lifecycle controls, cancellation orchestration, and explicit uncertainty reconciliation |
+| Workflow orchestration | Durable project creation, independent review, duplicate-delivery prevention, atomic charter-derived planning, durable execution profiles, dependency-gated one-winner assignment preparation, deterministic next-stage execution, and atomic terminal workflow completion | In-flight cancellation orchestration and explicit uncertainty reconciliation |
 | Provider management | Registration, identity, capability enforcement, multiple sessions, review separation, model evidence, Medium/High effort profiles, durable fair policy selection | External-provider qualification matrix; execution/recovery reconciliation |
 | Full Delegation | Positive allowlist, current-charter binding, expiry, revocation, replay protection, exceptional-action denials | Founder-facing configuration and status controls |
 | Usage continuity | Atomic pause, durable checkpoint, authenticated reset/resume, shared pools, duplicate prevention | Durable fair queue and richer product controls |
@@ -20,9 +20,8 @@ Keeper 1.0 path has an authoritative implementation and verification.
 
 ## Dependency-ordered completion backlog
 
-1. Provider execution lifecycle: progress dependency-ready stages from the
-   exact one-assignment runner, add in-flight cancellation, and reconcile
-   explicit uncertainty.
+1. Provider execution lifecycle: add in-flight cancellation and reconcile
+   explicit uncertainty around the exact deterministic stage runner.
 2. Desktop completion: executive dashboard, projects/charters, workflow timeline,
    approvals, provider management, receipts/audit, recovery, and settings.
 3. Packaging and operations: repair/rollback workflows and supported local

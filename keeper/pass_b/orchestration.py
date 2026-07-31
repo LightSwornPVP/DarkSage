@@ -1336,6 +1336,151 @@ class OrchestrationService:
         self.repository.replace(rejected, expected_revision=record.revision)
         raise PermissionError(detail)
 
+    def run_next_reserved_stage(
+        self,
+        workflow_id: str,
+        *,
+        global_context: dict[str, object],
+        task_context: dict[str, object],
+        evidence_reference_ids: tuple[str, ...] = (),
+        side_effect_class: str = "REVERSIBLE_WORKSPACE_WRITE",
+        after_launch_claim: Callable[[], None] | None = None,
+    ) -> EvidenceBundleRecord:
+        """Run exactly one deterministic dependency-ready prepared assignment."""
+
+        workflow = self.repository.get(WorkflowRecord, workflow_id)
+        self._require_current_charter(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
+        if workflow.state != WorkflowState.ACTIVE:
+            raise PermissionError("workflow is not active")
+        work_items = tuple(
+            item
+            for item in self.repository.list(
+                WorkItemRecord, project_id=workflow.project_id
+            )
+            if item.workflow_id == workflow.workflow_id
+        )
+        if not work_items:
+            raise RuntimeError("durable workflow has no work items")
+        by_id = {item.work_item_id: item for item in work_items}
+        if len(by_id) != len(work_items) or any(
+            item.project_id != workflow.project_id
+            or item.charter_id != workflow.charter_id
+            or item.charter_revision != workflow.charter_revision
+            or any(dependency not in by_id for dependency in item.dependencies)
+            for item in work_items
+        ):
+            raise PermissionError("workflow work-item lineage is invalid")
+        candidates: list[tuple[WorkItemRecord, AssignmentRecord]] = []
+        for assignment in self.repository.list(
+            AssignmentRecord, project_id=workflow.project_id
+        ):
+            if (
+                assignment.workflow_id != workflow.workflow_id
+                or assignment.state != AssignmentState.READY
+            ):
+                continue
+            work_item = by_id.get(assignment.work_item_id)
+            if work_item is None:
+                raise PermissionError(
+                    "ready assignment is outside its durable workflow"
+                )
+            if (
+                work_item.state != WorkItemState.ASSIGNED
+                or any(
+                    by_id[dependency].state
+                    != WorkItemState.COMPLETED
+                    for dependency in work_item.dependencies
+                )
+            ):
+                continue
+            profile_id = assignment.usage_policy.get(
+                "execution_profile_id"
+            )
+            selection_id = assignment.usage_policy.get(
+                "provider_selection_id"
+            )
+            if not isinstance(profile_id, str) or not isinstance(
+                selection_id, str
+            ):
+                continue
+            profile = self.repository.get(
+                ExecutionProfileRecord, profile_id
+            )
+            selection = self.repository.get(
+                ProviderSelectionRecord, selection_id
+            )
+            if (
+                profile.workflow_id != workflow.workflow_id
+                or profile.work_item_id != work_item.work_item_id
+                or selection.execution_profile_id
+                != profile.execution_profile_id
+                or selection.assignment_id != assignment.assignment_id
+            ):
+                raise PermissionError(
+                    "prepared stage binding differs from durable workflow"
+                )
+            candidates.append((work_item, assignment))
+        if not candidates:
+            raise PermissionError(
+                "workflow has no dependency-ready prepared assignment"
+            )
+        candidates.sort(
+            key=lambda item: (
+                item[0].created_at,
+                item[0].work_item_id,
+                item[1].created_at,
+                item[1].assignment_id,
+            )
+        )
+        selected_item, selected = candidates[0]
+        if sum(
+            item.work_item_id == selected_item.work_item_id
+            for item, _ in candidates
+        ) != 1:
+            raise PermissionError(
+                "workflow stage has multiple ready assignments"
+            )
+        durable_binding = self.repository.assignment_launch_binding(
+            selected.assignment_id
+        )
+        if durable_binding != (workflow, selected_item, selected):
+            raise PermissionError(
+                "selected stage changed before launch preparation"
+            )
+        workspaces = [
+            item
+            for item in self.repository.list(
+                WorkspaceReservationRecord,
+                project_id=workflow.project_id,
+            )
+            if item.assignment_id == selected.assignment_id
+            and item.state == ReservationState.ACTIVE
+        ]
+        if len(workspaces) != 1:
+            raise PermissionError(
+                "selected stage needs exactly one active workspace"
+            )
+        self._require_current_charter(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
+        return self.run_prepared_assignment(
+            selected.assignment_id,
+            Path(workspaces[0].canonical_path),
+            global_context=global_context,
+            task_context=task_context,
+            evidence_reference_ids=evidence_reference_ids,
+            side_effect_class=side_effect_class,
+            after_launch_claim=after_launch_claim,
+        )
+
     def run_prepared_assignment(
         self,
         assignment_id: str,
@@ -2389,6 +2534,21 @@ class OrchestrationService:
         return self.repository.decide_review(
             review_id,
             decided_at=self._now(),
+        )
+
+    def reconcile_workflow_completion(
+        self, workflow_id: str
+    ) -> WorkflowRecord:
+        workflow = self.repository.get(WorkflowRecord, workflow_id)
+        self._require_current_charter(
+            workflow.project_id,
+            workflow.charter_id,
+            workflow.charter_revision,
+            workflow.authority_envelope_digest,
+        )
+        return self.repository.reconcile_workflow_completion(
+            workflow_id,
+            completed_at=self._now(),
         )
 
     def create_repair_assignment(
