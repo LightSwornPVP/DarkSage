@@ -460,6 +460,8 @@ class AuthorityBackedSpecialistGateway:
         role: str | None = None,
         artifact_revision_digest: str | None = None,
         review_instructions: tuple[str, ...] = (),
+        workspace: str | None = None,
+        reservation_nonce: str | None = None,
     ) -> AuthorityExecutionPlan:
         key = (
             specialist.provider_id,
@@ -474,6 +476,29 @@ class AuthorityBackedSpecialistGateway:
         binding, registration = resolved
         launch_task_id = task_id or task.task_id
         launch_role = role or task.role
+        if reservation_nonce is not None and (
+            len(reservation_nonce) != 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in reservation_nonce
+            )
+        ):
+            raise ValueError(
+                "reservation nonce must be exactly 32 lowercase hex characters"
+            )
+        selected_workspace = str(
+            Path(workspace or charter.workspaces[0]).resolve()
+        )
+        if not any(
+            Path(selected_workspace).is_relative_to(
+                Path(allowed_workspace).resolve()
+            )
+            for allowed_workspace in charter.workspaces
+            if allowed_workspace
+        ):
+            raise PermissionError(
+                "launch workspace is outside the active charter"
+            )
         if (
             not charter.founder_approval_record_id
             or not charter.founder_approval_event_id
@@ -550,7 +575,7 @@ class AuthorityBackedSpecialistGateway:
             "role": launch_role,
             "registration_id": binding.registration_id,
             "qualification_id": binding.qualification_id,
-            "workspace": charter.workspaces[0],
+            "workspace": selected_workspace,
             "instructions_digest": instructions_digest,
             "expected_outputs_digest": expected_outputs_digest,
             "expected_evidence_digest": expected_evidence_digest,
@@ -560,6 +585,8 @@ class AuthorityBackedSpecialistGateway:
             if review_instructions
             else None,
         }
+        if reservation_nonce is not None:
+            binding_material["reservation_nonce"] = reservation_nonce
         provider_run_id = f"executive-{_digest(binding_material)[:32]}"
         keeper_run_id = (
             f"executive:{task.project_id}:{task.charter_id}:"
@@ -594,7 +621,7 @@ class AuthorityBackedSpecialistGateway:
             "prompt_path": str(prompt_path),
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
-            "workspace": charter.workspaces[0],
+            "workspace": selected_workspace,
             "timeout_seconds": 3600,
             "reasoning_level": "high",
             "environment": {
@@ -635,7 +662,7 @@ class AuthorityBackedSpecialistGateway:
             str(registration["configuration_digest"]),
             str(registration["canonical_executable_path"]),
             str(registration["executable_sha256"]),
-            charter.workspaces[0],
+            selected_workspace,
             instructions_digest,
             expected_outputs_digest,
             expected_evidence_digest,

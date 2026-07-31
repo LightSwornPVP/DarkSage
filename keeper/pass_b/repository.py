@@ -861,11 +861,17 @@ class PassBRepository:
             )
             if current.owner_token != owner_token:
                 raise PermissionError("workspace lease owner changed")
+            live_launch = connection.execute(
+                "SELECT 1 FROM pass_b_launch_claims "
+                "WHERE assignment_id=? AND state IN "
+                "('RESERVED','LAUNCH_CLAIMED','RUNNING','UNCERTAIN')",
+                (assignment.assignment_id,),
+            ).fetchone()
             if assignment.state in {
                 AssignmentState.LAUNCH_CLAIMED,
                 AssignmentState.RUNNING,
                 AssignmentState.UNCERTAIN,
-            }:
+            } or live_launch is not None:
                 raise PermissionError("active or uncertain workspace cannot be released")
             updated = replace(
                 current,
@@ -914,13 +920,19 @@ class PassBRepository:
             assignment = self._get(
                 connection, AssignmentRecord, current.assignment_id
             )
+            live_launch = connection.execute(
+                "SELECT 1 FROM pass_b_launch_claims "
+                "WHERE assignment_id=? AND state IN "
+                "('RESERVED','LAUNCH_CLAIMED','RUNNING','UNCERTAIN')",
+                (assignment.assignment_id,),
+            ).fetchone()
             if _parse_time(current.lease_expires_at) > observed:
                 raise PermissionError("workspace lease has not expired")
             if assignment.state in {
                 AssignmentState.LAUNCH_CLAIMED,
                 AssignmentState.RUNNING,
                 AssignmentState.UNCERTAIN,
-            }:
+            } or live_launch is not None:
                 raise PermissionError("stale active work requires Founder review")
             updated = replace(
                 current,
@@ -1256,6 +1268,9 @@ class PassBRepository:
         expected_workflow: WorkflowRecord | None = None,
         expected_work_item: WorkItemRecord | None = None,
         expected_assignment: AssignmentRecord | None = None,
+        expected_profile: ExecutionProfileRecord | None = None,
+        expected_selection: ProviderSelectionRecord | None = None,
+        expected_provider: ProviderRecord | None = None,
     ) -> None:
         if attempt.state != AttemptState.RESERVED:
             raise ValueError("new attempts must begin reserved")
@@ -1284,16 +1299,138 @@ class PassBRepository:
                 raise PermissionError(
                     "launch binding changed before the transactional claim"
                 )
+            provider = self._get(
+                connection, ProviderRecord, assignment.provider_id
+            )
+            account = self._get(
+                connection, ProviderAccountRecord, assignment.account_id
+            )
             session = self._get(
                 connection, ProviderSessionRecord, assignment.session_id
             )
+            prepared = (
+                expected_profile,
+                expected_selection,
+                expected_provider,
+            )
+            expected_usage_amount: float | None = None
+            if any(item is not None for item in prepared):
+                if any(item is None for item in prepared):
+                    raise PermissionError(
+                        "launch requires an exact profile, selection, and provider"
+                    )
+                assert expected_profile is not None
+                assert expected_selection is not None
+                assert expected_provider is not None
+                profile_id = assignment.usage_policy.get(
+                    "execution_profile_id"
+                )
+                selection_id = assignment.usage_policy.get(
+                    "provider_selection_id"
+                )
+                if (
+                    profile_id != expected_profile.execution_profile_id
+                    or selection_id
+                    != expected_selection.provider_selection_id
+                    or self._get(
+                        connection,
+                        ExecutionProfileRecord,
+                        expected_profile.execution_profile_id,
+                    )
+                    != expected_profile
+                    or self._get(
+                        connection,
+                        ProviderSelectionRecord,
+                        expected_selection.provider_selection_id,
+                    )
+                    != expected_selection
+                    or provider != expected_provider
+                ):
+                    raise PermissionError(
+                        "durable profile, provider selection, or provider changed "
+                        "before the transactional claim"
+                    )
+                _validate_execution_profile(
+                    workflow, work_item, expected_profile
+                )
+                if (
+                    expected_selection.execution_profile_id
+                    != expected_profile.execution_profile_id
+                    or expected_selection.assignment_id
+                    != assignment.assignment_id
+                    or expected_selection.project_id
+                    != assignment.project_id
+                    or expected_selection.charter_id
+                    != assignment.charter_id
+                    or expected_selection.charter_revision
+                    != assignment.charter_revision
+                    or expected_selection.workflow_id
+                    != assignment.workflow_id
+                    or expected_selection.work_item_id
+                    != assignment.work_item_id
+                    or expected_selection.provider_id
+                    != assignment.provider_id
+                    or expected_selection.account_id
+                    != assignment.account_id
+                    or expected_selection.session_id
+                    != assignment.session_id
+                    or expected_selection.model_id != assignment.model_id
+                    or assignment.usage_policy.get("requested_amount")
+                    != expected_profile.usage_amount
+                    or account.provider_id != provider.provider_id
+                    or account.account_id != assignment.account_id
+                    or account.usage_pool_id
+                    != expected_selection.usage_pool_id
+                    or account.cost_mode != expected_selection.cost_mode
+                    or account.privacy_classification
+                    != expected_selection.privacy_classification
+                    or not account.authentication_ready
+                    or not account.enabled
+                    or provider.health != HealthState.READY
+                    or not provider.authentication_ready
+                    or provider.cost_mode == CostMode.PAID
+                    or account.cost_mode == CostMode.PAID
+                    or session.provider_id != provider.provider_id
+                    or session.account_id != account.account_id
+                    or session.model_id != expected_selection.model_id
+                    or session.state
+                    not in {
+                        ProviderSessionState.READY,
+                        ProviderSessionState.BUSY,
+                    }
+                    or (
+                        expected_profile.role.casefold()
+                        not in {
+                            item.casefold()
+                            for item in provider.capabilities
+                        }
+                        and "all-roles"
+                        not in {
+                            item.casefold()
+                            for item in provider.capabilities
+                        }
+                    )
+                    or not {
+                        item.casefold()
+                        for item in expected_profile.required_capabilities
+                    }.issubset(
+                        {
+                            item.casefold()
+                            for item in provider.capabilities
+                        }
+                    )
+                ):
+                    raise PermissionError(
+                        "provider selection no longer satisfies launch policy"
+                    )
             workspace = self._active_workspace(connection, assignment.assignment_id)
             usage_row = connection.execute(
-                "SELECT reservation_id,pool_id,observation_generation "
+                "SELECT reservation_id,pool_id,amount,observation_generation "
                 "FROM pass_b_usage_reservations "
                 "WHERE assignment_id=? AND state='ACTIVE'",
                 (assignment.assignment_id,),
             ).fetchone()
+            expected_usage_amount = expected_profile.usage_amount if expected_profile else None
             if (
                 assignment.state != AssignmentState.READY
                 or session.provider_id != assignment.provider_id
@@ -1314,6 +1451,11 @@ class PassBRepository:
                     != attempt.usage_reservation_id
                 ):
                     raise PermissionError("assignment has no usage reservation")
+                if (
+                    expected_usage_amount is not None
+                    and float(usage_row["amount"]) != expected_usage_amount
+                ):
+                    raise PermissionError("usage reservation amount is not exact")
                 pool = self._get(
                     connection,
                     UsagePoolRecord,
@@ -1614,6 +1756,361 @@ class PassBRepository:
             )
         return updated_review, updated_assignment, updated_work_item
 
+    def mark_authority_reservation_in_flight(
+        self,
+        attempt_id: str,
+        reservation_plan_digest: str,
+        updated_at: str,
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            if (
+                attempt.state != AttemptState.RESERVED
+                or assignment.state != AssignmentState.READY
+                or attempt.authority_reservation_state != "LOCAL_PREPARED"
+                or attempt.authority_reservation_plan_digest
+                != reservation_plan_digest
+                or not attempt.session_slot_claimed
+            ):
+                raise PermissionError(
+                    "Authority reservation preparation changed"
+                )
+            updated = replace(
+                attempt,
+                authority_reservation_state="RESERVATION_IN_FLIGHT",
+                updated_at=updated_at,
+                revision=attempt.revision + 1,
+            )
+            self._replace(connection, updated, attempt.revision)
+        return updated
+
+    def mark_authority_reserved(
+        self,
+        attempt_id: str,
+        reservation_plan_digest: str,
+        updated_at: str,
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            if (
+                attempt.state != AttemptState.RESERVED
+                or assignment.state != AssignmentState.READY
+                or attempt.authority_reservation_state
+                != "RESERVATION_IN_FLIGHT"
+                or attempt.authority_reservation_plan_digest
+                != reservation_plan_digest
+            ):
+                raise PermissionError(
+                    "Authority reservation completion changed"
+                )
+            updated = replace(
+                attempt,
+                authority_reservation_state="AUTHORITY_RESERVED",
+                updated_at=updated_at,
+                revision=attempt.revision + 1,
+            )
+            self._replace(connection, updated, attempt.revision)
+        return updated
+
+    def bind_authority_authorization(
+        self,
+        attempt_id: str,
+        *,
+        launch_token: str,
+        launch_plan_digest: str,
+        delivered_input: DeliveredInputRecord | None,
+        updated_at: str,
+    ) -> AttemptRecord:
+        if not launch_token or len(launch_plan_digest) != 64:
+            raise ValueError("Authority launch authorization is invalid")
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            if (
+                attempt.state != AttemptState.RESERVED
+                or assignment.state != AssignmentState.READY
+                or attempt.authority_reservation_state
+                != "AUTHORITY_RESERVED"
+                or not attempt.session_slot_claimed
+            ):
+                raise PermissionError(
+                    "Authority launch authorization cannot be bound"
+                )
+            delivered_input_id: str | None = None
+            delivered_input_digest: str | None = None
+            provider_input_digest: str | None = None
+            if delivered_input is not None:
+                if (
+                    assignment.role != AssignmentRole.REVIEWER
+                    or delivered_input.reviewer_attempt_id
+                    != attempt.attempt_id
+                    or delivered_input.reviewer_assignment_id
+                    != assignment.assignment_id
+                    or delivered_input.project_id != assignment.project_id
+                    or delivered_input.charter_id != assignment.charter_id
+                    or delivered_input.charter_revision
+                    != assignment.charter_revision
+                    or delivered_input.workflow_id
+                    != assignment.workflow_id
+                    or delivered_input.work_item_id
+                    != assignment.work_item_id
+                ):
+                    raise PermissionError(
+                        "attempt delivered-input binding is invalid"
+                    )
+                delivered_input_id = delivered_input.delivered_input_id
+                delivered_input_digest = (
+                    delivered_input.delivered_input_digest
+                )
+                provider_input_digest = delivered_input.provider_input_digest
+            updated = replace(
+                attempt,
+                launch_token=launch_token,
+                launch_plan_digest=launch_plan_digest,
+                authority_reservation_state="AUTHORIZED",
+                updated_at=updated_at,
+                revision=attempt.revision + 1,
+                delivered_input_id=delivered_input_id,
+                delivered_input_digest=delivered_input_digest,
+                provider_input_digest=provider_input_digest,
+            )
+            if delivered_input is not None:
+                self._insert(connection, delivered_input)
+            self._replace(connection, updated, attempt.revision)
+            try:
+                cursor = connection.execute(
+                    "UPDATE pass_b_launch_claims SET launch_token=?,"
+                    "updated_at=? WHERE attempt_id=? AND assignment_id=? "
+                    "AND authority_attempt_id=? AND state='RESERVED'",
+                    (
+                        launch_token,
+                        updated_at,
+                        attempt.attempt_id,
+                        attempt.assignment_id,
+                        attempt.authority_attempt_id,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise PermissionError(
+                    "Authority launch token was already consumed"
+                ) from error
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "durable launch claim changed before authorization"
+                )
+        return updated
+
+    def mark_authority_reservation_uncertain(
+        self,
+        attempt_id: str,
+        *,
+        detail: str,
+        updated_at: str,
+    ) -> AttemptRecord:
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            if (
+                attempt.state != AttemptState.RESERVED
+                or assignment.state != AssignmentState.READY
+                or attempt.authority_reservation_state
+                not in {"RESERVATION_IN_FLIGHT", "AUTHORITY_RESERVED"}
+            ):
+                raise PermissionError(
+                    "Authority reservation uncertainty claim changed"
+                )
+            uncertain_attempt = replace(
+                attempt,
+                state=AttemptState.UNCERTAIN,
+                last_error=detail,
+                updated_at=updated_at,
+                revision=attempt.revision + 1,
+            )
+            uncertain_assignment = replace(
+                assignment,
+                state=AssignmentState.UNCERTAIN,
+                updated_at=updated_at,
+                revision=assignment.revision + 1,
+            )
+            self._replace(
+                connection, uncertain_attempt, attempt.revision
+            )
+            self._replace(
+                connection, uncertain_assignment, assignment.revision
+            )
+            workspace_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='ACTIVE'",
+                (WorkspaceReservationRecord.KIND,),
+            ).fetchall()
+            for row in workspace_rows:
+                workspace = self._decode(WorkspaceReservationRecord, row)
+                if workspace.assignment_id != assignment.assignment_id:
+                    continue
+                self._replace(
+                    connection,
+                    replace(
+                        workspace,
+                        state=ReservationState.UNCERTAIN,
+                        updated_at=updated_at,
+                        revision=workspace.revision + 1,
+                    ),
+                    workspace.revision,
+                )
+                connection.execute(
+                    "UPDATE pass_b_workspace_claims SET state='UNCERTAIN' "
+                    "WHERE reservation_id=? AND state='ACTIVE'",
+                    (workspace.workspace_reservation_id,),
+                )
+            write_rows = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind=? AND state='ACTIVE'",
+                (WriteReservationRecord.KIND,),
+            ).fetchall()
+            for row in write_rows:
+                write = self._decode(WriteReservationRecord, row)
+                if write.assignment_id != assignment.assignment_id:
+                    continue
+                self._replace(
+                    connection,
+                    replace(
+                        write,
+                        state=ReservationState.UNCERTAIN,
+                        updated_at=updated_at,
+                        revision=write.revision + 1,
+                    ),
+                    write.revision,
+                )
+                connection.execute(
+                    "UPDATE pass_b_write_claims SET state='UNCERTAIN' "
+                    "WHERE reservation_id=? AND state='ACTIVE'",
+                    (write.workspace_reservation_id,),
+                )
+            cursor = connection.execute(
+                "UPDATE pass_b_launch_claims SET state='UNCERTAIN',"
+                "updated_at=? WHERE attempt_id=? AND state='RESERVED'",
+                (updated_at, attempt.attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "Authority reservation launch claim changed"
+                )
+        return uncertain_attempt
+
+    def require_active_launch_ownership(
+        self,
+        attempt_id: str,
+        *,
+        expected_claim_state: str,
+        checked_at: str,
+    ) -> None:
+        if expected_claim_state not in {
+            AttemptState.RESERVED,
+            AttemptState.LAUNCH_CLAIMED,
+        }:
+            raise ValueError("unsupported launch ownership state")
+        checked = _parse_time(checked_at)
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = self._get(connection, AttemptRecord, attempt_id)
+            assignment = self._get(
+                connection, AssignmentRecord, attempt.assignment_id
+            )
+            workspace = self._active_workspace(
+                connection, assignment.assignment_id
+            )
+            claim = connection.execute(
+                "SELECT state,authority_attempt_id FROM pass_b_launch_claims "
+                "WHERE attempt_id=? AND assignment_id=?",
+                (attempt.attempt_id, assignment.assignment_id),
+            ).fetchone()
+            expected_assignment_state = (
+                AssignmentState.READY
+                if expected_claim_state == AttemptState.RESERVED
+                else AssignmentState.LAUNCH_CLAIMED
+            )
+            expected_authority_state = (
+                "RESERVATION_IN_FLIGHT"
+                if expected_claim_state == AttemptState.RESERVED
+                else "AUTHORIZED"
+            )
+            if (
+                attempt.state != expected_claim_state
+                or assignment.state != expected_assignment_state
+                or attempt.authority_reservation_state
+                != expected_authority_state
+                or not attempt.session_slot_claimed
+                or workspace.workspace_reservation_id
+                != attempt.workspace_reservation_id
+                or workspace.workspace_id != assignment.workspace_id
+                or workspace.state != ReservationState.ACTIVE
+                or _parse_time(workspace.lease_expires_at) <= checked
+                or claim is None
+                or str(claim["state"]) != expected_claim_state
+                or str(claim["authority_attempt_id"])
+                != attempt.authority_attempt_id
+            ):
+                raise PermissionError(
+                    "durable launch ownership is no longer active"
+                )
+            if not assignment.read_only:
+                write = connection.execute(
+                    "SELECT lease_expires_at FROM pass_b_write_claims "
+                    "WHERE reservation_id=? AND assignment_id=? "
+                    "AND state='ACTIVE'",
+                    (
+                        workspace.workspace_reservation_id,
+                        assignment.assignment_id,
+                    ),
+                ).fetchone()
+                if (
+                    write is None
+                    or _parse_time(str(write["lease_expires_at"])) <= checked
+                ):
+                    raise PermissionError(
+                        "durable write ownership is no longer active"
+                    )
+            if bool(
+                assignment.usage_policy.get("reservation_required", True)
+            ):
+                usage = connection.execute(
+                    "SELECT reservation_id,amount "
+                    "FROM pass_b_usage_reservations "
+                    "WHERE assignment_id=? AND state='ACTIVE'",
+                    (assignment.assignment_id,),
+                ).fetchone()
+                requested = assignment.usage_policy.get("requested_amount")
+                if (
+                    usage is None
+                    or str(usage["reservation_id"])
+                    != attempt.usage_reservation_id
+                    or (
+                        isinstance(requested, (int, float))
+                        and (
+                            not math.isfinite(float(requested))
+                            or float(usage["amount"])
+                            != float(requested)
+                        )
+                    )
+                ):
+                    raise PermissionError(
+                        "durable usage ownership is no longer exact"
+                    )
+
     def claim_launch(self, attempt_id: str, claimed_at: str) -> AttemptRecord:
         with self.store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1883,7 +2380,11 @@ class PassBRepository:
                     connection, AssignmentRecord, attempt.assignment_id
                 )
                 state = str(claim["state"])
-                if state == AttemptState.RESERVED:
+                if (
+                    state == AttemptState.RESERVED
+                    and attempt.authority_reservation_state
+                    == "LOCAL_PREPARED"
+                ):
                     session = self._get(
                         connection,
                         ProviderSessionRecord,

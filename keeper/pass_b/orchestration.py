@@ -16,6 +16,10 @@ from keeper.evidence_input import (
     validate_provider_input,
     validate_review_input_declaration,
 )
+from keeper.pass_b.authority_reservation import (
+    AuthorityAttemptReservation,
+    UnavailableAuthorityAttemptReservation,
+)
 from keeper.pass_b.conversation import (
     WorkflowBlueprint,
     validate_delegated_action,
@@ -56,6 +60,7 @@ from keeper.pass_b.models import (
 )
 from keeper.pass_b.launch_authority import (
     LaunchAuthority,
+    LaunchAuthorization,
     ProjectStatusReader,
     UnavailableLaunchAuthority,
 )
@@ -100,6 +105,7 @@ class OrchestrationService:
         *,
         clock: Clock | None = None,
         launch_authority: LaunchAuthority | None = None,
+        authority_reservation: AuthorityAttemptReservation | None = None,
         usage_reset_verifier: UsageResetVerifier | None = None,
         project_status: ProjectStatusReader | None = None,
     ) -> None:
@@ -107,6 +113,10 @@ class OrchestrationService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.launch_authority = (
             launch_authority or UnavailableLaunchAuthority()
+        )
+        self.authority_reservation = (
+            authority_reservation
+            or UnavailableAuthorityAttemptReservation()
         )
         self.usage_reset_verifier = (
             usage_reset_verifier or UnavailableUsageResetVerifier()
@@ -1326,12 +1336,34 @@ class OrchestrationService:
         self.repository.replace(rejected, expected_revision=record.revision)
         raise PermissionError(detail)
 
+    def run_prepared_assignment(
+        self,
+        assignment_id: str,
+        workspace_path: Path,
+        *,
+        global_context: dict[str, object],
+        task_context: dict[str, object],
+        evidence_reference_ids: tuple[str, ...] = (),
+        side_effect_class: str = "REVERSIBLE_WORKSPACE_WRITE",
+        after_launch_claim: Callable[[], None] | None = None,
+    ) -> EvidenceBundleRecord:
+        return self.run_assignment(
+            assignment_id,
+            workspace_path,
+            authority_attempt_id=None,
+            global_context=global_context,
+            task_context=task_context,
+            evidence_reference_ids=evidence_reference_ids,
+            side_effect_class=side_effect_class,
+            after_launch_claim=after_launch_claim,
+        )
+
     def run_assignment(
         self,
         assignment_id: str,
         workspace_path: Path,
         *,
-        authority_attempt_id: str,
+        authority_attempt_id: str | None,
         global_context: dict[str, object],
         task_context: dict[str, object],
         evidence_reference_ids: tuple[str, ...] = (),
@@ -1380,6 +1412,14 @@ class OrchestrationService:
         profile = (
             self.repository.get(ExecutionProfileRecord, profile_id)
             if isinstance(profile_id, str)
+            else None
+        )
+        selection_id = assignment.usage_policy.get(
+            "provider_selection_id"
+        )
+        selection = (
+            self.repository.get(ProviderSelectionRecord, selection_id)
+            if isinstance(selection_id, str)
             else None
         )
         active_writes = [
@@ -1443,20 +1483,6 @@ class OrchestrationService:
             if references
             else None
         )
-        authorization = self.launch_authority.authorize(
-            workflow,
-            work_item,
-            assignment,
-            provider,
-            workspace,
-            authority_attempt_id,
-            reviewer_attempt_id=(
-                attempt_id
-                if assignment.role == AssignmentRole.REVIEWER
-                else None
-            ),
-            provider_input_base=provider_input_base,
-        )
         usage_rows = [
             item
             for item in self.repository.usage_reservations(
@@ -1476,86 +1502,188 @@ class OrchestrationService:
             if usage_rows
             else None
         )
-        delivered_input: DeliveredInputRecord | None = None
-        if provider_input_base is not None:
-            if (
-                authorization.provider_input is None
-                or authorization.delivered_input_digest is None
-                or authorization.provider_input_digest is None
-            ):
+        prepared = None
+        if authority_attempt_id is None:
+            if profile is None or selection is None:
                 raise PermissionError(
-                    "launch authority omitted the typed provider input binding"
+                    "prepared assignment lacks its durable profile or selection"
                 )
-            delivered_input = DeliveredInputRecord(
-                delivered_input_id=uuid.uuid4().hex,
-                project_id=assignment.project_id,
-                charter_id=assignment.charter_id,
-                charter_revision=assignment.charter_revision,
-                workflow_id=assignment.workflow_id,
-                work_item_id=assignment.work_item_id,
-                reviewer_assignment_id=assignment.assignment_id,
+            prepared = self.authority_reservation.prepare(
+                workflow,
+                work_item,
+                assignment,
+                profile,
+                selection,
+                provider,
+                workspace,
                 reviewer_attempt_id=attempt_id,
-                producer_assignment_id=str(
-                    provider_input_base["producer_assignment_id"]
+            )
+            authority_attempt_id = prepared.authority_attempt_id
+            provisional = AttemptRecord(
+                attempt_id=attempt_id,
+                assignment_id=assignment_id,
+                authority_attempt_id=authority_attempt_id,
+                launch_token=(
+                    "pending:" + prepared.reservation_plan_digest
                 ),
-                producer_attempt_id=str(
-                    provider_input_base["producer_attempt_id"]
+                state=AttemptState.RESERVED,
+                external_execution_id=None,
+                side_effect_class=side_effect_class,
+                started_at=None,
+                finished_at=None,
+                last_error=None,
+                created_at=now,
+                updated_at=now,
+                revision=1,
+                workspace_reservation_id=(
+                    workspace.workspace_reservation_id
                 ),
-                references=tuple(
-                    dict(item)
-                    for item in authorization.provider_input["references"]
+                usage_reservation_id=usage_reservation_id,
+                launch_plan_digest=prepared.reservation_plan_digest,
+                session_slot_claimed=True,
+                authority_reservation_state="LOCAL_PREPARED",
+                authority_reservation_plan_digest=(
+                    prepared.reservation_plan_digest
                 ),
-                manifest_digest=delivery_manifest_digest or "",
+            )
+            self.repository.reserve_attempt(
+                provisional,
+                expected_workflow=workflow,
+                expected_work_item=work_item,
+                expected_assignment=assignment,
+                expected_profile=profile,
+                expected_selection=selection,
+                expected_provider=provider,
+            )
+            self.repository.mark_authority_reservation_in_flight(
+                attempt_id,
+                prepared.reservation_plan_digest,
+                self._now(),
+            )
+            try:
+                self.repository.require_active_launch_ownership(
+                    attempt_id,
+                    expected_claim_state=AttemptState.RESERVED,
+                    checked_at=self._now(),
+                )
+                self.authority_reservation.reserve(prepared)
+                self.repository.mark_authority_reserved(
+                    attempt_id,
+                    prepared.reservation_plan_digest,
+                    self._now(),
+                )
+                authorization = self.launch_authority.authorize(
+                    workflow,
+                    work_item,
+                    assignment,
+                    provider,
+                    workspace,
+                    authority_attempt_id,
+                    reviewer_attempt_id=(
+                        attempt_id
+                        if assignment.role == AssignmentRole.REVIEWER
+                        else None
+                    ),
+                    provider_input_base=provider_input_base,
+                )
+                delivered_input = self._delivered_input_record(
+                    assignment,
+                    attempt_id,
+                    provider_input_base,
+                    delivery_manifest_digest,
+                    authorization,
+                    now,
+                )
+                self.repository.bind_authority_authorization(
+                    attempt_id,
+                    launch_token=authorization.launch_token,
+                    launch_plan_digest=authorization.launch_plan_digest,
+                    delivered_input=delivered_input,
+                    updated_at=self._now(),
+                )
+            except BaseException as error:
+                try:
+                    self.repository.mark_authority_reservation_uncertain(
+                        attempt_id,
+                        detail=(
+                            "Authority reservation or authorization outcome "
+                            f"is uncertain: {type(error).__name__}"
+                        ),
+                        updated_at=self._now(),
+                    )
+                except (KeyError, PermissionError):
+                    pass
+                raise
+        else:
+            authorization = self.launch_authority.authorize(
+                workflow,
+                work_item,
+                assignment,
+                provider,
+                workspace,
+                authority_attempt_id,
+                reviewer_attempt_id=(
+                    attempt_id
+                    if assignment.role == AssignmentRole.REVIEWER
+                    else None
+                ),
+                provider_input_base=provider_input_base,
+            )
+            delivered_input = self._delivered_input_record(
+                assignment,
+                attempt_id,
+                provider_input_base,
+                delivery_manifest_digest,
+                authorization,
+                now,
+            )
+            attempt = AttemptRecord(
+                attempt_id=attempt_id,
+                assignment_id=assignment_id,
+                authority_attempt_id=authority_attempt_id,
+                launch_token=authorization.launch_token,
+                state=AttemptState.RESERVED,
+                external_execution_id=None,
+                side_effect_class=side_effect_class,
+                started_at=None,
+                finished_at=None,
+                last_error=None,
+                created_at=now,
+                updated_at=now,
+                revision=1,
+                workspace_reservation_id=(
+                    workspace.workspace_reservation_id
+                ),
+                usage_reservation_id=usage_reservation_id,
+                launch_plan_digest=authorization.launch_plan_digest,
+                session_slot_claimed=True,
+                delivered_input_id=(
+                    delivered_input.delivered_input_id
+                    if delivered_input is not None
+                    else None
+                ),
                 delivered_input_digest=(
                     authorization.delivered_input_digest
                 ),
                 provider_input_digest=authorization.provider_input_digest,
-                provider_input=dict(authorization.provider_input),
-                delivery_method=str(
-                    provider_input_base["delivery_method"]
+                authority_reservation_state="AUTHORIZED",
+                authority_reservation_plan_digest=(
+                    authorization.launch_plan_digest
                 ),
-                composition_identity=str(
-                    authorization.provider_input["composition_identity"]
-                ),
-                delivered_at=now,
-                created_at=now,
-                updated_at=now,
-                revision=1,
             )
-        attempt = AttemptRecord(
-            attempt_id=attempt_id,
-            assignment_id=assignment_id,
-            authority_attempt_id=authority_attempt_id,
-            launch_token=authorization.launch_token,
-            state=AttemptState.RESERVED,
-            external_execution_id=None,
-            side_effect_class=side_effect_class,
-            started_at=None,
-            finished_at=None,
-            last_error=None,
-            created_at=now,
-            updated_at=now,
-            revision=1,
-            workspace_reservation_id=workspace.workspace_reservation_id,
-            usage_reservation_id=usage_reservation_id,
-            launch_plan_digest=authorization.launch_plan_digest,
-            session_slot_claimed=True,
-            delivered_input_id=(
-                delivered_input.delivered_input_id
-                if delivered_input is not None
-                else None
-            ),
-            delivered_input_digest=authorization.delivered_input_digest,
-            provider_input_digest=authorization.provider_input_digest,
+            self.repository.reserve_attempt(
+                attempt,
+                delivered_input=delivered_input,
+                expected_workflow=workflow,
+                expected_work_item=work_item,
+                expected_assignment=assignment,
+            )
+        claimed = self.repository.claim_launch(attempt_id, self._now())
+        self.repository.require_active_launch_ownership(
+            attempt_id,
+            expected_claim_state=AttemptState.LAUNCH_CLAIMED,
+            checked_at=self._now(),
         )
-        self.repository.reserve_attempt(
-            attempt,
-            delivered_input=delivered_input,
-            expected_workflow=workflow,
-            expected_work_item=work_item,
-            expected_assignment=assignment,
-        )
-        claimed = self.repository.claim_launch(attempt.attempt_id, self._now())
         if after_launch_claim is not None:
             after_launch_claim()
         if delivered_input is not None:
@@ -1632,6 +1760,58 @@ class OrchestrationService:
             running.attempt_id, evidence, self._now()
         )
         return evidence
+
+    def _delivered_input_record(
+        self,
+        assignment: AssignmentRecord,
+        attempt_id: str,
+        provider_input_base: dict[str, Any] | None,
+        delivery_manifest_digest: str | None,
+        authorization: LaunchAuthorization,
+        delivered_at: str,
+    ) -> DeliveredInputRecord | None:
+        if provider_input_base is None:
+            return None
+        if (
+            authorization.provider_input is None
+            or authorization.delivered_input_digest is None
+            or authorization.provider_input_digest is None
+        ):
+            raise PermissionError(
+                "launch authority omitted the typed provider input binding"
+            )
+        return DeliveredInputRecord(
+            delivered_input_id=uuid.uuid4().hex,
+            project_id=assignment.project_id,
+            charter_id=assignment.charter_id,
+            charter_revision=assignment.charter_revision,
+            workflow_id=assignment.workflow_id,
+            work_item_id=assignment.work_item_id,
+            reviewer_assignment_id=assignment.assignment_id,
+            reviewer_attempt_id=attempt_id,
+            producer_assignment_id=str(
+                provider_input_base["producer_assignment_id"]
+            ),
+            producer_attempt_id=str(
+                provider_input_base["producer_attempt_id"]
+            ),
+            references=tuple(
+                dict(item)
+                for item in authorization.provider_input["references"]
+            ),
+            manifest_digest=delivery_manifest_digest or "",
+            delivered_input_digest=authorization.delivered_input_digest,
+            provider_input_digest=authorization.provider_input_digest,
+            provider_input=dict(authorization.provider_input),
+            delivery_method=str(provider_input_base["delivery_method"]),
+            composition_identity=str(
+                authorization.provider_input["composition_identity"]
+            ),
+            delivered_at=delivered_at,
+            created_at=delivered_at,
+            updated_at=delivered_at,
+            revision=1,
+        )
 
     def _prepare_evidence_delivery(
         self,
