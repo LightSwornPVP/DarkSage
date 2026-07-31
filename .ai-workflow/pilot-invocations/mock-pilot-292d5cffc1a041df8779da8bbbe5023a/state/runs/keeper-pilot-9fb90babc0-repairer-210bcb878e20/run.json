@@ -1,0 +1,30 @@
+{
+  "accepted_findings": [],
+  "branch_name": "keeper/keeper-pilot-9fb90babc0",
+  "end_time": "2026-07-26T19:48:48.885703+00:00",
+  "failure_reason": null,
+  "files_changed": [
+    ".keeper-pilot/result.txt"
+  ],
+  "final_approval_authority": null,
+  "process_exit_code": 0,
+  "process_id": null,
+  "prompt_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-292d5cffc1a041df8779da8bbbe5023a\\state\\runs\\keeper-pilot-9fb90babc0-repairer-210bcb878e20\\prompt.md",
+  "provider_instance_id": "45f3811ae22e45998ea85ab019ddfc42",
+  "provider_name": "mock-repairer",
+  "reasoning_level": "high",
+  "rejected_findings": [],
+  "repair_history": [],
+  "retry_count": 0,
+  "review_findings": [],
+  "review_tree_identity": null,
+  "role": "repairer",
+  "run_id": "keeper-pilot-9fb90babc0-repairer-210bcb878e20",
+  "start_time": "2026-07-26T19:48:48.866157+00:00",
+  "status": "completed",
+  "stderr_log_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-292d5cffc1a041df8779da8bbbe5023a\\state\\runs\\keeper-pilot-9fb90babc0-repairer-210bcb878e20\\stderr.log",
+  "stdout_log_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-292d5cffc1a041df8779da8bbbe5023a\\state\\runs\\keeper-pilot-9fb90babc0-repairer-210bcb878e20\\stdout.log",
+  "task_id": "keeper-pilot-9fb90babc0",
+  "verification_result": null,
+  "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\da8bbbe5023a\\keeper-pilot-9fb90babc0"
+}

@@ -1,0 +1,26 @@
+%% Figure 4 — Backend-Authoritative Architecture
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 4
+%% Source Volumes: DS-ARC-001; ARCHITECTURE.md §2
+%% Type: Normative | Diagram Standard Class: Deployment
+%% Authoritative Labels: "Backend-authoritative," "Client," never "peer"
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 4 / DSF-003 §9.8):
+%% This diagram shows the backend as the sole authority over trading and account state, with the
+%% desktop client and the Planned/Phase-9 mobile client both connecting to it as clients only. Clients
+%% read and display backend-computed state; they never independently compute or store authoritative
+%% trading state, and neither client is a peer of the backend or of each other.
+
+graph TD
+    BE["Backend<br/><i>sole authority over trading and account state</i>"]
+    DC["Client (Desktop)"]
+    MC["Client (Mobile, Planned Phase 9)"]
+
+    DC -->|"reads/displays backend-computed state"| BE
+    MC -->|"reads/displays backend-computed state (Planned)"| BE
+
+    classDef authoritative fill:#0B0B0D,color:#F4F2EC,stroke:#C8A45D,stroke-width:2px;
+    classDef client fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px;
+    classDef planned fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px,stroke-dasharray: 4 3;
+    class BE authoritative;
+    class DC client;
+    class MC planned;

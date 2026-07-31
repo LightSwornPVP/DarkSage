@@ -1,0 +1,264 @@
+{
+  "release": "Foundation Completion",
+  "date": "2026-07-25",
+  "core_volumes": "DS-001 through DS-014",
+  "new_specialized_volumes_created": false,
+  "repair_history": [
+    {
+      "pass": "independent-audit-repair",
+      "date": "2026-07-25",
+      "findings_resolved": [
+        "H1",
+        "H2",
+        "H3",
+        "H4"
+      ],
+      "summary": "H1: added DS-ARC-026/027/028, DS-DB-028-033, DS-API-RSH-001..003/JRN-001..003/TIP-001, DS-UX-023-025, DS-SCA-028, DS-QA-024-026, and DS-011 \u00a76a Phase Mapping for DS-RSH/DS-JRN/DS-ALT. H2: DS-012 ADR index now lists ADR-001-007; duplicate section 12 renumbered to 16. H3: renumbered Founder Vision Completion sections in DS-003 through DS-014. H4: removed stale docs/codex.zip (untracked, pre-Foundation-Completion snapshot; not replaced, no zip-packaging workflow exists in scripts/publication/). Checksums below reflect files changed by this pass; unlisted-as-changed files are unmodified from the original 2026-07-25 release."
+    },
+    {
+      "pass": "blocker-repair-final",
+      "date": "2026-07-25",
+      "findings_resolved": [
+        "Blocker-1",
+        "Blocker-2",
+        "Blocker-3",
+        "Blocker-4",
+        "Blocker-5",
+        "Blocker-6"
+      ],
+      "summary": "Blocker 1: regenerated all 14 DOCX/14 PDF editions under docs/publication/releases/. Blocker 2: added DS-SCA-029 (Trade Intelligence Package security authority) plus DS-004/005/006/007/009 synchronization. Blocker 3: added DS-JRN-007 (journal retention/deletion) plus DS-004/005/006/007/008/009 synchronization. Blocker 4: corrected DS-011 to stop representing DS-JRN-006 as Planned/Sage-gated (it is governing-classified Future/Exploratory and not Sage-dependent). Blocker 5: expanded DS-API-RSH-001/002/003, DS-API-JRN-001/002/003, and DS-API-TIP-001 into full per-operation contracts; added DS-API-RSH-002 Acceptance Criteria. Blocker 6: corrected the prior addendum's traceability-row claim from 40 to the verified 36; final totals: 28 new requirement IDs across both repair passes (23 H1 + 5 this pass), 41 net new traceability rows (36 + 5), 184 total traceability rows/unique IDs, 0 duplicates, 46 Core manifest entries (unchanged count, checksums updated)."
+    }
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "2e92b7d25e3d7e5de6f94fa0abb86c545bdf6b78849e50f2111c6a4e0ca010e3",
+      "bytes": 1416
+    },
+    {
+      "path": "RELEASE_NOTES_2026-07-25_FOUNDATION_COMPLETION.md",
+      "sha256": "31d02957946078e73b3edb523795bf2c01c9faa92e0b82346f30264e7491d247",
+      "bytes": 8420
+    },
+    {
+      "path": "Volume-01-Foundation/DS-001-Executive-Vision.md",
+      "sha256": "7e4ebd8d6227dff365bedcd5814546b768f23547ac7cc62e7236857673a15c40",
+      "bytes": 26309
+    },
+    {
+      "path": "Volume-02-Product/DS-002-SRS.md",
+      "sha256": "e21955ad795691851f62c2c8282a6b79076246ca26caf583427130e2765957cd",
+      "bytes": 42430
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-AI-Sage.md",
+      "sha256": "9dbc0d3e7a5cbcfb0f3c559cf506f879b19b2005b743ce65bbcd99b470574fb9",
+      "bytes": 10559
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-ALT-Alerts.md",
+      "sha256": "4ff43a0c3836864dc28190b31f14661d85677b4bf3415920ca4434cb3389827e",
+      "bytes": 5113
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-BKT-Backtesting.md",
+      "sha256": "83c2e0764c2d710fb4d5c9cf25b5a6c85a7f198fc0fdd14a4d9290cd0e73d83c",
+      "bytes": 4902
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-CHT-Charts.md",
+      "sha256": "fca79dc3a7ac929a24224e7965f18e51f1fd309f08562b38cd708747ffb7b978",
+      "bytes": 5755
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-DAT-Data-Management.md",
+      "sha256": "e480a05927dfa2137777dc4dcc3ed24905624fd1a01c9e333a9daeacdf0cf8a0",
+      "bytes": 5562
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-EDU-Trading-Knowledge.md",
+      "sha256": "258bbb38c8b2e7694f0634406fcb2ca820ea5098ff951f77c366c5f1f8475fa0",
+      "bytes": 4224
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-EXE-Execution-and-Broker.md",
+      "sha256": "72f0f6380631951f736875eb77d34740588182b8d2f32115c63d6b91627294aa",
+      "bytes": 14507
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-INT-Integrations.md",
+      "sha256": "c23577463dadd07e9b121f4a2904a5f4316ccc8016e8ca641173236b6a0b36f1",
+      "bytes": 4576
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-JRN-Journal-and-Review.md",
+      "sha256": "cd006a8502c16e0c36d7356a8b6c3f547601f0ec54df18f283841a0e5475717b",
+      "bytes": 6960
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-MKT-Market-Data.md",
+      "sha256": "9515f9c872ea86291d400ad1bc7022b7d990815f2f891e7cfab29c53637104f4",
+      "bytes": 10774
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-MOB-Mobile-Client.md",
+      "sha256": "508e3644bb212fe9785a04faba03b1c2a37cb5271b7166a5598aee3522f25209",
+      "bytes": 3911
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-NFR-Non-Functional.md",
+      "sha256": "2809e532197c9c6a47ab1efba162506205087d90af17cdc7fef6314042846d27",
+      "bytes": 8111
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-OPS-Operations.md",
+      "sha256": "d7810e1e0e4c80d63e6093cf60a8894df94676b35a776c2d1b00eee264588c85",
+      "bytes": 6052
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-PERF-Strategy-Performance.md",
+      "sha256": "862200ce877bec9be4d6639500d1f70dce8b8172abe510519642f14135e92e45",
+      "bytes": 4727
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-PRT-Portfolio.md",
+      "sha256": "67a2e9480d0de821f9810a9b2cad305c530f9a25cd40863180f03df93aa491e7",
+      "bytes": 5196
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-RSH-Research-Intelligence.md",
+      "sha256": "095e6b164c8a06233d8db38ff0c4a6f431ffd7f80c491d9593a9e1b75fb036ab",
+      "bytes": 2943
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-RSK-Risk.md",
+      "sha256": "9bec6b23a2b7967aa4305d3b65256383f8c2d969281662999e66c9ecb43e9e2e",
+      "bytes": 6897
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-SCN-Scanner.md",
+      "sha256": "b3fd08b49d5c6bb8e5c0bcc6bc5728fa9c8d2d213e39b15258adafe4758e9c95",
+      "bytes": 7040
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-SEC-Security-and-Privacy.md",
+      "sha256": "57a1c7af5182bae02ec7880096d7f1603d6326b07010ebe5377cd899ac7784bb",
+      "bytes": 4290
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-SIG-Signal-System.md",
+      "sha256": "b121c8f7c674daf0d7d58bd68756e9c74e1efcd77db2c98c652da8e9a6ffc50e",
+      "bytes": 6613
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-STR-Strategies.md",
+      "sha256": "11658edf99a361a011e3113df42c9fff562665b0c51966af6bccb67543311b30",
+      "bytes": 4330
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-USR-Users-and-Onboarding.md",
+      "sha256": "b3627ef20a00874bf8c23aeb2a47be55416d7de6162179d8e78ec3ba47ed4201",
+      "bytes": 9497
+    },
+    {
+      "path": "Volume-02-Product/requirements/DS-WKS-Workspace-Studio.md",
+      "sha256": "aab382e4cb2af05dc84aa7c4b0344a955ba50f04852a4d51979fba9386af621d",
+      "bytes": 7491
+    },
+    {
+      "path": "Volume-03-Sage/DS-003-Sage-AI-Bible.md",
+      "sha256": "3cabd8525418e523f5e5bdb38fb8dd14d617c7ffa957278605e28f964861436a",
+      "bytes": 36271
+    },
+    {
+      "path": "Volume-04-Architecture/DS-004-Technical-Architecture.md",
+      "sha256": "d502fc1580ea11876ccfa38248d744647ada483e4efaad5b7d2ca6c2775a4d1b",
+      "bytes": 60038
+    },
+    {
+      "path": "Volume-05-Database/DS-005-Database-Design.md",
+      "sha256": "e99a7b07c80a6868b45a3099b48da7dc94c6c6ae12fbc52ee5e3542504242e23",
+      "bytes": 49449
+    },
+    {
+      "path": "Volume-06-API/DS-006-API-Specification.md",
+      "sha256": "75c0d0ac037c1c374451b748962cdf15fade82cbe5c3f0f81db25182b3ba494d",
+      "bytes": 91700
+    },
+    {
+      "path": "Volume-07-UX/DS-007-UI-UX-Bible.md",
+      "sha256": "097bf10063f0dc3d2fd24cb368aa64e774a1270eb34b21024887b9f249860b98",
+      "bytes": 40866
+    },
+    {
+      "path": "Volume-08-Security/DS-008-Security-Architecture.md",
+      "sha256": "1cb901c5c29eaa1ef902657965f634d99c741c5790e130722274ad121411c8cf",
+      "bytes": 67380
+    },
+    {
+      "path": "Volume-09-Testing/DS-009-Testing-and-QA.md",
+      "sha256": "9b4fbbe5d4351a37faf868615fa217dc1378ecf6915324764405c159a0d5cdc2",
+      "bytes": 50057
+    },
+    {
+      "path": "Volume-10-Standards/DS-010-Development-Standards.md",
+      "sha256": "9834b92d58ce990480bf43eeb20b215a59ddef5b23eae95776dad1df26ba2cf9",
+      "bytes": 38223
+    },
+    {
+      "path": "Volume-11-Roadmap/DS-011-Development-Roadmap.md",
+      "sha256": "75331137fda1d9fa5884161f02115a8bed9f7b5c39d4d2e41deba10d3ea25bec",
+      "bytes": 42724
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-001-Desktop-First-Application.md",
+      "sha256": "ab6e0bd19f816129074858edf9a960797b5ba5805366235c32d36a152484f32e",
+      "bytes": 3566
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-002-Sage-Cannot-Bypass-the-Risk-Engine.md",
+      "sha256": "976a1d8475e7e185d721981f4d564a28fce836ced87cc5a93a2d43dd8fac201e",
+      "bytes": 3727
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-003-Deterministic-Financial-Calculations.md",
+      "sha256": "3eab6a9b2f8d7195645070e2e284d63d7c5d6b4eee81b3272e9b7de436f79d45",
+      "bytes": 4100
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-004-Presentation-Independence.md",
+      "sha256": "8735fa92108407394d32ada0509430910a880eb1c006a262e415e46fafabbdf8",
+      "bytes": 3854
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-005-Five-Automation-Modes.md",
+      "sha256": "159fd4020ef860308cf53a4487503001be8cc861ebd71a0bd0cd4a0768fa1ae1",
+      "bytes": 858
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-006-Bounded-Sage-Agency.md",
+      "sha256": "bd2858d4f98c1d8cc4612098f235c9afb471b5d341cd36d29b57e591f4b7246f",
+      "bytes": 753
+    },
+    {
+      "path": "Volume-12-ADRs/ADR-007-External-Notifications-Non-Authoritative.md",
+      "sha256": "826fe402424554eaac43cb786aea77106dbff721252a70efb29f266388f11d84",
+      "bytes": 784
+    },
+    {
+      "path": "Volume-12-ADRs/DS-012-Architecture-Decision-Records.md",
+      "sha256": "47b0eef1636f4154078c6b7aa02afeb63680a09d0475d14aae37a1d5ea427746",
+      "bytes": 33899
+    },
+    {
+      "path": "Volume-13-Backlog/DS-013-Feature-Backlog.md",
+      "sha256": "dc3e879d24f495db783962847f0fdf37311b3bb58c3630f47f852a0857e6eba8",
+      "bytes": 71605
+    },
+    {
+      "path": "Volume-14-Ideas/DS-014-Idea-Parking-Lot.md",
+      "sha256": "ecb1872b47f6d36dd64d0eb32a4cc27edf7f2831c4efca5c97244ff70d9c862e",
+      "bytes": 48539
+    }
+  ]
+}

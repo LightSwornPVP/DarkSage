@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "description": "Demonstrate non-blocking cleanup registration.",
+      "file": ".keeper-pilot/result.txt",
+      "finding_id": "PILOT-L-1",
+      "line": 1,
+      "severity": "Low",
+      "status": "open",
+      "task_id": "keeper-pilot-30b16c28ff",
+      "title": "Pilot deferred fixture"
+    }
+  ]
+}

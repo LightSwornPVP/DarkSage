@@ -1,0 +1,71 @@
+%% Figure 17 — Phase 0-14 Roadmap
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 17
+%% Source Volumes: ROADMAP.md; DS-011 §6 (Phase Reference Table)
+%% Type: Normative | Diagram Standard Class: Sequence
+%% Authoritative Labels: exact phase names/numbers and sequencing-category labels (DS-RM-015: Strict,
+%% Parallel, Optional/Deferred, Gate-chain). Phase inclusion alone never promotes a deliverable to
+%% Committed or Planned (DS-RM-012).
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 17 / DSF-003 §9.8):
+%% This diagram lists all fifteen ROADMAP.md phases (0 through 14) with their sequencing category per
+%% DS-011 §6: Phase 0 Foundation (Strict), Phase 1 Core Market Intelligence (Strict), Phase 2
+%% Backtesting and Strategy Lab (Strict), Phase 3 Strategy Intelligence (Strict), Phase 4 Portfolio
+%% Builder (Parallel), Phase 5 Pattern Recognition/Advanced Charts/Trading Knowledge Engine (Parallel),
+%% Phase 6 Local AI, Cloud Providers, and Sage (Parallel), Phase 7 Paper Auto-Trader (Strict; first
+%% Gate-chain phase), Phase 8 Shadow Trading and Strategy Tournament (Gate-chain, Optional/Deferred
+%% content), Phase 9 Mobile App (Parallel), Phase 10 Advanced Research (Optional/Deferred, Parallel),
+%% Phase 11 Options Research (Optional/Deferred, Parallel), Phase 12 Production Hardening (Gate-chain),
+%% Phase 13 Limited Live Trading (Gate-chain), Phase 14 Full Live Platform (Gate-chain). Phase inclusion
+%% in this roadmap never by itself promotes a deliverable to Committed or Planned status.
+
+graph TD
+    P0["Phase 0 - Foundation<br/>(Strict)"]
+    P1["Phase 1 - Core Market Intelligence<br/>(Strict)"]
+    P2["Phase 2 - Backtesting and Strategy Lab<br/>(Strict)"]
+    P3["Phase 3 - Strategy Intelligence<br/>(Strict)"]
+    P4["Phase 4 - Portfolio Builder<br/>(Parallel)"]
+    P5["Phase 5 - Pattern Recognition, Advanced Charts,<br/>Trading Knowledge Engine (Parallel)"]
+    P6["Phase 6 - Local AI, Cloud Providers, and Sage<br/>(Parallel)"]
+    P7["Phase 7 - Paper Auto-Trader<br/>(Strict; first Gate-chain phase)"]
+    P8["Phase 8 - Shadow Trading and Strategy Tournament<br/>(Gate-chain; Optional/Deferred content)"]
+    P9["Phase 9 - Mobile App<br/>(Parallel)"]
+    P10["Phase 10 - Advanced Research<br/>(Optional/Deferred, Parallel)"]
+    P11["Phase 11 - Options Research<br/>(Optional/Deferred, Parallel)"]
+    P12["Phase 12 - Production Hardening<br/>(Gate-chain)"]
+    P13["Phase 13 - Limited Live Trading<br/>(Gate-chain)"]
+    P14["Phase 14 - Full Live Platform<br/>(Gate-chain)"]
+
+    P0 --> P1
+    P1 --> P2 --> P3
+    P1 --> P4
+    P1 --> P5
+    P1 --> P6
+    P2 --> P7
+    P7 --> P8
+    P7 --> P12
+    P12 --> P13
+    P13 --> P14
+    P1 --> P9
+    P3 --> P10
+    P5 --> P10
+    P2 --> P11
+
+    classDef strict fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px;
+    classDef parallel fill:#F4F2EC,color:#0B0B0D,stroke:#3B6EA5,stroke-width:1px;
+    classDef gatechain fill:#F4F2EC,color:#0B0B0D,stroke:#A33A3A,stroke-width:2px;
+    classDef optional fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px,stroke-dasharray: 4 3;
+    class P0 strict;
+    class P1 strict;
+    class P2 strict;
+    class P3 strict;
+    class P4 parallel;
+    class P5 parallel;
+    class P6 parallel;
+    class P7 gatechain;
+    class P8 gatechain;
+    class P12 gatechain;
+    class P13 gatechain;
+    class P14 gatechain;
+    class P9 parallel;
+    class P10 optional;
+    class P11 optional;

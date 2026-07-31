@@ -1,0 +1,54 @@
+feature_id,feature_name,depends_on_feature_id,depends_on_feature_name,dependency_type,notes
+FEAT-0154,Fixed-price stops,FEAT-0150,Deterministic Risk Engine,requires,Every stop order is validated by the Risk Engine.
+FEAT-0190,Approved deterministic exit plan requirement,FEAT-0150,Deterministic Risk Engine,requires,Exit-plan approval is itself a Risk Engine function.
+FEAT-0190,Approved deterministic exit plan requirement,FEAT-0139,No arbitrary customer code in deterministic execution,invariant,The exit-plan check cannot be bypassed by customer code.
+FEAT-0162,Trailing stops,FEAT-0154,Fixed-price stops,extends,Trailing behavior builds on the base stop-order model.
+FEAT-0170,Broker-native bracket orders,FEAT-0191,Broker/execution integration (core),requires,Bracket orders route through the core execution integration.
+FEAT-0172,DarkSage-managed protection,FEAT-0191,Broker/execution integration (core),requires,Software-managed protection still routes orders through the core integration.
+FEAT-0206,Multi-account trading,FEAT-0150,Deterministic Risk Engine,requires,Every account's proposals are independently risk-validated.
+FEAT-0185,Global kill switch,FEAT-0191,Broker/execution integration (core),requires,A kill switch must halt the actual order-submission path.
+FEAT-0122,Founder Local Sage,FEAT-0001,Founder/Customer edition boundary,requires,Local Sage's privacy depends on the edition boundary holding.
+FEAT-0123,Customer Cloud Sage,FEAT-0124,Sage bounded-agency behavioral contract,requires,Cloud Sage must honor the same behavioral limits as Local Sage.
+FEAT-0052,Sage-generated watchlists,FEAT-0123,Customer Cloud Sage,requires,Requires a Sage deployment to generate from.
+FEAT-0052,Sage-generated watchlists,FEAT-0051,Smart watchlists,extends,Builds on the smart/rule-based watchlist mechanism.
+FEAT-0203,Strategy-driven automated entries,FEAT-0190,Approved deterministic exit plan requirement,requires,No automated entry without an approved exit plan.
+FEAT-0132,Visual strategy builder,FEAT-0131,Restricted DarkSage strategy language,requires,The visual builder emits the same sandboxed language.
+FEAT-0133,Indicator builder,FEAT-0131,Restricted DarkSage strategy language,requires,Custom indicators run in the same sandbox.
+FEAT-0138,Strategy/indicator safety scanning,FEAT-0131,Restricted DarkSage strategy language,requires,Scanning enforces the sandbox boundary on authored content.
+FEAT-0225,Public strategy marketplace (long-term backlog),FEAT-0224,Verified performance,requires,No unverified performance claim may be marketed.
+FEAT-0225,Public strategy marketplace (long-term backlog),FEAT-0261,Creator strategy versioning,requires,Distribution requires a versioning model.
+FEAT-0032,Draggable stops and targets,FEAT-0031,Chart-based order placement,extends,Dragging is a specialized form of chart-based order interaction.
+FEAT-0025,Synchronized symbols across charts,FEAT-0024,Multi-chart layouts,requires,Synchronization only applies once more than one chart exists.
+FEAT-0026,Synchronized crosshairs,FEAT-0024,Multi-chart layouts,requires,Synchronization only applies once more than one chart exists.
+FEAT-0029,Chart-layout synchronization (cloud),FEAT-0022,Saved chart layouts,requires,Cloud sync requires a layout to already be saveable.
+FEAT-0045,Drawing synchronization (cloud),FEAT-0047,Drawing persistence architecture,requires,Cloud sync requires drawings to already be persistable.
+FEAT-0057,Watchlist-wide alerts,FEAT-0048,Multiple watchlists,requires,Applies an alert across an existing multi-watchlist structure.
+FEAT-0051,Smart watchlists,FEAT-0048,Multiple watchlists,extends,Adds rule-based membership to the base multi-watchlist feature.
+FEAT-0068,Screener export,FEAT-0058,Stock screener,requires,Cannot export results that do not yet exist.
+FEAT-0064,Saved screener templates,FEAT-0058,Stock screener,requires,Templates save a configuration of the base screener.
+FEAT-0065,Scan scheduling,FEAT-0064,Saved screener templates,requires,Scheduling runs an already-saved template.
+FEAT-0060,Options screener,FEAT-0011,Selected options intelligence (data),requires,Cannot screen options without options data.
+FEAT-0177,Options-specific exits,FEAT-0213,Selected options intelligence (product),requires,Options exit logic requires the options product layer.
+FEAT-0115,Implied-volatility heatmap,FEAT-0011,Selected options intelligence (data),requires,IV heatmap requires options data.
+FEAT-0102,Options expiration calendar,FEAT-0011,Selected options intelligence (data),requires,Expiration dates come from the options data layer.
+FEAT-0008,Device trust and revocation,FEAT-0007,Multi-factor authentication,complements,Both are part of the same account-security posture.
+FEAT-0246,Founder-asset extraction resistance,FEAT-0002,Repository boundary and build exclusion,requires,Extraction resistance builds on the build-exclusion mechanism.
+FEAT-0258,Customer account administration,FEAT-0237,Subscription billing,requires,Account administration operates on billed subscriptions.
+FEAT-0239,Grace mode,FEAT-0237,Subscription billing,requires,Grace mode is a lapsed-subscription state.
+FEAT-0240,Cancellation and data export,FEAT-0237,Subscription billing,requires,Cancellation applies to an existing subscription.
+FEAT-0241,Entitlement quota engine,FEAT-0237,Subscription billing,requires,Quotas are assigned per subscription tier.
+FEAT-0241,Entitlement quota engine,FEAT-0127,Sage usage quotas,extends,Sage quotas are one instance of the general quota engine.
+FEAT-0230,Mobile kill switches,FEAT-0185,Global kill switch,extends,Mobile is a delivery surface for the same underlying kill switch.
+FEAT-0230,Mobile kill switches,FEAT-0228,iPhone companion app,requires,Requires the iOS companion app to exist.
+FEAT-0230,Mobile kill switches,FEAT-0229,Android companion app,requires,Requires the Android companion app to exist.
+FEAT-0247,Incident and recovery center,FEAT-0249,"Observability (logging, metrics, tracing)",requires,The incident center is built on observability data.
+FEAT-0192,Order lifecycle reconciliation,FEAT-0191,Broker/execution integration (core),requires,Reconciliation compares against the core execution integration's records.
+FEAT-0141,Backtesting engine (core),FEAT-0009,Real-time and historical quote/candle retrieval,requires,Backtesting consumes historical market data.
+FEAT-0147,Trade proposal generation,FEAT-0150,Deterministic Risk Engine,requires,Every proposal is ultimately subject to Risk Engine validation before execution.
+FEAT-0268,Founder Sage Developer Mode,FEAT-0001,Founder/Customer edition boundary,requires,Developer Mode's Founder-only status depends on the edition boundary holding.
+FEAT-0268,Founder Sage Developer Mode,FEAT-0002,Repository boundary and build exclusion,requires,Exclusion from every customer build depends on the same build-exclusion mechanism.
+FEAT-0268,Founder Sage Developer Mode,FEAT-0122,Founder Local Sage,complements,"Both are Founder-only, desktop/workstation-only local AI capabilities sharing the same deployment boundary."
+FEAT-0268,Founder Sage Developer Mode,FEAT-0008,Device trust and revocation,requires,"Developer Mode should only be reachable from a trusted, verified Founder device."
+FEAT-0268,Founder Sage Developer Mode,FEAT-0249,"Observability (logging, metrics, tracing)",requires,Action/command logging builds on the same observability infrastructure.
+FEAT-0268,Founder Sage Developer Mode,FEAT-0247,Incident and recovery center,requires,Rollback/clean-diff recovery escalates through the same incident-and-recovery-center pattern.
+FEAT-0268,Founder Sage Developer Mode,FEAT-0251,Cloud and model cost controls,requires,CPU/memory/disk/execution-time/command-count/concurrency limits build on the same resource-control guardrails.

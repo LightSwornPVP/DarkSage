@@ -1,0 +1,9 @@
+version: 1
+blocking_severities:
+  - Critical
+  - High
+deferred_severities:
+  - Medium
+  - Low
+  - Minor
+maximum_repair_passes: 1

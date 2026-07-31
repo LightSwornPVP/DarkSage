@@ -1,0 +1,65 @@
+{
+  "accepted_findings": [
+    {
+      "description": "Require a repair and independent disposition.",
+      "file": ".keeper-pilot/result.txt",
+      "finding_id": "PILOT-H-1",
+      "line": 1,
+      "severity": "High",
+      "title": "Pilot blocking fixture"
+    }
+  ],
+  "branch_name": "keeper/keeper-pilot-31302ad318",
+  "end_time": "2026-07-26T19:25:07.388459+00:00",
+  "failure_reason": null,
+  "files_changed": [],
+  "final_approval_authority": null,
+  "process_exit_code": 0,
+  "process_id": null,
+  "prompt_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-3b97e0e88dac4ef9856652c5a90a86e9\\state\\runs\\keeper-pilot-31302ad318-reviewer-3c71a15b9cd0\\prompt.md",
+  "provider_instance_id": "7c41f8ba07c84ff18787ee157f475284",
+  "provider_name": "mock-reviewer",
+  "reasoning_level": "high",
+  "rejected_findings": [
+    {
+      "description": "Demonstrate non-blocking cleanup registration.",
+      "file": ".keeper-pilot/result.txt",
+      "finding_id": "PILOT-L-1",
+      "line": 1,
+      "severity": "Low",
+      "title": "Pilot deferred fixture"
+    }
+  ],
+  "repair_history": [
+    "keeper-pilot-31302ad318-repairer-506b50402fec"
+  ],
+  "retry_count": 0,
+  "review_findings": [
+    {
+      "description": "Require a repair and independent disposition.",
+      "file": ".keeper-pilot/result.txt",
+      "finding_id": "PILOT-H-1",
+      "line": 1,
+      "severity": "High",
+      "title": "Pilot blocking fixture"
+    },
+    {
+      "description": "Demonstrate non-blocking cleanup registration.",
+      "file": ".keeper-pilot/result.txt",
+      "finding_id": "PILOT-L-1",
+      "line": 1,
+      "severity": "Low",
+      "title": "Pilot deferred fixture"
+    }
+  ],
+  "review_tree_identity": "f10c333dd4b3d2fd71b9c253187de7b02d9fc74bce4f5852cb5db422dd192559",
+  "role": "reviewer",
+  "run_id": "keeper-pilot-31302ad318-reviewer-3c71a15b9cd0",
+  "start_time": "2026-07-26T19:25:07.379058+00:00",
+  "status": "completed",
+  "stderr_log_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-3b97e0e88dac4ef9856652c5a90a86e9\\state\\runs\\keeper-pilot-31302ad318-reviewer-3c71a15b9cd0\\stderr.log",
+  "stdout_log_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pilot-invocations\\mock-pilot-3b97e0e88dac4ef9856652c5a90a86e9\\state\\runs\\keeper-pilot-31302ad318-reviewer-3c71a15b9cd0\\stdout.log",
+  "task_id": "keeper-pilot-31302ad318",
+  "verification_result": null,
+  "workspace_path": "C:\\source\\repos\\DarkSage.worktrees\\keeper-productization\\.ai-workflow\\pw\\52c5a90a86e9\\keeper-pilot-31302ad318"
+}

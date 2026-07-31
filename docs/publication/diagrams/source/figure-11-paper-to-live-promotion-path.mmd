@@ -1,0 +1,52 @@
+%% Figure 11 — Paper-to-Live Promotion Path
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 11
+%% Source Volumes: DS-RM-006 (DS-011); DS-EXE-007; DS-SCA-022
+%% Type: Normative | Diagram Standard Class: State machine
+%% Authoritative Labels: exact Gate-chain phase names/order (DS-RM-006/DS-RM-015) and the eight
+%% DS-EXE-007 Live Trading Gate prerequisites.
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 11 / DSF-003 §9.8):
+%% This diagram lists the Gate-chain phases in order — Phase 7 (Paper Auto-Trader), Phase 8 (Shadow
+%% Trading and Strategy Tournament), Phase 12 (Production Hardening), Phase 13 (Limited Live Trading),
+%% Phase 14 (Full Live Platform) — and, gating entry into Phase 13, the full DS-EXE-007 prerequisite
+%% checklist: paper performance acceptable per strategy-promotion requirements, independent security
+%% review passed, broker reconciliation passed, kill switch (Emergency Stop/Flatten) tested and passed,
+%% data-health checks passed, duplicate-order prevention passed, monitoring active, and the user has
+%% explicitly and separately unlocked live trading. No development agent or AI process may satisfy this
+%% gate or enable live trading.
+
+stateDiagram-v2
+    [*] --> Phase7
+    Phase7: Phase 7 - Paper Auto-Trader
+    Phase8: Phase 8 - Shadow Trading and Strategy Tournament
+    Phase12: Phase 12 - Production Hardening
+    Phase13: Phase 13 - Limited Live Trading
+    Phase14: Phase 14 - Full Live Platform
+    Gate: DS-EXE-007 Live Trading Gate (all eight required)
+
+    Phase7 --> Phase8
+    Phase8 --> Phase12
+    Phase12 --> Gate
+    Gate --> Phase13: all eight prerequisites pass
+    Phase13 --> Phase14
+
+    state Gate {
+        direction LR
+        [*] --> G1
+        G1: 1. Paper performance acceptable
+        G2: 2. Independent security review passed
+        G3: 3. Broker reconciliation passed
+        G4: 4. Kill switch (Emergency Stop/Flatten) tested and passed
+        G5: 5. Data-health checks passed
+        G6: 6. Duplicate-order prevention passed
+        G7: 7. Monitoring active
+        G8: 8. User has explicitly and separately unlocked live trading
+        G1 --> G2
+        G2 --> G3
+        G3 --> G4
+        G4 --> G5
+        G5 --> G6
+        G6 --> G7
+        G7 --> G8
+        G8 --> [*]
+    }

@@ -1,0 +1,44 @@
+%% Figure 3 — Canonical Trade Validation Pipeline
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 3
+%% Source Volumes: ARCHITECTURE.md §14; DS-ARC-011; DS-EXE-001; DS-API-EXE-001
+%% Type: Normative | Diagram Standard Class: AI pipeline
+%% Authoritative Labels: exact stage names/order from docs/pipeline-stages.txt — no renaming, reordering, or omission.
+%% This diagram reproduces the canonical TradeValidationPipeline verbatim; it is a rendering of
+%% docs/pipeline-stages.txt, never a second, independent source for the pipeline's stage list.
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 3 / DSF-003 §9.8):
+%% This diagram lists all twelve TradeValidationPipeline stages in exact order, since the diagram's
+%% meaning depends entirely on order: AI / Strategy Engine, Trade Proposal, Signal Validator, Strategy
+%% Validation, Risk Engine, Permissions Engine, Portfolio / Exposure Checks, Buying Power Checks, Market
+%% Condition Checks, Order Validation, Execution Engine, Broker Adapter. No stage may be renamed,
+%% reordered, duplicated, or omitted. AI may only originate a Trade Proposal; every subsequent stage is
+%% deterministic, independently-authoritative validation, permission, or execution logic.
+
+graph LR
+    S1["AI / Strategy Engine"] --> S2["Trade Proposal"]
+    S2 --> S3["Signal Validator"]
+    S3 --> S4["Strategy Validation"]
+    S4 --> S5["Risk Engine"]
+    S5 --> S6["Permissions Engine"]
+    S6 --> S7["Portfolio / Exposure Checks"]
+    S7 --> S8["Buying Power Checks"]
+    S8 --> S9["Market Condition Checks"]
+    S9 --> S10["Order Validation"]
+    S10 --> S11["Execution Engine"]
+    S11 --> S12["Broker Adapter"]
+
+    classDef aiStage fill:#F4F2EC,color:#0B0B0D,stroke:#3B6EA5,stroke-width:2px;
+    classDef safetyStage fill:#F4F2EC,color:#0B0B0D,stroke:#A33A3A,stroke-width:2px;
+    classDef deterministicStage fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px;
+    class S1 aiStage;
+    class S5 safetyStage;
+    class S6 safetyStage;
+    class S2 deterministicStage;
+    class S3 deterministicStage;
+    class S4 deterministicStage;
+    class S7 deterministicStage;
+    class S8 deterministicStage;
+    class S9 deterministicStage;
+    class S10 deterministicStage;
+    class S11 deterministicStage;
+    class S12 deterministicStage;

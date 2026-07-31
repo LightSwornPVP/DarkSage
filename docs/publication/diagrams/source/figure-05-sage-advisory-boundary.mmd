@@ -1,0 +1,46 @@
+%% Figure 5 — Sage Advisory Boundary
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 5
+%% Source Volumes: ADR-002; DS-003 Core Rule; DS-PRD-006
+%% Type: Normative | Diagram Standard Class: Trust boundary/security
+%% Authoritative Labels: "Sage advises," "Risk Engine — independent authority," "no direct call"
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 5 / DSF-003 §9.8):
+%% This diagram contains no edge — of any style, dashed or solid — from Sage to the Execution Engine
+%% or to the Broker Adapter. Sage's only outgoing connection is to Trade Proposal preparation, labeled
+%% "Sage advises." The Risk Engine, Execution Engine, and Broker Adapter are enclosed in a separate
+%% "Execution Authority Boundary" region that Sage is drawn structurally outside of and has no path
+%% into. A proposal reaches the Risk Engine only through the Trade Proposal node, never directly from
+%% Sage. Sage's own node label additionally states in text that it has no path to the Execution Engine
+%% or Broker Adapter, so the prohibition is legible even without color or line-style perception.
+%%
+%% HIGH1 repair note (independent-audit finding): the prior version of this diagram represented the
+%% prohibition as a dashed "NO DIRECT CALL" arrow from Sage to the Execution Engine and Broker Adapter.
+%% Even labeled, a drawn arrow visually represents a path/connection and contradicted the controlling
+%% prohibition it was meant to state. Both arrows are removed outright (not restyled) and replaced with
+%% a non-path visual mechanism: a boundary subgraph plus an inline textual note on Sage's own node.
+
+graph LR
+    Sage["Sage<br/><i>advisory only</i><br/>⛔ no path to Execution Engine or Broker Adapter"]
+    Proposal["Trade Proposal"]
+
+    subgraph Boundary["🔒 Execution Authority Boundary — Sage has no path into this region"]
+        Risk["Risk Engine<br/><i>independent authority</i>"]
+        Exec["Execution Engine"]
+        Broker["Broker Adapter"]
+        Risk --> Exec
+        Exec --> Broker
+    end
+
+    Sage -->|"Sage advises"| Proposal
+    Proposal -->|"only approved entry into the pipeline"| Risk
+
+    classDef advisory fill:#F4F2EC,color:#0B0B0D,stroke:#3B6EA5,stroke-width:2px;
+    classDef authority fill:#F4F2EC,color:#0B0B0D,stroke:#A33A3A,stroke-width:2px;
+    classDef neutral fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px;
+    class Sage advisory;
+    class Risk authority;
+    class Proposal neutral;
+    class Exec neutral;
+    class Broker neutral;
+
+%% No edge in this file connects Sage to Risk, Exec, or Broker directly — Sage's only edge targets Proposal.

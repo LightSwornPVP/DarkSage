@@ -1,0 +1,41 @@
+%% Figure 16 — DS-013 versus DS-014 Boundary
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 16
+%% Source Volumes: DS-BLG-006; DS-IDG-005
+%% Type: Conceptual | Diagram Standard Class: Component
+%% Authoritative Labels: "Idea (DS-014)," "Backlog Item (DS-013)," "Promotion"
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 16 / DSF-003 §9.8):
+%% This diagram shows two distinct, separately-drawn relationships between DS-014 and DS-013, not one
+%% blended relationship. First, Promotion is one-way only, DS-014 to DS-013: a solid arrow points from
+%% the Idea node to the Backlog Item node, labeled "Promotion (one-way, requires the approved
+%% controlling process)" — no arrowhead points back from DS-013 to DS-014, since a DS-013 backlog item
+%% is never promoted backward into DS-014. Second, Cross-reference is genuinely bidirectional: a
+%% separate dashed line with arrowheads at both ends connects the same two nodes, labeled
+%% "Cross-reference (bidirectional, by ID)" — this is the by-ID citation relationship (for example,
+%% DS-IDEA-001 in DS-014 cited by DS-BL-018 in DS-013 and vice versa), not a second promotion path.
+%% Neither document restates the other's content as a second authority; DS-014 holds the earlier-stage
+%% research concept, DS-013 holds the feature once it is understood enough to track as a potential
+%% product capability.
+%%
+%% HIGH2 repair note (independent-audit finding): the prior version of this diagram used one
+%% bidirectional arrow labeled "Promotion" for both relationships at once, which incorrectly implied
+%% a DS-013 item could be promoted backward into DS-014. Promotion is now a distinct one-way solid edge
+%% (DS-014 -> DS-013 only); cross-referencing is now a distinct, genuinely bidirectional dashed edge.
+
+graph LR
+    subgraph DS014["DS-014 - Idea Parking Lot"]
+        Idea["Idea (DS-014)<br/><i>research-stage concept,<br/>speculative direction,<br/>technical exploration</i>"]
+    end
+    subgraph DS013["DS-013 - Feature Backlog"]
+        Backlog["Backlog Item (DS-013)<br/><i>productized candidate:<br/>defined scope, Product Area,<br/>preliminary Rationale</i>"]
+    end
+
+    Idea -->|"Promotion — one-way, DS-014 to DS-013 only,<br/>requires the approved controlling process"| Backlog
+    Idea <-.->|"Cross-reference — bidirectional, by ID,<br/>neither restates the other as a<br/>second authority"| Backlog
+
+    classDef idea fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px,stroke-dasharray: 4 3;
+    classDef backlog fill:#F4F2EC,color:#0B0B0D,stroke:#C8A45D,stroke-width:2px;
+    class Idea idea;
+    class Backlog backlog;
+    linkStyle 0 stroke:#C8A45D,stroke-width:2px;
+    linkStyle 1 stroke:#A7ABB3,stroke-dasharray: 4 3;

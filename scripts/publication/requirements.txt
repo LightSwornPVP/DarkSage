@@ -1,0 +1,13 @@
+# Intentionally empty: validate_publication.py, generate_manifest.py,
+# record_baseline.py, and checksum_artifacts.py remain standard-library-only
+# (hashlib, subprocess, pathlib, json, re, argparse, dataclasses,
+# urllib.parse, unittest). No third-party packages, no network access, no
+# paid services for these tools.
+#
+# The DOCX/PDF generation pipeline added for the publication-output pass
+# (docgen/) is a separate concern and deliberately does NOT install into this
+# file or the repository's application venv (.venv/ at repo root, used by the
+# FastAPI backend). It lives in its own isolated, repo-local virtual
+# environment at scripts/publication/.venv/ (gitignored, never committed)
+# with its own pinned versions — see docgen/requirements.txt and
+# scripts/publication/README.md ("Document-Generation Tooling").

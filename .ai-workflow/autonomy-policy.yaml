@@ -1,0 +1,53 @@
+version: 1
+limits:
+  maximum_builder_attempts: 2
+  maximum_repair_passes: 1
+  maximum_process_restarts: 2
+  maximum_simultaneous_builders: 1
+  maximum_simultaneous_reviewers: 1
+protected_actions:
+  - force_push
+  - rewrite_history
+  - delete_repository
+  - delete_backup_branch
+  - publish_secret
+  - spend_money
+  - create_paid_resource
+  - deploy_production
+  - enable_live_trading
+  - place_real_trade
+  - weaken_security
+  - disable_required_test
+  - major_architecture_change
+providers:
+  disabled:
+    - qwen2.5-coder:14b
+  limited:
+    qwen3-coder:30b:
+      general_purpose: true
+      independent_primary_review_required: true
+      never_fallback: true
+      non_qwen_final_review_components:
+        - authentication
+        - authorization
+        - secrets
+        - financial-calculation
+        - risk
+        - trade-validation
+        - execution
+        - broker
+        - database-migration
+        - deployment
+        - live-trading
+reasoning:
+  default: medium
+  high_when:
+    - more_than_five_important_files
+    - architecture_or_workflow_state_change
+    - automated_tests_fail_twice
+    - qwen_authored_important_area
+    - security_authentication_database_or_financial
+  extra_high_only_when:
+    - live_trading_or_brokerage
+    - unresolved_critical_finding
+    - crosses_several_major_boundaries

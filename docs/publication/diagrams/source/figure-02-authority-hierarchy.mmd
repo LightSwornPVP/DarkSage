@@ -1,0 +1,38 @@
+%% Figure 2 — Public Authority Hierarchy
+%% Diagram Register: docs/publication/DIAGRAM_REGISTER.md, row 2
+%% Source Volumes: DS-012 §7 (DS-ADR-010)
+%% Type: Normative | Diagram Standard Class: Component
+%% Authoritative Labels: the exact six tier names from DS-ADR-010 (docs/codex/Volume-12-ADRs/DS-012-Architecture-Decision-Records.md §7)
+%%
+%% Accessibility description (full sentence form, required per DSF-001 §G row 2 / DSF-003 §9.8):
+%% This diagram shows DarkSage's six-tier conflict-resolution hierarchy in strict reading order from
+%% highest to lowest authority: (1) Mandatory root security and trading governance and fixed-priority
+%% safety rules; (2) Approved owner decisions within those boundaries; (3) Approved ADRs; (4) Approved
+%% Codex volumes and requirements; (5) Implementation documentation and code-level decisions; (6) Local
+%% workflow and convenience files. A downward arrow between each tier states that no lower tier may
+%% override a higher one. Tier 6 (local workflow files, e.g. .ai-workflow/**) is never authoritative
+%% above any other tier.
+
+graph TD
+    T1["Tier 1 - Mandatory Root Security/Trading Governance<br/>and Fixed-Priority Safety Rules<br/><i>SECURITY_RULES.md, TRADING_RULES.md, Risk Engine authority,<br/>deterministic-financial-truth, TradeValidationPipeline safeguards</i>"]
+    T2["Tier 2 - Approved Owner Decisions<br/><i>within Tier 1 boundaries</i>"]
+    T3["Tier 3 - Approved ADRs<br/><i>ADR-001 through ADR-004 and any future Approved ADR</i>"]
+    T4["Tier 4 - Approved Codex Volumes/Requirements<br/><i>DS-001 through DS-014</i>"]
+    T5["Tier 5 - Implementation Documentation<br/><i>design notes, code comments, sub-Codex documentation</i>"]
+    T6["Tier 6 - Local Workflow/Convenience Files<br/><i>.ai-workflow/** and equivalent - never authoritative above this tier</i>"]
+
+    T1 -->|"no lower tier may override"| T2
+    T2 -->|"no lower tier may override"| T3
+    T3 -->|"no lower tier may override"| T4
+    T4 -->|"no lower tier may override"| T5
+    T5 -->|"no lower tier may override"| T6
+
+    classDef tier1 fill:#0B0B0D,color:#F4F2EC,stroke:#A33A3A,stroke-width:2px;
+    classDef tier2 fill:#17181C,color:#F4F2EC,stroke:#C8A45D,stroke-width:2px;
+    classDef tierN fill:#F4F2EC,color:#0B0B0D,stroke:#2A2D33,stroke-width:1px;
+    class T1 tier1;
+    class T2 tier2;
+    class T3 tierN;
+    class T4 tierN;
+    class T5 tierN;
+    class T6 tierN;

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-07-26T19:49:13.0304601+00:00",
+  "keeper_version": "0.5.0",
+  "runtime": {
+    "launcher_command": "py -3.14",
+    "virtual_environment_executable": "C:\\source\\repos\\DarkSage\\.venv\\Scripts\\python.exe",
+    "python_version": "3.14.6",
+    "architecture": "64bit",
+    "tcl_version": "8.6.15",
+    "tk_version": "8.6.15",
+    "tcl_library": "C:\\Users\\nhfah\\AppData\\Local\\Python\\pythoncore-3.14-64\\tcl\\tcl8.6",
+    "tk_library": "C:\\Users\\nhfah\\AppData\\Local\\Python\\pythoncore-3.14-64\\tcl\\tk8.6"
+  },
+  "source_smoke": {
+    "command": "C:\\source\\repos\\DarkSage\\.venv\\Scripts\\python.exe -m keeper.desktop --data-dir C:\\tmp\\keeper-rendered-smoke-20260726 --ui-smoke",
+    "exit_code": 0,
+    "rendered_tabs": 9,
+    "selected_tab": "Workflow",
+    "button_callback": "Refresh",
+    "status_update": "Dashboard refreshed",
+    "root_viewable": true,
+    "evidence_path": "C:\\tmp\\keeper-rendered-smoke-20260726\\ui-smoke-evidence.json"
+  },
+  "packaged_smoke": {
+    "artifact": "C:\\tmp\\keeper-package-0.5.0-final\\keeper.pyz",
+    "diagnostics": "passed",
+    "mock_workflow": "passed",
+    "rendered_tk": "passed",
+    "clean_exit": true,
+    "run_history_before_reopen": 1,
+    "run_history_after_reopen": 1,
+    "evidence_path": "C:\\tmp\\keeper-package-0.5.0-final\\data\\ui-smoke-evidence.json"
+  },
+  "result": "passed"
+}
