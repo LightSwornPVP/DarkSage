@@ -649,6 +649,46 @@ class PassBRepository:
             _validate_assignment_binding(workflow, work_item, assignment)
             return workflow, work_item, assignment
 
+    def reconcile_workflow_completion(
+        self,
+        workflow_id: str,
+        *,
+        completed_at: str,
+    ) -> WorkflowRecord:
+        """Atomically terminalize an active workflow whose work is complete."""
+
+        with self.store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            workflow = self._get(
+                connection, WorkflowRecord, workflow_id
+            )
+            work_items = self._workflow_items(connection, workflow)
+            all_completed = all(
+                item.state == WorkItemState.COMPLETED
+                for item in work_items
+            )
+            if workflow.state == WorkflowState.COMPLETED:
+                if not all_completed:
+                    raise RuntimeError(
+                        "completed workflow contains incomplete durable work"
+                    )
+                return workflow
+            if (
+                workflow.state != WorkflowState.ACTIVE
+                or not all_completed
+            ):
+                raise PermissionError(
+                    "workflow cannot complete before all durable work"
+                )
+            updated = replace(
+                workflow,
+                state=WorkflowState.COMPLETED,
+                updated_at=completed_at,
+                revision=workflow.revision + 1,
+            )
+            self._replace(connection, updated, workflow.revision)
+        return updated
+
     def reserve_workspace(self, record: WorkspaceReservationRecord) -> None:
         if record.state != ReservationState.ACTIVE:
             raise ValueError("new workspace reservations must be active")
@@ -1556,6 +1596,10 @@ class PassBRepository:
             work_item = self._get(
                 connection, WorkItemRecord, assignment.work_item_id
             )
+            workflow = self._get(
+                connection, WorkflowRecord, assignment.workflow_id
+            )
+            _validate_assignment_binding(workflow, work_item, assignment)
             producer_evidence = self._get(
                 connection,
                 EvidenceBundleRecord,
@@ -1565,6 +1609,14 @@ class PassBRepository:
                 connection,
                 AssignmentRecord,
                 review.reviewer_assignment_id,
+            )
+            reviewer_work_item = self._get(
+                connection,
+                WorkItemRecord,
+                reviewer_assignment.work_item_id,
+            )
+            _validate_assignment_binding(
+                workflow, reviewer_work_item, reviewer_assignment
             )
             reviewer_attempt = self._get(
                 connection, AttemptRecord, review.reviewer_attempt_id
@@ -1742,6 +1794,38 @@ class PassBRepository:
                 updated_at=decided_at,
                 revision=reviewer_assignment.revision + 1,
             )
+            updated_reviewer_work_item = (
+                updated_work_item
+                if reviewer_work_item.work_item_id
+                == updated_work_item.work_item_id
+                else replace(
+                    reviewer_work_item,
+                    state=WorkItemState.COMPLETED,
+                    updated_at=decided_at,
+                    revision=reviewer_work_item.revision + 1,
+                )
+            )
+            updated_workflow = None
+            if accepted:
+                work_items = self._workflow_items(connection, workflow)
+                completed_items = {
+                    updated_work_item.work_item_id: updated_work_item,
+                    updated_reviewer_work_item.work_item_id: (
+                        updated_reviewer_work_item
+                    ),
+                }
+                if all(
+                    completed_items.get(
+                        item.work_item_id, item
+                    ).state == WorkItemState.COMPLETED
+                    for item in work_items
+                ):
+                    updated_workflow = replace(
+                        workflow,
+                        state=WorkflowState.COMPLETED,
+                        updated_at=decided_at,
+                        revision=workflow.revision + 1,
+                    )
             self._replace(connection, updated_review, review.revision)
             self._replace(
                 connection, updated_assignment, assignment.revision
@@ -1754,6 +1838,20 @@ class PassBRepository:
                 updated_reviewer,
                 reviewer_assignment.revision,
             )
+            if (
+                updated_reviewer_work_item.work_item_id
+                != updated_work_item.work_item_id
+            ):
+                self._replace(
+                    connection, updated_reviewer_work_item,
+                    reviewer_work_item.revision,
+                )
+            if updated_workflow is not None:
+                self._replace(
+                    connection,
+                    updated_workflow,
+                    workflow.revision,
+                )
         return updated_review, updated_assignment, updated_work_item
 
     def mark_authority_reservation_in_flight(
@@ -2700,6 +2798,37 @@ class PassBRepository:
             ).workspace_reservation_id
             == workspace_reservation_id
         ]
+
+    @staticmethod
+    def _workflow_items(
+        connection: sqlite3.Connection,
+        workflow: WorkflowRecord,
+    ) -> tuple[WorkItemRecord, ...]:
+        rows = connection.execute(
+            "SELECT payload,payload_hash FROM pass_b_records "
+            "WHERE kind=? AND project_id=? ORDER BY created_at,id",
+            (WorkItemRecord.KIND, workflow.project_id),
+        ).fetchall()
+        decoded = tuple(
+            PassBRepository._decode(WorkItemRecord, row) for row in rows
+        )
+        items = tuple(
+            item
+            for item in decoded
+            if item.workflow_id == workflow.workflow_id
+        )
+        if not items:
+            raise RuntimeError("durable workflow has no work items")
+        if any(
+            item.project_id != workflow.project_id
+            or item.charter_id != workflow.charter_id
+            or item.charter_revision != workflow.charter_revision
+            for item in items
+        ):
+            raise PermissionError(
+                "workflow contains cross-project or cross-charter work"
+            )
+        return items
 
     @staticmethod
     def _decode(record_type: type[R], row: sqlite3.Row) -> R:
