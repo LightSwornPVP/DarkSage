@@ -485,6 +485,8 @@ class AttemptRecord(PassBRecord):
     delivered_input_id: str | None = None
     delivered_input_digest: str | None = None
     provider_input_digest: str | None = None
+    authority_reservation_state: str = "LOCAL_PREPARED"
+    authority_reservation_plan_digest: str = "legacy-unbound"
 
     KIND = "attempt"
     ID_FIELD = "attempt_id"
@@ -496,6 +498,8 @@ class AttemptRecord(PassBRecord):
         "delivered_input_id": None,
         "delivered_input_digest": None,
         "provider_input_digest": None,
+        "authority_reservation_state": "AUTHORIZED",
+        "authority_reservation_plan_digest": "legacy-unbound",
     }
 
     def __post_init__(self) -> None:
@@ -507,6 +511,17 @@ class AttemptRecord(PassBRecord):
             or not self.launch_plan_digest
         ):
             raise ValueError("attempt authority and launch identities are required")
+        if self.authority_reservation_state not in {
+            "LOCAL_PREPARED",
+            "RESERVATION_IN_FLIGHT",
+            "AUTHORITY_RESERVED",
+            "AUTHORIZED",
+        }:
+            raise ValueError("attempt Authority reservation state is invalid")
+        if self.authority_reservation_plan_digest != "legacy-unbound" and len(
+            self.authority_reservation_plan_digest
+        ) != 64:
+            raise ValueError("attempt Authority reservation digest is invalid")
         input_binding = (
             self.delivered_input_id,
             self.delivered_input_digest,

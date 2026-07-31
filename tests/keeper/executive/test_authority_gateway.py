@@ -124,6 +124,76 @@ def test_no_authority_reservation_means_no_provider_launch(
     assert authority.side_effect_count == 0
 
 
+def test_prepare_binds_exact_charter_contained_workspace(
+    tmp_path: Path,
+) -> None:
+    charter, task, gateway, _, specialists = _task_and_gateway(tmp_path)
+    child = Path(charter.workspaces[0]) / "isolated-child"
+    child.mkdir(parents=True, exist_ok=True)
+
+    plan = gateway.prepare(
+        task,
+        charter,
+        specialists[0],
+        workspace=str(child),
+    )
+
+    assert Path(plan.workspace) == child.resolve()
+    assert Path(plan.reservation_payload["workspace"]) == child.resolve()
+
+
+def test_prepare_rejects_workspace_outside_charter(
+    tmp_path: Path,
+) -> None:
+    charter, task, gateway, _, specialists = _task_and_gateway(tmp_path)
+    outside = (
+        Path(charter.workspaces[0]).resolve().parent / "outside-charter"
+    )
+    outside.mkdir()
+
+    with pytest.raises(PermissionError, match="outside the active charter"):
+        gateway.prepare(
+            task,
+            charter,
+            specialists[0],
+            workspace=str(outside),
+        )
+
+
+def test_reservation_nonce_makes_safe_repreparation_unique(
+    tmp_path: Path,
+) -> None:
+    charter, task, gateway, _, specialists = _task_and_gateway(tmp_path)
+
+    first = gateway.prepare(
+        task,
+        charter,
+        specialists[0],
+        reservation_nonce="a" * 32,
+    )
+    second = gateway.prepare(
+        task,
+        charter,
+        specialists[0],
+        reservation_nonce="b" * 32,
+    )
+
+    assert first.authority_attempt_id != second.authority_attempt_id
+    assert first.project_id == second.project_id
+    assert first.task_id == second.task_id
+
+
+def test_reservation_nonce_rejects_noncanonical_identity(
+    tmp_path: Path,
+) -> None:
+    charter, task, gateway, _, specialists = _task_and_gateway(tmp_path)
+
+    with pytest.raises(ValueError, match="32 lowercase hex"):
+        gateway.prepare(
+            task, charter, specialists[0], reservation_nonce="NOT-CANONICAL"
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

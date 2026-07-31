@@ -6,12 +6,20 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from keeper.app.storage import KeeperStore, default_data_directory
+from keeper.executive.authority_gateway import (
+    AuthorityProviderBinding,
+    ProductionAuthorityBackedSpecialistGateway,
+)
 from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.executive.models import (
     FounderApprovalChallenge,
     ProjectCharter,
 )
 from keeper.executive.service import KeeperExecutive
+from keeper.pass_b.authority_reservation import (
+    AuthorityAttemptReservation,
+    ProductionAuthorityAttemptReservation,
+)
 from keeper.pass_b.control_room import ControlRoomService
 from keeper.pass_b.conversation import (
     CharterDraftContextRecord,
@@ -67,8 +75,13 @@ class PassBApplication:
         executive: ConversationExecutive | None = None,
         authority_client: ProductionAuthorityServiceClient | None = None,
         authority_health_client: AuthorityHealthClient | None = None,
+        provider_bindings: tuple[AuthorityProviderBinding, ...] = (),
+        authority_exchange_root: Path | None = None,
         usage_reset_verifier: UsageResetVerifier | None = None,
         _test_launch_authority: LaunchAuthority | None = None,
+        _test_authority_reservation: (
+            AuthorityAttemptReservation | None
+        ) = None,
     ) -> None:
         self.data_directory = (
             data_directory or default_data_directory()
@@ -115,9 +128,33 @@ class PassBApplication:
             )
         else:
             launch_authority = None
+        if _test_authority_reservation is not None:
+            if _test_launch_authority is None:
+                raise TypeError(
+                    "test reservation requires test launch composition"
+                )
+            authority_reservation = _test_authority_reservation
+        elif authority_client is not None and (
+            provider_bindings or authority_exchange_root is not None
+        ):
+            if not provider_bindings or authority_exchange_root is None:
+                raise TypeError(
+                    "production reservation requires bindings and exchange root"
+                )
+            gateway = ProductionAuthorityBackedSpecialistGateway(
+                authority_client,
+                provider_bindings,
+                authority_exchange_root,
+            )
+            authority_reservation = ProductionAuthorityAttemptReservation(
+                gateway, self.project_status
+            )
+        else:
+            authority_reservation = None
         self.orchestration = OrchestrationService(
             self.repository,
             launch_authority=launch_authority,
+            authority_reservation=authority_reservation,
             usage_reset_verifier=usage_reset_verifier,
             project_status=self.project_status,
         )
@@ -139,6 +176,9 @@ class PassBApplication:
         executive: ConversationExecutive,
         launch_authority: LaunchAuthority,
         usage_reset_verifier: UsageResetVerifier,
+        authority_reservation: (
+            AuthorityAttemptReservation | None
+        ) = None,
     ) -> PassBApplication:
         """Build an explicitly non-production deterministic composition."""
 
@@ -147,6 +187,7 @@ class PassBApplication:
             executive=executive,
             usage_reset_verifier=usage_reset_verifier,
             _test_launch_authority=launch_authority,
+            _test_authority_reservation=authority_reservation,
         )
 
     def begin_conversation(self, message: str) -> Any:
