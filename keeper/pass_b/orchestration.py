@@ -982,6 +982,11 @@ class OrchestrationService:
         claimed = self.repository.claim_launch(attempt.attempt_id, self._now())
         if after_launch_claim is not None:
             after_launch_claim()
+        if delivered_input is not None:
+            authorization = self.launch_authority.bind_committed_input(
+                authorization,
+                delivered_input.delivered_input_id,
+            )
         if canonical_workspace_path(workspace_path) != workspace.canonical_path:
             raise PermissionError(
                 "launch workspace became unsafe before adapter invocation"

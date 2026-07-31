@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Require an authenticated Executive commit receipt before KeeperAuthority can bind
+  typed reviewer input. The receipt proves the exact delivered-input record,
+  reviewer attempt, session slot, usage reservation, and RESERVED launch claim were
+  committed and conservatively launch-claimed before external execution; Authority
+  protocol 6 carries this binding.
+
 ## 0.6.0
 
 - Authorize restore against an integrity-checked immutable SQLite backup artifact,

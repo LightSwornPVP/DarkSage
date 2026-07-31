@@ -33,7 +33,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.5.0"
+SERVICE_VERSION = "1.6.0"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
@@ -763,6 +763,93 @@ class AuthorityServiceCore:
         )
         return {"attempt": record, "attempt_id": attempt_id}
 
+    def _verified_executive_input_receipt(
+        self,
+        value: object,
+        attempt: dict[str, Any],
+        provider_input: dict[str, Any],
+        *,
+        provider_input_digest: str,
+        delivered_input_digest: str,
+        manifest_digest: str,
+    ) -> dict[str, object]:
+        if not isinstance(value, dict):
+            raise PermissionError(
+                "provider input lacks an Executive commit receipt"
+            )
+        verifier = self.founder_capability_verifier
+        if verifier is None:
+            raise PermissionError(
+                "Executive commit receipt verification is unavailable"
+            )
+        composition = provider_input["composition_identity"]
+        if (
+            composition == "PRODUCTION_AUTHORITY"
+            and type(verifier) is not ProductionFounderCapabilityVerifier
+        ) or (
+            composition == "TEST_AUTHORITY"
+            and type(verifier) is not TestFounderCapabilityVerifier
+        ):
+            raise PermissionError(
+                "Executive receipt composition does not match Authority"
+            )
+        receipt = verifier.verify_executive_input_receipt(value)
+        issued_at = datetime.fromisoformat(str(receipt["issued_at"]))
+        now = datetime.now(UTC)
+        if issued_at > now + timedelta(seconds=5) or issued_at < (
+            now - timedelta(minutes=5)
+        ):
+            raise PermissionError(
+                "Executive delivered-input receipt is stale"
+            )
+        expected: dict[str, object] = {
+            "repository_mode": (
+                "PRODUCTION"
+                if provider_input["composition_identity"]
+                == "PRODUCTION_AUTHORITY"
+                else "TEST"
+            ),
+            "authority_attempt_id": attempt.get("id"),
+            "reviewer_attempt_id": provider_input["reviewer_attempt_id"],
+            "reviewer_assignment_id": attempt.get("task_id"),
+            "project_id": attempt.get("project_id"),
+            "charter_id": attempt.get("charter_id"),
+            "charter_revision": attempt.get("charter_revision"),
+            "workflow_id": provider_input["workflow_id"],
+            "work_item_id": attempt.get("stage_id"),
+            "producer_assignment_id": provider_input[
+                "producer_assignment_id"
+            ],
+            "producer_attempt_id": provider_input["producer_attempt_id"],
+            "provider_id": provider_input["provider_id"],
+            "account_id": provider_input["account_id"],
+            "session_id": attempt.get("provider_instance_id"),
+            "model_id": provider_input["model_id"],
+            "workspace": provider_input["workspace"],
+            "composition_identity": provider_input[
+                "composition_identity"
+            ],
+            "provider_input_digest": provider_input_digest,
+            "delivered_input_digest": delivered_input_digest,
+            "manifest_digest": manifest_digest,
+            "reference_set_digest": structured_digest(
+                provider_input["references"]
+            ),
+            "session_slot_claimed": True,
+            "launch_claim_state": "LAUNCH_CLAIMED",
+        }
+        mismatches = [
+            name
+            for name, expected_value in expected.items()
+            if receipt.get(name) != expected_value
+        ]
+        if mismatches:
+            raise PermissionError(
+                "Executive delivered-input receipt binding mismatch: "
+                + ", ".join(sorted(mismatches))
+            )
+        return receipt
+
     def _bind_provider_input(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
@@ -774,6 +861,7 @@ class AuthorityServiceCore:
                 "provider_input_digest",
                 "delivered_input_digest",
                 "manifest_digest",
+                "executive_commit_receipt",
             },
         )
         attempt_id = _text(payload["attempt_id"], "attempt ID")
@@ -799,6 +887,15 @@ class AuthorityServiceCore:
         if current is None:
             raise PermissionError("provider attempt is unavailable")
         state = current.pop("service_state", None)
+        receipt = self._verified_executive_input_receipt(
+            payload["executive_commit_receipt"],
+            current,
+            provider_input,
+            provider_input_digest=provider_input_digest,
+            delivered_input_digest=delivered_input_digest,
+            manifest_digest=manifest_digest,
+        )
+        receipt_digest = structured_digest(receipt)
         if state == "INPUT_BOUND":
             if (
                 current.get("authorized_client_sid") != client_sid
@@ -807,6 +904,9 @@ class AuthorityServiceCore:
                 != provider_input_digest
                 or current.get("delivered_input_digest")
                 != delivered_input_digest
+                or current.get("executive_commit_receipt") != receipt
+                or current.get("executive_commit_receipt_digest")
+                != receipt_digest
                 or not self.keys.verify("provider-input-binding", current)
             ):
                 raise PermissionError(
@@ -865,6 +965,8 @@ class AuthorityServiceCore:
                 "provider_input_digest": provider_input_digest,
                 "delivered_input_digest": delivered_input_digest,
                 "manifest_digest": manifest_digest,
+                "executive_commit_receipt": receipt,
+                "executive_commit_receipt_digest": receipt_digest,
                 "provider_input_bound_at": _now(),
             },
         )
@@ -893,7 +995,19 @@ class AuthorityServiceCore:
         if state == "INPUT_BOUND" and isinstance(provider_input, dict):
             try:
                 validated_input = validate_provider_input(provider_input)
-            except ValueError:
+                receipt = self._verified_executive_input_receipt(
+                    attempt.get("executive_commit_receipt"),
+                    attempt,
+                    validated_input,
+                    provider_input_digest=str(
+                        attempt.get("provider_input_digest")
+                    ),
+                    delivered_input_digest=str(
+                        attempt.get("delivered_input_digest")
+                    ),
+                    manifest_digest=str(attempt.get("manifest_digest")),
+                )
+            except (PermissionError, ValueError):
                 pass
             else:
                 input_binding_valid = (
@@ -904,6 +1018,8 @@ class AuthorityServiceCore:
                     == attempt.get("delivered_input_digest")
                     and validated_input["manifest_digest"]
                     == attempt.get("manifest_digest")
+                    and structured_digest(receipt)
+                    == attempt.get("executive_commit_receipt_digest")
                 )
         if (
             state not in {"RESERVED", "INPUT_BOUND"}
@@ -1184,6 +1300,9 @@ class AuthorityServiceCore:
                 ),
                 "provider_input_digest": attempt.get(
                     "provider_input_digest"
+                ),
+                "executive_commit_receipt_digest": attempt.get(
+                    "executive_commit_receipt_digest"
                 ),
                 "manifest_digest": attempt.get("manifest_digest"),
                 "exit_status": exit_status,

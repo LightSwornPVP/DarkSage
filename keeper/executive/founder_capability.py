@@ -16,6 +16,9 @@ CAPABILITY_ALGORITHM = "RS256-CNG-HIGH-PROTECTION"
 TEST_CAPABILITY_ALGORITHM = "TEST-HMAC-SHA256"
 CAPABILITY_PURPOSE = b"keeper-founder-authorization-capability-v1\x00"
 CONFIRMATION_PURPOSE = b"keeper-founder-confirmation-v2\x00"
+EXECUTIVE_INPUT_RECEIPT_PURPOSE = (
+    b"keeper-executive-delivered-input-commit-receipt-v1\x00"
+)
 APPLICATION_IDENTITY = "KEEPER_EXECUTIVE"
 _TEST_ISSUER_ID = "keeper-test-founder-issuer"
 _TEST_KEY = hashlib.sha256(
@@ -23,6 +26,23 @@ _TEST_KEY = hashlib.sha256(
 ).digest()
 _RSA_SHA256_DIGEST_INFO = bytes.fromhex(
     "3031300d060960864801650304020105000420"
+)
+_EXECUTIVE_INPUT_RECEIPT_FIELDS = {
+    "schema_version", "kind", "receipt_id", "database_id",
+    "recovery_epoch", "repository_mode", "delivered_input_id",
+    "delivered_input_record_revision", "delivered_input_record_digest",
+    "reviewer_attempt_id", "reviewer_assignment_id", "authority_attempt_id",
+    "project_id", "charter_id", "charter_revision", "workflow_id",
+    "work_item_id", "producer_assignment_id", "producer_attempt_id",
+    "provider_id", "account_id", "session_id", "model_id", "workspace",
+    "composition_identity", "provider_input_digest", "delivered_input_digest",
+    "manifest_digest",
+    "reference_set_digest", "usage_reservation_id", "session_slot_claimed",
+    "launch_claim_state", "committed_at", "issued_at",
+}
+_SIGNED_EXECUTIVE_INPUT_RECEIPT_FIELDS = (
+    _EXECUTIVE_INPUT_RECEIPT_FIELDS
+    | {"issuer_id", "issuer_key_id", "signature_algorithm", "signature"}
 )
 
 
@@ -51,6 +71,107 @@ def _unb64(value: str) -> bytes:
     ):
         raise PermissionError("Founder capability signature is not canonical")
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _validate_executive_input_receipt_unsigned(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    if set(value) != _EXECUTIVE_INPUT_RECEIPT_FIELDS:
+        raise PermissionError(
+            "Executive delivered-input commit receipt fields are invalid"
+        )
+    receipt = dict(value)
+    text_fields = _EXECUTIVE_INPUT_RECEIPT_FIELDS - {
+        "schema_version", "recovery_epoch", "charter_revision",
+        "delivered_input_record_revision", "session_slot_claimed",
+        "usage_reservation_id",
+    }
+    integer_minimums = {
+        "recovery_epoch": 0,
+        "charter_revision": 1,
+        "delivered_input_record_revision": 1,
+    }
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("kind")
+        != "executive_delivered_input_commit_receipt"
+        or receipt.get("repository_mode") not in {"PRODUCTION", "TEST"}
+        or receipt.get("launch_claim_state") != "LAUNCH_CLAIMED"
+        or receipt.get("session_slot_claimed") is not True
+        or any(
+            not isinstance(receipt.get(name), str) or not str(receipt[name])
+            for name in text_fields
+        )
+        or any(
+            isinstance(receipt.get(name), bool)
+            or not isinstance(receipt.get(name), int)
+            or cast(int, receipt[name]) < minimum
+            for name, minimum in integer_minimums.items()
+        )
+    ):
+        raise PermissionError(
+            "Executive delivered-input commit receipt is invalid"
+        )
+    usage_reservation_id = receipt.get("usage_reservation_id")
+    if usage_reservation_id is not None and (
+        not isinstance(usage_reservation_id, str) or not usage_reservation_id
+    ):
+        raise PermissionError(
+            "Executive delivered-input usage reservation is invalid"
+        )
+    for name in {
+        "delivered_input_record_digest", "provider_input_digest",
+        "delivered_input_digest", "manifest_digest", "reference_set_digest",
+    }:
+        digest = receipt.get(name)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise PermissionError(
+                "Executive delivered-input commit digest is invalid"
+            )
+    for name in {"committed_at", "issued_at"}:
+        try:
+            timestamp = datetime.fromisoformat(str(receipt[name]))
+        except ValueError as error:
+            raise PermissionError(
+                "Executive delivered-input commit time is invalid"
+            ) from error
+        if timestamp.tzinfo is None:
+            raise PermissionError(
+                "Executive delivered-input commit time is invalid"
+            )
+    if datetime.fromisoformat(str(receipt["committed_at"])) > (
+        datetime.fromisoformat(str(receipt["issued_at"]))
+    ):
+        raise PermissionError(
+            "Executive delivered-input commit receipt predates its record"
+        )
+    return receipt
+
+
+def validate_executive_input_receipt(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    if set(value) != _SIGNED_EXECUTIVE_INPUT_RECEIPT_FIELDS:
+        raise PermissionError(
+            "signed Executive delivered-input receipt fields are invalid"
+        )
+    unsigned = {
+        name: value[name] for name in _EXECUTIVE_INPUT_RECEIPT_FIELDS
+    }
+    _validate_executive_input_receipt_unsigned(unsigned)
+    for name in {
+        "issuer_id", "issuer_key_id", "signature_algorithm", "signature",
+    }:
+        if not isinstance(value.get(name), str) or not value[name]:
+            raise PermissionError(
+                "signed Executive delivered-input receipt is invalid"
+            )
+    _unb64(str(value["signature"]))
+    return dict(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +457,27 @@ class ProductionFounderCapabilityIssuer:
         )
         return FounderAuthorizationCapability(**unsigned, signature=signature)
 
+    def _sign_executive_input_receipt(
+        self, unsigned: Mapping[str, object]
+    ) -> dict[str, object]:
+        receipt = _validate_executive_input_receipt_unsigned(unsigned)
+        verifier = self.verifier_configuration()
+        signed = {
+            **receipt,
+            "issuer_id": verifier["issuer_id"],
+            "issuer_key_id": verifier["key_id"],
+            "signature_algorithm": CAPABILITY_ALGORITHM,
+        }
+        return {
+            **signed,
+            "signature": _b64(
+                _cng_sign(
+                    self.__key_name,
+                    _digest(EXECUTIVE_INPUT_RECEIPT_PURPOSE, signed),
+                )
+            ),
+        }
+
     def verifier_configuration(self) -> dict[str, object]:
         modulus, exponent = _cng_public_key(self.__key_name)
         public = {
@@ -401,6 +543,27 @@ class TestFounderCapabilityIssuer:
         )
         return FounderAuthorizationCapability(**unsigned, signature=signature)
 
+    def sign_executive_input_receipt(
+        self, unsigned: Mapping[str, object]
+    ) -> dict[str, object]:
+        receipt = _validate_executive_input_receipt_unsigned(unsigned)
+        signed = {
+            **receipt,
+            "issuer_id": _TEST_ISSUER_ID,
+            "issuer_key_id": test_issuer_key_id(),
+            "signature_algorithm": TEST_CAPABILITY_ALGORITHM,
+        }
+        return {
+            **signed,
+            "signature": _b64(
+                hmac.new(
+                    _TEST_KEY,
+                    EXECUTIVE_INPUT_RECEIPT_PURPOSE + _canonical(signed),
+                    hashlib.sha256,
+                ).digest()
+            ),
+        }
+
 
 def test_issuer_key_id() -> str:
     return "keeper-test-founder:" + hashlib.sha256(_TEST_KEY).hexdigest()
@@ -465,6 +628,27 @@ class ProductionFounderCapabilityVerifier:
             )
         return capability
 
+    def verify_executive_input_receipt(
+        self, value: Mapping[str, object]
+    ) -> dict[str, object]:
+        receipt = validate_executive_input_receipt(value)
+        signature = str(receipt.pop("signature"))
+        config = self.__configuration
+        if (
+            receipt.get("signature_algorithm") != CAPABILITY_ALGORITHM
+            or receipt.get("issuer_id") != config["issuer_id"]
+            or receipt.get("issuer_key_id") != config["key_id"]
+            or not _rsa_verify(
+                config,
+                _digest(EXECUTIVE_INPUT_RECEIPT_PURPOSE, receipt),
+                _unb64(signature),
+            )
+        ):
+            raise PermissionError(
+                "Executive delivered-input receipt authentication failed"
+            )
+        return {**receipt, "signature": signature}
+
 
 class TestFounderCapabilityVerifier:
     __slots__ = ()
@@ -490,6 +674,30 @@ class TestFounderCapabilityVerifier:
                 "Founder authorization capability authentication failed"
             )
         return capability
+
+    def verify_executive_input_receipt(
+        self, value: Mapping[str, object]
+    ) -> dict[str, object]:
+        receipt = validate_executive_input_receipt(value)
+        signature = str(receipt.pop("signature"))
+        if (
+            receipt.get("signature_algorithm") != TEST_CAPABILITY_ALGORITHM
+            or receipt.get("issuer_id") != _TEST_ISSUER_ID
+            or receipt.get("issuer_key_id") != test_issuer_key_id()
+        ):
+            raise PermissionError(
+                "test Executive delivered-input receipt issuer is invalid"
+            )
+        expected = hmac.new(
+            _TEST_KEY,
+            EXECUTIVE_INPUT_RECEIPT_PURPOSE + _canonical(receipt),
+            hashlib.sha256,
+        ).digest()
+        if not hmac.compare_digest(expected, _unb64(signature)):
+            raise PermissionError(
+                "Executive delivered-input receipt authentication failed"
+            )
+        return {**receipt, "signature": signature}
 
 
 def _rsa_verify(

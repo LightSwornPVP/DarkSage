@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import copy
 import hashlib
@@ -11,6 +11,7 @@ from typing import Any, Callable, cast
 import pytest
 
 from keeper.authority_service.client import TestAuthorityServiceClient
+from keeper.authority_service.protocol import Operation
 from keeper.authority_service.core import (
     AuthorityServiceCore,
     ExecutionObservation,
@@ -23,8 +24,14 @@ from keeper.evidence_input import (
     structured_digest,
     validate_provider_input,
 )
-from keeper.executive.founder_capability import TestFounderCapabilityVerifier
-from keeper.pass_b.launch_authority import ExecutiveAuthorityLaunchGate
+from keeper.executive.founder_capability import (
+    TestFounderCapabilityIssuer,
+    TestFounderCapabilityVerifier,
+)
+from keeper.pass_b.launch_authority import (
+    ExecutiveAuthorityLaunchGate,
+    TestLaunchAuthority,
+)
 from keeper.pass_b.models import (
     AttemptRecord,
     DeliveredInputRecord,
@@ -428,6 +435,62 @@ class _CapturingPilotObserver(_PilotAuthorityObserver):
         )
 
 
+def _signed_test_commit_receipt(
+    provider_input: dict[str, Any],
+    *,
+    authority_attempt_id: str,
+    provider_input_digest: str,
+    delivered_input_digest: str,
+) -> dict[str, object]:
+    now = datetime.now(UTC).isoformat()
+    return TestFounderCapabilityIssuer().sign_executive_input_receipt(
+        {
+            "schema_version": 1,
+            "kind": "executive_delivered_input_commit_receipt",
+            "receipt_id": "test-input-receipt",
+            "database_id": "test-executive-database",
+            "recovery_epoch": 0,
+            "repository_mode": "TEST",
+            "delivered_input_id": "test-delivered-input",
+            "delivered_input_record_revision": 1,
+            "delivered_input_record_digest": "c" * 64,
+            "reviewer_attempt_id": provider_input["reviewer_attempt_id"],
+            "reviewer_assignment_id": provider_input[
+                "reviewer_assignment_id"
+            ],
+            "authority_attempt_id": authority_attempt_id,
+            "project_id": provider_input["project_id"],
+            "charter_id": provider_input["charter_id"],
+            "charter_revision": provider_input["charter_revision"],
+            "workflow_id": provider_input["workflow_id"],
+            "work_item_id": provider_input["work_item_id"],
+            "producer_assignment_id": provider_input[
+                "producer_assignment_id"
+            ],
+            "producer_attempt_id": provider_input["producer_attempt_id"],
+            "provider_id": provider_input["provider_id"],
+            "account_id": provider_input["account_id"],
+            "session_id": provider_input["session_id"],
+            "model_id": provider_input["model_id"],
+            "workspace": provider_input["workspace"],
+            "composition_identity": provider_input[
+                "composition_identity"
+            ],
+            "provider_input_digest": provider_input_digest,
+            "delivered_input_digest": delivered_input_digest,
+            "manifest_digest": provider_input["manifest_digest"],
+            "reference_set_digest": structured_digest(
+                provider_input["references"]
+            ),
+            "usage_reservation_id": "test-usage-reservation",
+            "session_slot_claimed": True,
+            "launch_claim_state": "LAUNCH_CLAIMED",
+            "committed_at": now,
+            "issued_at": now,
+        }
+    )
+
+
 def _authority_bound_reviewer(
     tmp_path: Path,
     *,
@@ -521,7 +584,7 @@ def _authority_bound_reviewer(
     provider_input, delivered_digest, provider_digest = (
         finalize_provider_input(
             base,
-            composition_identity="PRODUCTION_AUTHORITY",
+            composition_identity="TEST_AUTHORITY",
             provider_id="provider",
             account_id="account",
             session_id="review-session",
@@ -533,15 +596,144 @@ def _authority_bound_reviewer(
         )
     )
     if bind_input:
+        receipt = _signed_test_commit_receipt(
+            provider_input,
+            authority_attempt_id=attempt_id,
+            provider_input_digest=provider_digest,
+            delivered_input_digest=delivered_digest,
+        )
         bound = client.bind_provider_input(
             attempt_id,
             provider_input,
             provider_digest,
             delivered_digest,
             str(provider_input["manifest_digest"]),
+            receipt,
         )
         assert bound["attempt"]["service_state"] == "INPUT_BOUND"
     return core, client, observer, attempt_id, provider_input, provider_digest
+
+
+class _CommitOrderAuthority:
+    def __init__(self, delegate: TestLaunchAuthority, repository: Any) -> None:
+        self.delegate = delegate
+        self.repository = repository
+        self.committed_before_bind = False
+
+    def authorize(self, *args: Any, **kwargs: Any) -> Any:
+        return self.delegate.authorize(*args, **kwargs)
+
+    def bind_committed_input(
+        self, authorization: Any, delivered_input_id: str
+    ) -> Any:
+        delivered = self.repository.get(
+            DeliveredInputRecord, delivered_input_id
+        )
+        attempt = self.repository.get(
+            AttemptRecord, delivered.reviewer_attempt_id
+        )
+        claim = self.repository.launch_claim(attempt.attempt_id)
+        assert attempt.state == "LAUNCH_CLAIMED"
+        assert attempt.session_slot_claimed is True
+        assert attempt.usage_reservation_id
+        assert claim["state"] == "LAUNCH_CLAIMED"
+        assert claim["authority_attempt_id"] == (
+            authorization.authority_attempt_id
+        )
+        self.committed_before_bind = True
+        return self.delegate.bind_committed_input(
+            authorization, delivered_input_id
+        )
+
+    def launch(self, *args: Any, **kwargs: Any) -> Any:
+        return self.delegate.launch(*args, **kwargs)
+
+
+def test_orchestration_commits_attempt_before_input_binding(
+    tmp_path: Path,
+) -> None:
+    service, provider, _, _, _, _ = _typed_reference_stack(tmp_path)
+    reference = service.repository.list(EvidenceReferenceRecord)[0]
+    reviewer = service.repository.assignment_launch_binding(
+        reference.assignment_id
+    )[2]
+    delegate = cast(TestLaunchAuthority, service.launch_authority)
+    capture = _CaptureAdapter(provider.provider_id)
+    service.adapters[provider.provider_id] = capture
+    workspace = tmp_path / "commit-order-reviewer"
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "commit-order-reviewer"
+    )
+    authority = _CommitOrderAuthority(delegate, service.repository)
+    service.launch_authority = authority
+    service.run_assignment(
+        reviewer.assignment_id,
+        workspace,
+        authority_attempt_id=authority_id,
+        global_context={},
+        task_context={"objective": "verify commit ordering"},
+        evidence_reference_ids=(reference.evidence_reference_id,),
+        side_effect_class="READ_ONLY_REVIEW",
+    )
+    assert authority.committed_before_bind is True
+    assert capture.last_request is not None
+
+
+def test_crash_after_local_claim_preserves_slot_and_becomes_uncertain(
+    tmp_path: Path,
+) -> None:
+    service, provider, _, _, _, _ = _typed_reference_stack(tmp_path)
+    reference = service.repository.list(EvidenceReferenceRecord)[0]
+    reviewer = service.repository.assignment_launch_binding(
+        reference.assignment_id
+    )[2]
+    capture = _CaptureAdapter(provider.provider_id)
+    service.adapters[provider.provider_id] = capture
+    workspace = tmp_path / "claim-crash-reviewer"
+    _, authority_id = _launch_ready(
+        service, reviewer, workspace, "claim-crash-reviewer"
+    )
+
+    def crash_after_claim() -> None:
+        raise RuntimeError("deterministic crash after local claim")
+
+    with pytest.raises(RuntimeError, match="deterministic crash"):
+        service.run_assignment(
+            reviewer.assignment_id,
+            workspace,
+            authority_attempt_id=authority_id,
+            global_context={},
+            task_context={"objective": "crash boundary"},
+            evidence_reference_ids=(reference.evidence_reference_id,),
+            side_effect_class="READ_ONLY_REVIEW",
+            after_launch_claim=crash_after_claim,
+        )
+    attempt = next(
+        item
+        for item in service.repository.list(AttemptRecord)
+        if item.assignment_id == reviewer.assignment_id
+        and item.state == "LAUNCH_CLAIMED"
+    )
+    assert attempt.session_slot_claimed is True
+    assert service.repository.launch_claim(attempt.attempt_id)[
+        "state"
+    ] == "LAUNCH_CLAIMED"
+    assert capture.last_request is None
+
+    recovered = service.repository.recover_interrupted_attempts(
+        datetime.now(UTC).isoformat()
+    )
+    uncertain = service.repository.get(AttemptRecord, attempt.attempt_id)
+    assert recovered["uncertain"] == 1
+    assert uncertain.state == "UNCERTAIN"
+    assert uncertain.session_slot_claimed is True
+    assert service.repository.launch_claim(attempt.attempt_id)[
+        "state"
+    ] == "UNCERTAIN"
+    reservations = service.repository.usage_reservations(
+        reviewer.assignment_id
+    )
+    assert [item["state"] for item in reservations] == ["ACTIVE"]
 
 
 def test_authority_attempt_owns_exact_input_and_id_only_execution_uses_it(
@@ -563,6 +755,10 @@ def test_authority_attempt_owns_exact_input_and_id_only_execution_uses_it(
         observer.executed_attempt["provider_input_digest"]
         == provider_digest
     )
+    assert observer.executed_attempt["executive_commit_receipt_digest"]
+    assert observer.executed_attempt["executive_commit_receipt"][
+        "reviewer_attempt_id"
+    ] == provider_input["reviewer_attempt_id"]
     completion = result["completion"]
     assert completion["provider_input_digest"] == provider_digest
     assert completion["delivered_input_digest"] == (
@@ -607,6 +803,14 @@ def test_authority_input_cannot_be_rebound_or_omitted(
             changed_digest,
             str(changed["delivered_input_digest"]),
             str(changed["manifest_digest"]),
+            _signed_test_commit_receipt(
+                changed,
+                authority_attempt_id=attempt_id,
+                provider_input_digest=changed_digest,
+                delivered_input_digest=str(
+                    changed["delivered_input_digest"]
+                ),
+            ),
         )
     assert client.query_state("attempts", attempt_id)["record"][
         "provider_input_digest"
@@ -708,9 +912,28 @@ def test_reviewer_evidence_without_delivered_input_is_rejected(
 def test_authority_reserved_reviewer_cannot_execute_without_bound_input(
     tmp_path: Path,
 ) -> None:
-    _, client, observer, attempt_id, _, _ = _authority_bound_reviewer(
-        tmp_path, bind_input=False
+    _, client, observer, attempt_id, provider_input, _ = (
+        _authority_bound_reviewer(
+            tmp_path, bind_input=False
+        )
     )
+    assert client.query_state("attempts", attempt_id)["record"][
+        "service_state"
+    ] == "RESERVED"
+    provider_digest = structured_digest(provider_input)
+    with pytest.raises(ValueError, match="payload fields"):
+        client.request(
+            Operation.BIND_PROVIDER_INPUT,
+            {
+                "attempt_id": attempt_id,
+                "provider_input": provider_input,
+                "provider_input_digest": provider_digest,
+                "delivered_input_digest": provider_input[
+                    "delivered_input_digest"
+                ],
+                "manifest_digest": provider_input["manifest_digest"],
+            },
+        )
     assert client.query_state("attempts", attempt_id)["record"][
         "service_state"
     ] == "RESERVED"
@@ -738,6 +961,35 @@ def test_authority_reserved_reviewer_cannot_execute_without_bound_input(
     with pytest.raises(PermissionError, match="input-bound"):
         restarted_client.execute_provider(attempt_id)
     assert observer.executed_attempt is None
+
+
+def test_forged_executive_commit_receipt_rejects_before_execution(
+    tmp_path: Path,
+) -> None:
+    _, client, observer, attempt_id, provider_input, provider_digest = (
+        _authority_bound_reviewer(tmp_path, bind_input=False)
+    )
+    delivered_digest = str(provider_input["delivered_input_digest"])
+    receipt = _signed_test_commit_receipt(
+        provider_input,
+        authority_attempt_id=attempt_id,
+        provider_input_digest=provider_digest,
+        delivered_input_digest=delivered_digest,
+    )
+    receipt["database_id"] = "caller-fabricated-database"
+    with pytest.raises(PermissionError, match="authentication failed"):
+        client.bind_provider_input(
+            attempt_id,
+            provider_input,
+            provider_digest,
+            delivered_digest,
+            str(provider_input["manifest_digest"]),
+            receipt,
+        )
+    assert observer.executed_attempt is None
+    assert client.query_state("attempts", attempt_id)["record"][
+        "service_state"
+    ] == "RESERVED"
 
 
 def test_production_reviewer_context_cannot_be_omitted(

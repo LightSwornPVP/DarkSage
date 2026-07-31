@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol, cast
@@ -38,6 +38,18 @@ class ProjectStatusReader(Protocol):
     def __call__(self, project_id: str) -> dict[str, Any]: ...
 
 
+class CommittedInputReceiptIssuer(Protocol):
+    def __call__(
+        self,
+        delivered_input_id: str,
+        *,
+        authority_attempt_id: str,
+        provider_input_digest: str,
+        delivered_input_digest: str,
+        manifest_digest: str,
+    ) -> dict[str, object]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchAuthorization:
     authority_attempt_id: str
@@ -50,6 +62,8 @@ class LaunchAuthorization:
     provider_input: dict[str, Any] | None = None
     delivered_input_digest: str | None = None
     provider_input_digest: str | None = None
+    provider_input_bound: bool = False
+    executive_commit_receipt_digest: str | None = None
 
 
 class LaunchAuthority(Protocol):
@@ -64,6 +78,12 @@ class LaunchAuthority(Protocol):
         *,
         reviewer_attempt_id: str | None = None,
         provider_input_base: dict[str, Any] | None = None,
+    ) -> LaunchAuthorization: ...
+
+    def bind_committed_input(
+        self,
+        authorization: LaunchAuthorization,
+        delivered_input_id: str,
     ) -> LaunchAuthorization: ...
 
     def launch(
@@ -103,6 +123,14 @@ class UnavailableLaunchAuthority:
             "Pass B launch requires active Executive and KeeperAuthority binding"
         )
 
+    def bind_committed_input(
+        self,
+        authorization: LaunchAuthorization,
+        delivered_input_id: str,
+    ) -> LaunchAuthorization:
+        del authorization, delivered_input_id
+        raise PermissionError("Pass B launch authority is unavailable")
+
     def launch(
         self,
         authorization: LaunchAuthorization,
@@ -122,6 +150,7 @@ class ExecutiveAuthorityLaunchGate:
         project_status: ProjectStatusReader,
         *,
         production: bool,
+        receipt_issuer: CommittedInputReceiptIssuer,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if production and not isinstance(
@@ -135,6 +164,7 @@ class ExecutiveAuthorityLaunchGate:
         self._authority = authority
         self._project_status = project_status
         self._production = production
+        self._receipt_issuer = receipt_issuer
         self._clock = clock or (lambda: datetime.now(UTC))
 
     @classmethod
@@ -148,6 +178,7 @@ class ExecutiveAuthorityLaunchGate:
             authority,
             lambda project_id: _status_dict(executive, project_id),
             production=True,
+            receipt_issuer=executive.issue_pass_b_delivered_input_receipt,
         )
 
     @classmethod
@@ -156,12 +187,14 @@ class ExecutiveAuthorityLaunchGate:
         authority: TestAuthorityServiceClient,
         project_status: ProjectStatusReader,
         *,
+        receipt_issuer: CommittedInputReceiptIssuer,
         clock: Callable[[], datetime] | None = None,
     ) -> ExecutiveAuthorityLaunchGate:
         return cls(
             authority,
             project_status,
             production=False,
+            receipt_issuer=receipt_issuer,
             clock=clock,
         )
 
@@ -293,33 +326,6 @@ class ExecutiveAuthorityLaunchGate:
                 launch_authorization_id=authorization_id,
                 authorization_generation=generation,
             )
-            bound = self._authority.bind_provider_input(
-                authority_attempt_id,
-                provider_input,
-                provider_input_digest,
-                delivered_input_digest,
-                str(provider_input["manifest_digest"]),
-            )
-            bound_record = bound.get("attempt")
-            bound_state = (
-                bound_record.pop("service_state", None)
-                if isinstance(bound_record, dict)
-                else None
-            )
-            if (
-                not isinstance(bound_record, dict)
-                or bound_state != "INPUT_BOUND"
-                or bound_record.get("provider_input_digest")
-                != provider_input_digest
-                or bound_record.get("delivered_input_digest")
-                != delivered_input_digest
-                or not self._authority.verify(
-                    "provider-input-binding", bound_record
-                )
-            ):
-                raise PermissionError(
-                    "Authority provider-input binding is invalid"
-                )
             plan.update(
                 {
                     "reviewer_attempt_id": reviewer_attempt_id,
@@ -340,6 +346,64 @@ class ExecutiveAuthorityLaunchGate:
             provider_input_digest=provider_input_digest,
         )
 
+    def bind_committed_input(
+        self,
+        authorization: LaunchAuthorization,
+        delivered_input_id: str,
+    ) -> LaunchAuthorization:
+        if (
+            authorization.provider_input is None
+            or authorization.provider_input_digest is None
+            or authorization.delivered_input_digest is None
+        ):
+            raise PermissionError("typed provider input was not prepared")
+        manifest_digest = str(
+            authorization.provider_input["manifest_digest"]
+        )
+        receipt = self._receipt_issuer(
+            delivered_input_id,
+            authority_attempt_id=authorization.authority_attempt_id,
+            provider_input_digest=authorization.provider_input_digest,
+            delivered_input_digest=authorization.delivered_input_digest,
+            manifest_digest=manifest_digest,
+        )
+        receipt_digest = structured_digest(receipt)
+        bound = self._authority.bind_provider_input(
+            authorization.authority_attempt_id,
+            authorization.provider_input,
+            authorization.provider_input_digest,
+            authorization.delivered_input_digest,
+            manifest_digest,
+            receipt,
+        )
+        bound_record = bound.get("attempt")
+        bound_state = (
+            bound_record.pop("service_state", None)
+            if isinstance(bound_record, dict)
+            else None
+        )
+        if (
+            not isinstance(bound_record, dict)
+            or bound_state != "INPUT_BOUND"
+            or bound_record.get("provider_input_digest")
+            != authorization.provider_input_digest
+            or bound_record.get("delivered_input_digest")
+            != authorization.delivered_input_digest
+            or bound_record.get("executive_commit_receipt_digest")
+            != receipt_digest
+            or not self._authority.verify(
+                "provider-input-binding", bound_record
+            )
+        ):
+            raise PermissionError(
+                "Authority provider-input binding is invalid"
+            )
+        return replace(
+            authorization,
+            provider_input_bound=True,
+            executive_commit_receipt_digest=receipt_digest,
+        )
+
     def launch(
         self,
         authorization: LaunchAuthorization,
@@ -347,6 +411,13 @@ class ExecutiveAuthorityLaunchGate:
         adapter: ProviderAdapter,
     ) -> AdapterResult:
         del adapter
+        if (
+            authorization.provider_input is not None
+            and not authorization.provider_input_bound
+        ):
+            raise PermissionError(
+                "provider input lacks a committed Executive receipt"
+            )
         self._validate_production_evidence_delivery(authorization, request)
         result = self._authority.execute_provider(
             authorization.authority_attempt_id
@@ -374,6 +445,8 @@ class ExecutiveAuthorityLaunchGate:
             != authorization.delivered_input_digest
             or completion.get("provider_input_digest")
             != authorization.provider_input_digest
+            or completion.get("executive_commit_receipt_digest")
+            != authorization.executive_commit_receipt_digest
         ):
             raise PermissionError(
                 "Authority provider completion is invalid or failed"
@@ -715,6 +788,15 @@ class TestLaunchAuthority:
             provider_input_digest=provider_input_digest,
         )
 
+    def bind_committed_input(
+        self,
+        authorization: LaunchAuthorization,
+        delivered_input_id: str,
+    ) -> LaunchAuthorization:
+        if authorization.provider_input is None or not delivered_input_id:
+            raise PermissionError("test delivered input was not committed")
+        return replace(authorization, provider_input_bound=True)
+
     def launch(
         self,
         authorization: LaunchAuthorization,
@@ -724,7 +806,10 @@ class TestLaunchAuthority:
         self.last_launch_authorization = authorization
         if (
             request.role.casefold() == "reviewer"
-            and authorization.provider_input is None
+            and (
+                authorization.provider_input is None
+                or not authorization.provider_input_bound
+            )
         ):
             raise PermissionError(
                 "reviewer launch requires Authority-bound provider input"

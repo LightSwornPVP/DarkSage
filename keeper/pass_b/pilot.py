@@ -18,7 +18,10 @@ from keeper.authority_service.core import (
     QualificationObservation,
     TrustedObserver,
 )
-from keeper.evidence_input import review_input_declaration
+from keeper.evidence_input import (
+    review_input_declaration,
+    structured_digest,
+)
 from keeper.executive.charters import CharterService
 from keeper.executive.enums import FounderApprovalIntent
 from keeper.executive.founder_auth import TestFounderAuthenticator
@@ -180,6 +183,10 @@ class PilotConversationExecutive:
 class _PilotAuthorityObserver:
     """Non-executing observer for real Authority test-composition records."""
 
+    def __init__(self) -> None:
+        self.reviewer_commit_receipt: dict[str, Any] | None = None
+        self.reviewer_commit_receipt_digest: str | None = None
+
     def register_provider(
         self, provider_id: str, executable: Path, client_sid: str
     ) -> dict[str, Any]:
@@ -246,6 +253,18 @@ class _PilotAuthorityObserver:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         if str(attempt["role"]).casefold() == "reviewer":
+            receipt = attempt.get("executive_commit_receipt")
+            receipt_digest = attempt.get(
+                "executive_commit_receipt_digest"
+            )
+            if not isinstance(receipt, dict) or not isinstance(
+                receipt_digest, str
+            ):
+                raise PermissionError(
+                    "pilot reviewer lacks an Executive commit receipt"
+                )
+            self.reviewer_commit_receipt = dict(receipt)
+            self.reviewer_commit_receipt_digest = receipt_digest
             output: dict[str, Any] = {
                 "review_disposition": "ACCEPTED",
                 "findings": [],
@@ -306,9 +325,10 @@ def run_darksage_pilot(
     reviewer_workspace_path = workspace / "isolated-reviewer-workspace"
     reviewer_workspace_path.mkdir(parents=True, exist_ok=True)
     executive = PilotConversationExecutive(data_directory / "keeper.db")
+    pilot_authority_observer = _PilotAuthorityObserver()
     authority_core = AuthorityServiceCore(
         data_directory / "test-authority-service",
-        observer=cast(TrustedObserver, _PilotAuthorityObserver()),
+        observer=cast(TrustedObserver, pilot_authority_observer),
         founder_capability_verifier=TestFounderCapabilityVerifier(),
     )
     authority_client = TestAuthorityServiceClient(
@@ -319,6 +339,9 @@ def run_darksage_pilot(
     launch_gate = ExecutiveAuthorityLaunchGate.test(
         authority_client,
         executive.project_status,
+        receipt_issuer=(
+            executive.repository.issue_pass_b_delivered_input_receipt
+        ),
     )
     usage_reset_verifier = TestUsageResetVerifier()
     application = PassBApplication.test_composition(
@@ -867,8 +890,31 @@ def run_darksage_pilot(
         }
         for item in snapshot["safety"]["delegated_mode"]
     )
+    commit_receipt = pilot_authority_observer.reviewer_commit_receipt
+    commit_receipt_digest = (
+        pilot_authority_observer.reviewer_commit_receipt_digest
+    )
+    reviewer_commit_receipt_bound = (
+        isinstance(commit_receipt, dict)
+        and isinstance(commit_receipt_digest, str)
+        and structured_digest(commit_receipt) == commit_receipt_digest
+        and commit_receipt.get("delivered_input_id")
+        == delivered_input_record.delivered_input_id
+        and commit_receipt.get("reviewer_attempt_id")
+        == reviewer_attempt_record.attempt_id
+        and commit_receipt.get("reviewer_assignment_id")
+        == review_assignment.assignment_id
+        and commit_receipt.get("provider_input_digest")
+        == delivered_input_record.provider_input_digest
+        and commit_receipt.get("delivered_input_digest")
+        == delivered_input_record.delivered_input_digest
+        and commit_receipt.get("session_slot_claimed") is True
+        and commit_receipt.get("launch_claim_state")
+        == "LAUNCH_CLAIMED"
+    )
     if not (
-        prohibited_delegation_denied
+        reviewer_commit_receipt_bound
+        and prohibited_delegation_denied
         and delegated_supersession_enforced
         and persisted_superseded_grant.state == "SUPERSEDED"
         and delegated_expiry_enforced
@@ -951,6 +997,12 @@ def run_darksage_pilot(
         ),
         "reviewer_input_composition_identity": (
             delivered_input_record.composition_identity
+        ),
+        "reviewer_executive_commit_receipt_bound": (
+            reviewer_commit_receipt_bound
+        ),
+        "reviewer_executive_commit_receipt_digest": (
+            commit_receipt_digest
         ),
         "reviewer_evidence_bound_to_delivered_input": (
             review_evidence.delivered_input_digest

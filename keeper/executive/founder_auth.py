@@ -221,6 +221,11 @@ class ProductionFounderAuthenticator:
     def capability_verifier_configuration(self) -> dict[str, object]:
         return self.__capability_issuer.verifier_configuration()
 
+    def _issue_executive_input_receipt(
+        self, unsigned: Mapping[str, object]
+    ) -> dict[str, object]:
+        return self.__capability_issuer._sign_executive_input_receipt(unsigned)
+
     def verify_authorization_capability(
         self, value: Mapping[str, object]
     ) -> FounderAuthorizationCapability:
@@ -333,6 +338,11 @@ class TestFounderAuthenticator:
         self, value: Mapping[str, object]
     ) -> FounderAuthorizationCapability:
         return TestFounderCapabilityVerifier().verify(value)
+
+    def _issue_executive_input_receipt(
+        self, unsigned: Mapping[str, object]
+    ) -> dict[str, object]:
+        return self.__capability_issuer.sign_executive_input_receipt(unsigned)
 
 
 FounderAuthenticator = ProductionFounderAuthenticator | TestFounderAuthenticator

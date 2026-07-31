@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from keeper.app.storage import SCHEMA_VERSION, KeeperStore
+from keeper.evidence_input import structured_digest, validate_provider_input
 from keeper.executive.enums import (
     ActionCategory,
     ApprovalKind,
@@ -158,6 +159,178 @@ class ExecutiveRepository:
                 "repository Founder authenticator composition is invalid"
             )
         return authenticator
+
+    def issue_pass_b_delivered_input_receipt(
+        self,
+        delivered_input_id: str,
+        *,
+        authority_attempt_id: str,
+        provider_input_digest: str,
+        delivered_input_digest: str,
+        manifest_digest: str,
+    ) -> dict[str, object]:
+        if type(self) not in {
+            ProductionExecutiveRepository,
+            TestExecutiveRepository,
+        }:
+            raise PermissionError(
+                "input receipts require an exact Executive repository"
+            )
+        expected_mode = (
+            "PRODUCTION"
+            if type(self) is ProductionExecutiveRepository
+            else "TEST"
+        )
+        current_binding = self.__store.executive_repository_binding()
+        if (
+            self.__mode != expected_mode
+            or current_binding != self.__database_binding
+            or current_binding[1] != expected_mode
+        ):
+            raise PermissionError(
+                "Executive delivered-input repository binding changed"
+            )
+        self._trusted_authenticator()
+        with self.__store.connect() as connection:
+            delivered_row = connection.execute(
+                "SELECT payload,payload_hash,revision,updated_at "
+                "FROM pass_b_records WHERE kind='delivered_input' AND id=?",
+                (delivered_input_id,),
+            ).fetchone()
+            if delivered_row is None:
+                raise PermissionError(
+                    "delivered input was not committed to the Executive database"
+                )
+            delivered_serialized = str(delivered_row["payload"])
+            if hashlib.sha256(delivered_serialized.encode("utf-8")).hexdigest() != (
+                delivered_row["payload_hash"]
+            ):
+                raise RuntimeError("committed delivered input failed integrity validation")
+            delivered = json.loads(delivered_serialized)
+            if not isinstance(delivered, dict):
+                raise RuntimeError("committed delivered input is malformed")
+            try:
+                provider_input = validate_provider_input(
+                    delivered.get("provider_input")
+                )
+            except ValueError as error:
+                raise RuntimeError(
+                    "committed provider input is malformed"
+                ) from error
+            project = self.project(str(delivered.get("project_id") or ""))
+            charter = self.charter(str(delivered.get("charter_id") or ""))
+            if (
+                project.state != ExecutiveState.ACTIVE
+                or project.active_charter_id != charter.charter_id
+                or project.active_charter_revision != charter.revision
+                or charter.project_id != project.project_id
+                or charter.revision != delivered.get("charter_revision")
+                or charter.status != CharterStatus.ACTIVE
+                or not charter.founder_approval_record_id
+                or not charter.founder_authorization_capability_digest
+            ):
+                raise PermissionError(
+                    "Executive delivered input is not bound to the current "
+                    "Founder-approved charter"
+                )
+            reviewer_attempt_id = str(delivered.get("reviewer_attempt_id") or "")
+            attempt_row = connection.execute(
+                "SELECT payload,payload_hash FROM pass_b_records "
+                "WHERE kind='attempt' AND id=?",
+                (reviewer_attempt_id,),
+            ).fetchone()
+            claim = connection.execute(
+                "SELECT assignment_id,authority_attempt_id,state "
+                "FROM pass_b_launch_claims WHERE attempt_id=?",
+                (reviewer_attempt_id,),
+            ).fetchone()
+            if attempt_row is None or claim is None:
+                raise PermissionError(
+                    "delivered input has no committed Executive launch claim"
+                )
+            attempt_serialized = str(attempt_row["payload"])
+            if hashlib.sha256(attempt_serialized.encode("utf-8")).hexdigest() != (
+                attempt_row["payload_hash"]
+            ):
+                raise RuntimeError("committed reviewer attempt failed integrity validation")
+            attempt = json.loads(attempt_serialized)
+            expected = {
+                "delivered_input_id": delivered_input_id,
+                "authority_attempt_id": authority_attempt_id,
+                "provider_input_digest": provider_input_digest,
+                "delivered_input_digest": delivered_input_digest,
+            }
+            if (
+                not isinstance(attempt, dict)
+                or any(attempt.get(name) != value for name, value in expected.items())
+                or delivered.get("provider_input_digest") != provider_input_digest
+                or delivered.get("delivered_input_digest") != delivered_input_digest
+                or delivered.get("manifest_digest") != manifest_digest
+                or delivered.get("composition_identity")
+                != provider_input["composition_identity"]
+                or provider_input["references"] != delivered.get("references")
+                or provider_input["manifest_digest"] != manifest_digest
+                or structured_digest(provider_input) != provider_input_digest
+                or claim["assignment_id"] != delivered.get("reviewer_assignment_id")
+                or claim["authority_attempt_id"] != authority_attempt_id
+                or claim["state"] != "LAUNCH_CLAIMED"
+                or attempt.get("state") != "LAUNCH_CLAIMED"
+                or attempt.get("session_slot_claimed") is not True
+            ):
+                raise PermissionError(
+                    "Executive delivered-input commit binding is invalid"
+                )
+            issued_at = utc_now()
+            unsigned: dict[str, object] = {
+                "schema_version": 1,
+                "kind": "executive_delivered_input_commit_receipt",
+                "receipt_id": (
+                    f"input-receipt:{delivered_input_id}:"
+                    f"{delivered_row['revision']}"
+                ),
+                "database_id": current_binding[3],
+                "recovery_epoch": current_binding[4],
+                "repository_mode": current_binding[1],
+                "delivered_input_id": delivered_input_id,
+                "delivered_input_record_revision": int(delivered_row["revision"]),
+                "delivered_input_record_digest": str(delivered_row["payload_hash"]),
+                "reviewer_attempt_id": reviewer_attempt_id,
+                "reviewer_assignment_id": str(
+                    delivered["reviewer_assignment_id"]
+                ),
+                "authority_attempt_id": authority_attempt_id,
+                "project_id": str(delivered["project_id"]),
+                "charter_id": str(delivered["charter_id"]),
+                "charter_revision": int(delivered["charter_revision"]),
+                "workflow_id": str(delivered["workflow_id"]),
+                "work_item_id": str(delivered["work_item_id"]),
+                "producer_assignment_id": str(
+                    delivered["producer_assignment_id"]
+                ),
+                "producer_attempt_id": str(delivered["producer_attempt_id"]),
+                "provider_id": str(provider_input["provider_id"]),
+                "account_id": str(provider_input["account_id"]),
+                "session_id": str(provider_input["session_id"]),
+                "model_id": str(provider_input["model_id"]),
+                "workspace": str(provider_input["workspace"]),
+                "composition_identity": str(
+                    delivered["composition_identity"]
+                ),
+                "provider_input_digest": provider_input_digest,
+                "delivered_input_digest": delivered_input_digest,
+                "manifest_digest": manifest_digest,
+                "reference_set_digest": structured_digest(
+                    delivered["references"]
+                ),
+                "usage_reservation_id": attempt.get("usage_reservation_id"),
+                "session_slot_claimed": True,
+                "launch_claim_state": "LAUNCH_CLAIMED",
+                "committed_at": str(delivered_row["updated_at"]),
+                "issued_at": issued_at,
+            }
+            return self._trusted_authenticator()._issue_executive_input_receipt(
+                unsigned
+            )
 
     def save_project(
         self,

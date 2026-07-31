@@ -113,6 +113,7 @@ class AuthorityServiceClient:
         provider_input_digest: str,
         delivered_input_digest: str,
         manifest_digest: str,
+        executive_commit_receipt: dict[str, object],
     ) -> dict[str, Any]:
         return self.request(
             Operation.BIND_PROVIDER_INPUT,
@@ -122,6 +123,7 @@ class AuthorityServiceClient:
                 "provider_input_digest": provider_input_digest,
                 "delivered_input_digest": delivered_input_digest,
                 "manifest_digest": manifest_digest,
+                "executive_commit_receipt": executive_commit_receipt,
             },
         )
 

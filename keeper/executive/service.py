@@ -67,6 +67,23 @@ class KeeperExecutive:
             raise RuntimeError("production Executive repository composition is invalid")
         return repository
 
+    def issue_pass_b_delivered_input_receipt(
+        self,
+        delivered_input_id: str,
+        *,
+        authority_attempt_id: str,
+        provider_input_digest: str,
+        delivered_input_digest: str,
+        manifest_digest: str,
+    ) -> dict[str, object]:
+        return self._trusted_repository().issue_pass_b_delivered_input_receipt(
+            delivered_input_id,
+            authority_attempt_id=authority_attempt_id,
+            provider_input_digest=provider_input_digest,
+            delivered_input_digest=delivered_input_digest,
+            manifest_digest=manifest_digest,
+        )
+
     def begin(self, message: str) -> tuple[ProjectRecord, IntakeResult]:
         result = self.__intake.extract(message)
         project = self.__charters.create_project(result)
