@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -98,9 +99,10 @@ class KeeperProductDesktop:
         self.tk, self.ttk = tk, ttk
         self.application = application
         self.pass_b = pass_b_application or _desktop_pass_b_application(
-            application.data_directory,
+            application,
             authority_health_client=authority_health_client,
         )
+        self._completion_running = False
         self.project_id: str | None = self.pass_b.selected_project_id()
         self.developer_details_enabled = False
         self.root = tk.Tk()
@@ -618,14 +620,19 @@ class KeeperProductDesktop:
         if not text:
             return
         try:
-            outcome = self.pass_b.begin_conversation(text)
+            if self.project_id is None:
+                outcome = self.pass_b.begin_conversation(text)
+                self.project_id = outcome.project.project_id
+            else:
+                outcome = self.pass_b.continue_conversation(
+                    self.project_id, text
+                )
         except (OSError, PermissionError, RuntimeError, ValueError) as error:
             self.status.set(f"Conversation blocked: {error}")
             return
-        self.project_id = outcome.project.project_id
         widget.delete("1.0", "end")
         self.status.set(
-            "Charter proposal created; explicit Founder approval is required"
+            "Conversation recorded; review the current charter and project state"
         )
         self.refresh()
 
@@ -762,10 +769,11 @@ class KeeperProductDesktop:
                 self.refresh()
                 return
             self.status.set(
-                "Founder-approved charter activated; "
-                f"{len(result['work_items'])} workflow stages prepared"
+                "Founder-approved charter activated; autonomous completion started "
+                f"for {len(result['work_items'])} planned stages"
             )
             self.refresh()
+            self._start_autonomous_completion(view.project_id or "")
 
         buttons = self.ttk.Frame(dialog, style="App.TFrame")
         buttons.pack(fill="x", padx=24, pady=(0, 20))
@@ -785,6 +793,34 @@ class KeeperProductDesktop:
     def _refresh_from_ui(self) -> None:
         self.refresh()
         self.status.set("Durable state refreshed")
+
+    def _start_autonomous_completion(self, project_id: str) -> None:
+        if not project_id or self._completion_running:
+            return
+        self._completion_running = True
+
+        def worker() -> None:
+            try:
+                results = self.pass_b.run_delegated_completion(project_id)
+                final = results[-1]
+                message = f"{final.state}: {final.detail}"
+            except (OSError, PermissionError, RuntimeError, ValueError) as error:
+                message = f"Completion blocked: {error}"
+            try:
+                self.root.after(0, lambda: finish(message))
+            except self.tk.TclError:
+                self._completion_running = False
+
+        def finish(message: str) -> None:
+            self._completion_running = False
+            self.status.set(message)
+            self.refresh()
+
+        threading.Thread(
+            target=worker,
+            name=f"keeper-completion-{project_id[:12]}",
+            daemon=True,
+        ).start()
 
     def _toggle_developer_details(self) -> None:
         self.developer_details_enabled = bool(self.developer_toggle.get())
@@ -968,14 +1004,67 @@ class KeeperProductDesktop:
 
 
 def _desktop_pass_b_application(
-    data_directory: Path,
+    application: Any,
     *,
     authority_health_client: Any | None = None,
 ) -> PassBApplication:
+    legacy_path_call = isinstance(application, (str, Path))
+    data_directory = (
+        Path(application)
+        if legacy_path_call
+        else Path(application.data_directory)
+    )
     health_client = authority_health_client
     if health_client is None:
         health_client = ProductionAuthorityServiceClient(timeout_seconds=0.25)
+        bindings = () if legacy_path_call else _configured_authority_bindings(application)
+        if bindings:
+            from keeper.pass_b.provider_bridge import bridge_qualified_provider
+            from keeper.pass_b.usage_authority import ProductionUsageResetVerifier
+
+            result = PassBApplication(
+                data_directory,
+                authority_client=health_client,
+                authority_health_client=health_client,
+                provider_bindings=bindings,
+                authority_exchange_root=data_directory / "authority-exchange",
+                usage_reset_verifier=ProductionUsageResetVerifier.unavailable(),
+            )
+            for binding in bindings:
+                bridge_qualified_provider(
+                    result.orchestration, health_client, binding
+                )
+            return result
     return PassBApplication(
         data_directory,
         authority_health_client=health_client,
     )
+
+
+def _configured_authority_bindings(
+    application: Any,
+) -> tuple[Any, ...]:
+    from keeper.executive.authority_gateway import AuthorityProviderBinding
+
+    registrations = application.provider_registrations()
+    evidence = application.qualification_evidence()
+    bindings: list[AuthorityProviderBinding] = []
+    for registration in registrations.values():
+        registration_id = registration.get("trusted_registration_id")
+        if not isinstance(registration_id, str) or not registration_id:
+            continue
+        matches = [
+            item
+            for item in evidence.values()
+            if item.get("registration_id") == registration_id
+            and item.get("qualification_result") == "qualified"
+            and isinstance(item.get("id"), str)
+        ]
+        if len(matches) != 1:
+            continue
+        bindings.append(
+            AuthorityProviderBinding(
+                registration_id, str(matches[0]["id"])
+            )
+        )
+    return tuple(bindings)

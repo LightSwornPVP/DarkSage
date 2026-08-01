@@ -88,6 +88,28 @@ def test_natural_language_intake_tracks_provenance_and_assumptions(tmp_path: Pat
     assert "success" in result.unresolved_questions[0].lower()
 
 
+def test_intake_accepts_explicit_success_criteria_and_audience() -> None:
+    result = ConversationIntake().extract(
+        "Create a software application called Keeper Acceptance in "
+        r"C:\tmp\keeper-acceptance. Success criteria: one provider run "
+        "completes; exact evidence is reviewed; duplicate execution rejects. "
+        "Primary audience: Founder. Approved providers: codex, local-reviewer. "
+        "Approved tools: filesystem. Use full delegation and no spending."
+    )
+
+    assert result.unresolved_questions == ()
+    assert result.fields["success_criteria"].value == (
+        "one provider run completes",
+        "exact evidence is reviewed",
+        "duplicate execution rejects",
+    )
+    assert result.fields["success_criteria"].provenance == "EXPLICIT"
+    assert result.fields["target_audience"].value == "Founder"
+    assert result.fields["target_audience"].provenance == "EXPLICIT"
+    assert result.fields["approved_providers"].value == ("codex", "local-reviewer")
+    assert result.fields["approved_tools"].value == ("filesystem",)
+
+
 def test_revision_replaces_assumption_and_removes_deliverable(tmp_path: Path) -> None:
     intake = ConversationIntake().extract("I want a research report about urban gardens.")
     revised = ConversationIntake.revise(

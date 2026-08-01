@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -14,8 +15,37 @@ from typing import Any, Callable
 from keeper.providers.base import AgentRequest, ProcessResult
 from keeper.providers.codex_cli import CliProvider
 
-REGISTRATION_SCHEMA_VERSION = 2
+REGISTRATION_SCHEMA_VERSION = 3
 _SHA256_LENGTH = 64
+_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
+_EXECUTIVE_CAPABILITIES = frozenset(
+    {
+        "acceptance", "architecture", "arrangement", "asset creation",
+        "composition", "copy editing", "creative direction",
+        "critical analysis", "developmental editing", "document production",
+        "editorial planning", "implementation", "mastering", "media export",
+        "media review", "mixing", "music delivery", "music direction",
+        "outlining", "packaging", "planning", "production", "recording",
+        "report writing", "requirements", "research design", "review",
+        "revision", "script writing", "security", "source collection",
+        "source review", "storyboarding", "synthesis", "testing",
+        "video editing", "writing",
+    }
+)
+_PROJECT_TYPES = frozenset(
+    {
+        "business_operations", "design", "general", "marketing", "music",
+        "research", "software", "video", "writing",
+    }
+)
+_PRICING_AUTHORITY_FIELDS = frozenset(
+    {
+        "pricing_identity", "pricing_version", "currency",
+        "estimated_cost", "maximum_cost", "billing_unit",
+        "included_plan", "marginally_free", "quoted_at",
+        "expires_at", "source", "cost_tier",
+    }
+)
 _REGISTRATION_FIELDS = {
     "registration_schema_version",
     "trusted_registration_id",
@@ -45,6 +75,10 @@ _REGISTRATION_FIELDS = {
     "authentication_mode",
     "authentication_profile",
     "capability_set",
+    "executive_capability_set",
+    "project_types",
+    "effort_levels",
+    "pricing_authority",
     "provider_policy",
     "independence_classification",
     "role_eligibility",
@@ -414,7 +448,23 @@ def create_provider_registration(
     capabilities: ProviderCapabilities | None = None,
     role_eligibility: list[str] | None = None,
     independence_classification: str = "independent-capable",
+    executive_capabilities: list[str],
+    project_types: list[str],
+    effort_levels: list[str],
+    pricing_authority: dict[str, Any],
 ) -> dict[str, Any]:
+    normalized_executive_capabilities = _validated_string_authority_list(
+        executive_capabilities, "executive capability"
+    )
+    if any(item not in _EXECUTIVE_CAPABILITIES for item in normalized_executive_capabilities):
+        raise ValueError("provider Executive capability declaration is unsupported")
+    normalized_project_types = _validated_string_authority_list(
+        project_types, "project type"
+    )
+    if any(item not in _PROJECT_TYPES for item in normalized_project_types):
+        raise ValueError("provider project-type declaration is unsupported")
+    normalized_effort_levels = _validated_effort_levels(effort_levels)
+    normalized_pricing_authority = _validated_pricing_authority(pricing_authority)
     configured = executable.resolve(strict=True)
     registration_nonce = uuid.uuid4().hex
     capability_values = asdict(capabilities or ProviderCapabilities())
@@ -479,6 +529,10 @@ def create_provider_registration(
         "authentication_mode": "external-cli-session",
         "authentication_profile": f"external-session:{provider_id}",
         "capability_set": capability_values,
+        "executive_capability_set": normalized_executive_capabilities,
+        "project_types": normalized_project_types,
+        "effort_levels": normalized_effort_levels,
+        "pricing_authority": normalized_pricing_authority,
         "provider_policy": "registered-command",
         "independence_classification": independence_classification,
         "role_eligibility": roles,
@@ -581,6 +635,21 @@ def _validate_discovery_registration(
     except (OSError, TypeError, ValueError):
         return False, "Provider registration could not be validated."
     return True, "Immutable registration validated; discovery did not execute provider code."
+
+
+def validate_provider_registration_contract(
+    registration: object,
+) -> tuple[bool, str]:
+    """Validate the Authority-owned record before qualification or execution."""
+    if not isinstance(registration, dict) or set(registration) != _REGISTRATION_FIELDS:
+        return False, "Provider registration is malformed or incomplete."
+    if not _registration_types_valid(registration):
+        return False, "Provider registration field types or values are invalid."
+    if registration.get("configuration_digest") != _registration_configuration_digest(
+        registration
+    ):
+        return False, "Provider registration configuration digest is stale."
+    return True, "Provider registration contract is valid."
 
 
 def validate_provider_registration(
@@ -945,6 +1014,33 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
         capabilities[required_capability[role]] is not True for role in roles
     ):
         return False
+    try:
+        if registration.get("executive_capability_set") != _validated_string_authority_list(
+            registration.get("executive_capability_set"), "executive capability"
+        ):
+            return False
+        executive_capabilities = _validated_string_authority_list(
+            registration.get("executive_capability_set"), "executive capability"
+        )
+        if any(item not in _EXECUTIVE_CAPABILITIES for item in executive_capabilities):
+            return False
+        project_types = _validated_string_authority_list(
+            registration.get("project_types"), "project type"
+        )
+        if registration.get("project_types") != project_types:
+            return False
+        if any(item not in _PROJECT_TYPES for item in project_types):
+            return False
+        if registration.get("effort_levels") != _validated_effort_levels(
+            registration.get("effort_levels")
+        ):
+            return False
+        if registration.get("pricing_authority") != _validated_pricing_authority(
+            registration.get("pricing_authority")
+        ):
+            return False
+    except (TypeError, ValueError):
+        return False
     if any(
         role in {"reviewer", "post_repair_reviewer"}
         for role in roles
@@ -1050,6 +1146,86 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _validated_string_authority_list(value: object, label: str) -> list[str]:
+    if (
+        not isinstance(value, list) or not value or len(value) > 64
+        or any(
+            not isinstance(item, str) or not item or len(item) > 128
+            or item != item.strip()
+            or any(ord(character) < 32 for character in item)
+            for item in value
+        )
+        or value != sorted(value) or len(value) != len(set(value))
+    ):
+        raise ValueError(f"provider {label} declarations are invalid")
+    return list(value)
+
+
+def _validated_effort_levels(value: object) -> list[str]:
+    values = _validated_string_authority_list(value, "effort level")
+    if any(item not in _EFFORT_LEVELS for item in values):
+        raise ValueError("provider effort-level declaration is unsupported")
+    return values
+
+
+def _validated_pricing_authority(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or frozenset(value) != _PRICING_AUTHORITY_FIELDS:
+        raise ValueError("provider pricing authority fields are invalid")
+    result = dict(value)
+    for field in (
+        "pricing_identity", "pricing_version", "currency", "billing_unit",
+        "quoted_at", "expires_at", "source",
+    ):
+        item = result.get(field)
+        if (
+            not isinstance(item, str) or not item or len(item) > 256
+            or item != item.strip()
+            or any(ord(character) < 32 for character in item)
+        ):
+            raise ValueError(f"provider pricing authority {field} is invalid")
+    currency = str(result["currency"])
+    if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+        raise ValueError("provider pricing authority currency is invalid")
+    for field in ("estimated_cost", "maximum_cost"):
+        item = result.get(field)
+        if (
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            or not math.isfinite(float(item)) or float(item) < 0
+        ):
+            raise ValueError(f"provider pricing authority {field} is invalid")
+        result[field] = float(item)
+    tier = result.get("cost_tier")
+    if isinstance(tier, bool) or not isinstance(tier, int) or not 0 <= tier <= 100:
+        raise ValueError("provider pricing authority cost tier is invalid")
+    for field in ("included_plan", "marginally_free"):
+        if type(result.get(field)) is not bool:
+            raise ValueError(f"provider pricing authority {field} is invalid")
+    if result["maximum_cost"] < result["estimated_cost"]:
+        raise ValueError("provider pricing maximum is below its estimate")
+    included = result["included_plan"] is True
+    marginally_free = result["marginally_free"] is True
+    if included != marginally_free:
+        raise ValueError("provider free-pricing declarations are inconsistent")
+    if included:
+        if result["estimated_cost"] != 0 or result["maximum_cost"] != 0 or tier != 0:
+            raise ValueError("included provider pricing must be exactly zero")
+    elif result["maximum_cost"] <= 0 or tier <= 0:
+        raise ValueError("paid provider pricing must declare a positive bound and tier")
+    try:
+        quoted = datetime.fromisoformat(str(result["quoted_at"]))
+        expires = datetime.fromisoformat(str(result["expires_at"]))
+    except ValueError as error:
+        raise ValueError("provider pricing timestamps are invalid") from error
+    if (
+        quoted.tzinfo is None
+        or expires.tzinfo is None
+        or expires <= quoted
+        or expires <= datetime.now(UTC)
+    ):
+        raise ValueError("provider pricing validity window is invalid")
+    return result
 
 
 def _registration_expired(registration: dict[str, Any]) -> bool:

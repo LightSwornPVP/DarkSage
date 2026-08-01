@@ -2,8 +2,9 @@
 
 - Windows is the packaged and smoke-tested target; the standard-library code is
   portable, but macOS/Linux bundles are not produced.
-- Authenticated Codex execution and Claude Code execution were not exercised during
-  productization; their adapters are implemented but explicitly classified as such.
+- The final live protocol-6 smoke used a Founder-approved deterministic offline
+  controlled provider. General authenticated Codex/Claude daily execution still
+  requires its own supported Authority registration and qualification.
 - OS toast delivery is best-effort; every notification is retained in-app.
 - Discord remains a future notification-only adapter.
 - Keeper does not automatically delete retained logs or evidence.
@@ -33,9 +34,10 @@
 - The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
   attempt histories require a future paged signed-snapshot/fence protocol.
-- This source candidate requires KeeperAuthority protocol 6 and schema 5. The repair
-  does not install or restart the Windows service; the currently installed older
-  service must be upgraded only by a separately authorized installation/release step.
+- This source requires KeeperAuthority 1.6.2, protocol 6, and schema 5. Application
+  packaging never installs, restarts, updates, or reconfigures that service.
+- The verified release is a portable zipapp; managed per-user repair/rollback tooling
+  remains optional because manual hash-verified artifact replacement is sufficient.
 - Keeper 1.0 is a personal-use, single-Founder product. It does not claim to
   resist arbitrary code already executing in its trusted Executive interpreter,
   a malicious local administrator, manual same-user database replacement, or

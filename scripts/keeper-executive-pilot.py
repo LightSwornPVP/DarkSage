@@ -64,11 +64,24 @@ class PilotAuthorityTransport:
                 "canonical_executable_path": executable,
                 "executable_sha256": executable_digest,
                 "configuration_digest": registration_digest,
-                "capability_set": list(CAPABILITIES),
-                "role_eligibility": ["software"],
+                "capability_set": {
+                    "author": True,
+                    "reviewer": True,
+                    "repairer": True,
+                    "structured_output": True,
+                    "streaming": True,
+                    "cancellation": True,
+                    "usage_reporting": False,
+                    "local_only": False,
+                },
+                "executive_capability_set": list(CAPABILITIES),
+                "role_eligibility": [
+                    "builder", "post_repair_reviewer", "repairer", "reviewer"
+                ],
+                "project_types": ["software"],
                 "model_or_service_identity": f"pilot-{provider_id}",
                 "independence_classification": provider_id,
-                "effort_levels": ["medium", "high"],
+                "effort_levels": ["high", "medium"],
                 "pricing_authority": {
                     "pricing_identity": f"pilot-pricing:{registration_id}",
                     "pricing_version": "2026-07",

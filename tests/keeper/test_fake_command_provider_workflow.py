@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.app.service import KeeperApplication
 from keeper.orchestrator import Keeper
 
@@ -82,8 +84,8 @@ def test_controlled_command_adapters_complete_full_repair_workflow(
 
     app = KeeperApplication(tmp_path / "data")
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
-    app.register_provider("codex", codex, "test-authority")
-    app.register_provider("claude", claude, "test-authority")
+    app.register_provider("codex", codex, "test-authority", **provider_authority_kwargs())
+    app.register_provider("claude", claude, "test-authority", **provider_authority_kwargs("claude"))
     app.qualify_provider("codex", "test-authority")
     app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
@@ -141,8 +143,8 @@ def test_selected_provider_stage_retry_does_not_repeat_verified_stages(
     git(repo, "commit", "-m", "baseline")
     app = KeeperApplication(tmp_path / "data")
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
-    app.register_provider("codex", codex, "test-authority")
-    app.register_provider("claude", claude, "test-authority")
+    app.register_provider("codex", codex, "test-authority", **provider_authority_kwargs())
+    app.register_provider("claude", claude, "test-authority", **provider_authority_kwargs("claude"))
     app.qualify_provider("codex", "test-authority")
     app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
@@ -234,8 +236,8 @@ def test_selected_verification_retry_does_not_repeat_provider_stages(
     monkeypatch.setattr(Keeper, "_verify", fail_selected_verification_once)
     app = KeeperApplication(tmp_path / "data")
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
-    app.register_provider("codex", codex, "test-authority")
-    app.register_provider("claude", claude, "test-authority")
+    app.register_provider("codex", codex, "test-authority", **provider_authority_kwargs())
+    app.register_provider("claude", claude, "test-authority", **provider_authority_kwargs("claude"))
     app.qualify_provider("codex", "test-authority")
     app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)
@@ -290,8 +292,8 @@ def test_author_stage_retry_after_timeout_or_cancellation(
     git(repo, "commit", "-m", "baseline")
     app = KeeperApplication(tmp_path / "data")
     app.save_provider_paths({"codex": str(codex), "claude": str(claude)})
-    app.register_provider("codex", codex, "test-authority")
-    app.register_provider("claude", claude, "test-authority")
+    app.register_provider("codex", codex, "test-authority", **provider_authority_kwargs())
+    app.register_provider("claude", claude, "test-authority", **provider_authority_kwargs("claude"))
     app.qualify_provider("codex", "test-authority")
     app.qualify_provider("claude", "test-authority")
     project = app.add_project(repo)

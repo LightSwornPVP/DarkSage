@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -400,6 +401,8 @@ class ProviderSelectionPolicy:
     privacy_classification: str
     excluded_independence_keys: frozenset[str] = frozenset()
     preferred_provider_id: str | None = None
+    project_type: str | None = None
+    effort_level: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +453,8 @@ def provider_selection_policy_digest(
             policy.excluded_independence_keys
         ),
         "preferred_provider_id": policy.preferred_provider_id,
+        "project_type": policy.project_type,
+        "effort_level": policy.effort_level,
         "assignment_role": AssignmentRole(assignment_role).value,
     }
     return hashlib.sha256(
@@ -478,6 +483,14 @@ def select_provider_session(
         provider = provider_by_id.get(session.provider_id)
         account = account_by_id.get(session.account_id)
         if provider is None or account is None:
+            continue
+        try:
+            validate_provider_execution_declarations(
+                provider,
+                project_type=policy.project_type,
+                effort_level=policy.effort_level,
+            )
+        except PermissionError:
             continue
         independence_keys = {
             provider.provider_id,
@@ -528,6 +541,71 @@ def select_provider_session(
         )
     )
     return candidates[0]
+
+
+def validate_provider_execution_declarations(
+    provider: ProviderRecord,
+    *,
+    project_type: str | None,
+    effort_level: str | None,
+    checked_at: str | None = None,
+) -> None:
+    """Fail closed on the durable Authority-qualified execution envelope."""
+
+    if provider.adapter_kind != "authority-managed":
+        return
+    if not provider.authority_registration_id:
+        raise PermissionError("Authority-managed provider lacks registration")
+    normalized_project_type = (
+        project_type.casefold()
+        if isinstance(project_type, str) and project_type
+        else None
+    )
+    normalized_effort = (
+        effort_level.casefold()
+        if isinstance(effort_level, str) and effort_level
+        else None
+    )
+    if (
+        normalized_project_type is None
+        or normalized_project_type not in provider.project_types
+        or normalized_effort is None
+        or normalized_effort not in provider.effort_levels
+        or provider.pricing_authority_digest is None
+        or len(provider.pricing_authority_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in provider.pricing_authority_digest
+        )
+        or provider.pricing_quoted_at is None
+        or provider.pricing_expires_at is None
+    ):
+        raise PermissionError(
+            "provider execution is outside its Authority-qualified declarations"
+        )
+    try:
+        quoted = datetime.fromisoformat(provider.pricing_quoted_at)
+        expires = datetime.fromisoformat(provider.pricing_expires_at)
+        current = (
+            datetime.fromisoformat(checked_at)
+            if checked_at is not None
+            else datetime.now(UTC)
+        )
+    except ValueError as error:
+        raise PermissionError(
+            "provider pricing validity window is malformed"
+        ) from error
+    if (
+        quoted.tzinfo is None
+        or expires.tzinfo is None
+        or current.tzinfo is None
+        or expires <= quoted
+        or quoted > current
+        or expires <= current
+    ):
+        raise PermissionError(
+            "provider pricing authority is not currently valid"
+        )
 
 
 def assignment_to_adapter(

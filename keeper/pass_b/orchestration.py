@@ -73,6 +73,7 @@ from keeper.pass_b.providers import (
     ProviderAdapter,
     ProviderSelectionPolicy,
     assignment_to_adapter,
+    validate_provider_execution_declarations,
 )
 from keeper.pass_b.repository import (
     PassBRepository,
@@ -413,6 +414,7 @@ class OrchestrationService:
         charter_id: str,
         charter_revision: int,
         workflow_id: str,
+        work_item_id: str | None = None,
         title: str,
         objective: str,
         dependencies: tuple[str, ...] = (),
@@ -427,7 +429,7 @@ class OrchestrationService:
         )
         now = self._now()
         record = WorkItemRecord(
-            work_item_id=uuid.uuid4().hex,
+            work_item_id=work_item_id or uuid.uuid4().hex,
             project_id=project_id,
             charter_id=charter_id,
             charter_revision=charter_revision,
@@ -553,6 +555,9 @@ class OrchestrationService:
             canonical_scope(canonical_path, item) for item in write_scopes
         )
         now = self._now()
+        project_type = charter.get("project_type")
+        if not isinstance(project_type, str) or not project_type:
+            raise PermissionError("current charter project type is invalid")
         record = ExecutionProfileRecord(
             execution_profile_id=uuid.uuid4().hex,
             project_id=work_item.project_id,
@@ -583,6 +588,7 @@ class OrchestrationService:
             created_at=now,
             updated_at=now,
             revision=1,
+            project_type=project_type.casefold(),
         )
         if self.repository.insert_execution_profile_bound(record, work_item):
             return record
@@ -675,6 +681,8 @@ class OrchestrationService:
                 privacy_classification=profile.privacy_classification,
                 excluded_independence_keys=frozenset(excluded),
                 preferred_provider_id=profile.preferred_provider_id,
+                project_type=profile.project_type,
+                effort_level=profile.effort_level,
             ),
             selection_counts=counts,
         )
@@ -1629,6 +1637,12 @@ class OrchestrationService:
         provider = self.repository.get(
             ProviderRecord, assignment.provider_id
         )
+        validate_provider_execution_declarations(
+            provider,
+            project_type=(profile.project_type if profile is not None else None),
+            effort_level=(profile.effort_level if profile is not None else None),
+            checked_at=self._now(),
+        )
         now = self._now()
         attempt_id = uuid.uuid4().hex
         provider_input_base = (
@@ -1838,6 +1852,12 @@ class OrchestrationService:
                 expected_work_item=work_item,
                 expected_assignment=assignment,
             )
+        validate_provider_execution_declarations(
+            provider,
+            project_type=(profile.project_type if profile is not None else None),
+            effort_level=(profile.effort_level if profile is not None else None),
+            checked_at=self._now(),
+        )
         claimed = self.repository.claim_launch(attempt_id, self._now())
         self.repository.require_active_launch_ownership(
             attempt_id,
@@ -2797,7 +2817,10 @@ class OrchestrationService:
         )
 
     def create_repair_assignment(
-        self, review_id: str
+        self,
+        review_id: str,
+        *,
+        delegated_mode_grant_id: str | None = None,
     ) -> AssignmentRecord:
         review = self.repository.get(ReviewRecord, review_id)
         original = self.repository.get(
@@ -2814,6 +2837,17 @@ class OrchestrationService:
             raise PermissionError(
                 "repair assignment requires a repair-required decision"
             )
+        existing_repairs = [
+            item
+            for item in self.repository.list(
+                AssignmentRecord, project_id=original.project_id
+            )
+            if item.usage_policy.get("repair_review_id") == review.review_id
+        ]
+        if len(existing_repairs) > 1:
+            raise PermissionError("review has multiple repair assignments")
+        if existing_repairs:
+            return existing_repairs[0]
         prior_repairs = sum(
             1
             for item in self.repository.list(
@@ -2822,16 +2856,71 @@ class OrchestrationService:
             if item.usage_policy.get("repair_of_assignment_id")
             == original.assignment_id
         )
+        profile_id = original.usage_policy.get("execution_profile_id")
+        selection_id = original.usage_policy.get("provider_selection_id")
+        if not isinstance(profile_id, str) or not isinstance(selection_id, str):
+            if delegated_mode_grant_id is not None:
+                raise PermissionError(
+                    "automated repair requires a durable profile and selection"
+                )
+            usage_policy = dict(original.usage_policy)
+            usage_policy.update(
+                {
+                    "repair_of_assignment_id": original.assignment_id,
+                    "repair_review_id": review.review_id,
+                    "repair_ordinal": prior_repairs + 1,
+                }
+            )
+            return self.create_assignment(
+                work_item=work_item,
+                provider_id=original.provider_id,
+                account_id=original.account_id,
+                session_id=original.session_id,
+                role=original.role,
+                model_id=original.model_id,
+                workspace_id=original.workspace_id,
+                authority_envelope_digest=original.authority_envelope_digest,
+                expected_evidence=original.expected_evidence,
+                usage_policy=usage_policy,
+                independence_key=original.independence_key,
+            )
+        profile = self.repository.get(ExecutionProfileRecord, profile_id)
+        prior_selection = self.repository.get(
+            ProviderSelectionRecord, selection_id
+        )
+        if delegated_mode_grant_id is not None:
+            if self.project_status is None:
+                raise RuntimeError(
+                    "automated repair requires project authority"
+                )
+            validate_delegated_action(
+                self.repository,
+                delegated_mode_grant_id,
+                project_status=self.project_status,
+                project_id=original.project_id,
+                charter_id=original.charter_id,
+                charter_revision=original.charter_revision,
+                action="REQUEST_BOUNDED_REPAIR",
+                action_scope={"provider_id": original.provider_id},
+            )
+        new_selection_id = uuid.uuid4().hex
         usage_policy = dict(original.usage_policy)
         usage_policy.update(
             {
                 "repair_of_assignment_id": original.assignment_id,
                 "repair_review_id": review.review_id,
                 "repair_ordinal": prior_repairs + 1,
+                "provider_selection_id": new_selection_id,
             }
         )
-        return self.create_assignment(
-            work_item=work_item,
+        now = self._now()
+        repair = AssignmentRecord(
+            assignment_id=uuid.uuid4().hex,
+            project_id=original.project_id,
+            charter_id=original.charter_id,
+            charter_revision=original.charter_revision,
+            workflow_id=original.workflow_id,
+            work_item_id=original.work_item_id,
             provider_id=original.provider_id,
             account_id=original.account_id,
             session_id=original.session_id,
@@ -2841,8 +2930,44 @@ class OrchestrationService:
             authority_envelope_digest=original.authority_envelope_digest,
             expected_evidence=original.expected_evidence,
             usage_policy=usage_policy,
+            state=AssignmentState.READY,
+            read_only=original.read_only,
             independence_key=original.independence_key,
+            created_at=now,
+            updated_at=now,
+            revision=1,
         )
+        selection = replace(
+            prior_selection,
+            provider_selection_id=new_selection_id,
+            assignment_id=repair.assignment_id,
+            delegated_mode_grant_id=(
+                delegated_mode_grant_id
+                or prior_selection.delegated_mode_grant_id
+            ),
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        if self.repository.claim_repair_assignment(
+            review=review,
+            original=original,
+            work_item=work_item,
+            profile=profile,
+            selection=selection,
+            repair=repair,
+        ):
+            return repair
+        winners = [
+            item
+            for item in self.repository.list(
+                AssignmentRecord, project_id=original.project_id
+            )
+            if item.usage_policy.get("repair_review_id") == review.review_id
+        ]
+        if len(winners) != 1:
+            raise PermissionError("bounded repair claim changed concurrently")
+        return winners[0]
 
     def _evidence(
         self,

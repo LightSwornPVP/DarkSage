@@ -23,6 +23,20 @@ If authentication is canceled, rejected, unavailable, or expires, no workflow is
 created. A durable approval or activation interrupted before UI refresh is
 reconciled from authoritative state on the next exact attempt.
 
+## After the one Founder approval
+
+For an approved full-delegation charter, Keeper activates a project- and
+charter-scoped delegated grant and continues in the background. It selects only
+qualified, charter-approved, non-paid providers; claims usage, sessions, and one
+canonical producer workspace; executes dependency-ready stages; sends exact typed
+evidence to a separate read-only reviewer workspace; applies accepted review or one
+bounded repair path; and closes the workflow only after validated evidence.
+
+Routine sequencing, provider choice, testing, review, and bounded repair do not ask
+for another approval. Usage exhaustion, `UNCERTAIN` effects, expired/revoked grants,
+changed charters, prohibited actions, or unavailable independent capacity stop and
+surface an explicit durable state instead of guessing or retrying.
+
 ## Product areas
 
 - **Home**: current project, approval state, workflow, usage, recent evidence,
@@ -39,4 +53,12 @@ reconciled from authoritative state on the next exact attempt.
 
 Provider launch, retry, pause/resume, cancellation, recovery, and exceptional
 actions remain authoritative service operations. UI labels and buttons never
+
+## Daily launch
+
+Build the standalone artifact with `scripts/build-keeper.ps1`, then launch it with:
+
+```powershell
+python C:\path\to\keeper.pyz
+```
 bypass the Executive, Pass B, or KeeperAuthority boundaries.

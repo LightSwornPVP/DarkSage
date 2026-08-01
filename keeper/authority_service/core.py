@@ -30,10 +30,11 @@ from keeper.providers.adapters import (
     create_provider_registration,
     qualification_evidence_digest,
     qualified_version_is_valid,
+    validate_provider_registration_contract,
 )
 
 
-SERVICE_VERSION = "1.6.0"
+SERVICE_VERSION = "1.6.2"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
@@ -84,7 +85,15 @@ class TrustedObserver(Protocol):
     ) -> QualificationObservation: ...
 
     def register_provider(
-        self, provider_id: str, executable: Path, client_sid: str
+        self,
+        provider_id: str,
+        executable: Path,
+        client_sid: str,
+        *,
+        executive_capabilities: list[str],
+        project_types: list[str],
+        effort_levels: list[str],
+        pricing_authority: dict[str, Any],
     ) -> dict[str, Any]: ...
 
     def observe_process(
@@ -440,20 +449,44 @@ class AuthorityServiceCore:
     def _register_provider(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
-        _exact(payload, {"provider_id", "executable"})
+        _exact(
+            payload,
+            {
+                "provider_id",
+                "executable",
+                "executive_capabilities",
+                "project_types",
+                "effort_levels",
+                "pricing_authority",
+            },
+        )
         provider_id = _choice(payload["provider_id"], {"codex", "claude"})
         executable = Path(_text(payload["executable"], "provider executable"))
+        executive_capabilities = payload["executive_capabilities"]
+        project_types = payload["project_types"]
+        effort_levels = payload["effort_levels"]
+        pricing_authority = payload["pricing_authority"]
         if self.observer is not None and hasattr(
             self.observer, "register_provider"
         ):
             registration = self.observer.register_provider(
-                provider_id, executable, client_sid
+                provider_id,
+                executable,
+                client_sid,
+                executive_capabilities=executive_capabilities,
+                project_types=project_types,
+                effort_levels=effort_levels,
+                pricing_authority=pricing_authority,
             )
         else:
             registration = create_provider_registration(
                 provider_id,
                 executable,
                 authorized_by=client_sid,
+                executive_capabilities=executive_capabilities,
+                project_types=project_types,
+                effort_levels=effort_levels,
+                pricing_authority=pricing_authority,
             )
         identifier = str(registration["trusted_registration_id"])
         self.store.insert("registrations", identifier, "REGISTERED_UNQUALIFIED", registration)
@@ -472,6 +505,11 @@ class AuthorityServiceCore:
             or registration.pop("service_state", None) != "REGISTERED_UNQUALIFIED"
         ):
             raise PermissionError("registration is not eligible for qualification")
+        valid, detail = validate_provider_registration_contract(registration)
+        if not valid:
+            raise PermissionError(
+                f"registration contract is incomplete or invalid: {detail}"
+            )
         qualification_id = f"provider-qualification:{uuid.uuid4().hex}"
         challenge = secrets.token_hex(32)
         start = self.keys.sign(
@@ -1528,6 +1566,7 @@ class AuthorityServiceCore:
         purpose = _choice(
             payload["purpose"],
             {
+                "project-launch-authorization",
                 "provider-registration",
                 "provider-qualification-start",
                 "provider-qualification",
@@ -1663,10 +1702,25 @@ class AuthorityServiceCore:
         for old in registrations:
             if not isinstance(old, dict):
                 raise ValueError("legacy registration is malformed")
+            _exact(
+                old,
+                {
+                    "logical_provider_id",
+                    "canonical_executable_path",
+                    "executive_capabilities",
+                    "project_types",
+                    "effort_levels",
+                    "pricing_authority",
+                },
+            )
             provider_id = _choice(old.get("logical_provider_id"), {"codex", "claude"})
             executable = Path(
                 _text(old.get("canonical_executable_path"), "legacy executable")
             )
+            executive_capabilities = old["executive_capabilities"]
+            project_types = old["project_types"]
+            effort_levels = old["effort_levels"]
+            pricing_authority = old["pricing_authority"]
             matches = [
                 value
                 for value in self.store.list_records("registrations")
@@ -1687,11 +1741,23 @@ class AuthorityServiceCore:
                 self.observer, "register_provider"
             ):
                 registration = self.observer.register_provider(
-                    provider_id, executable, client_sid
+                    provider_id,
+                    executable,
+                    client_sid,
+                    executive_capabilities=executive_capabilities,
+                    project_types=project_types,
+                    effort_levels=effort_levels,
+                    pricing_authority=pricing_authority,
                 )
             else:
                 registration = create_provider_registration(
-                    provider_id, executable, authorized_by=client_sid
+                    provider_id,
+                    executable,
+                    authorized_by=client_sid,
+                    executive_capabilities=executive_capabilities,
+                    project_types=project_types,
+                    effort_levels=effort_levels,
+                    pricing_authority=pricing_authority,
                 )
             self.store.insert(
                 "registrations",

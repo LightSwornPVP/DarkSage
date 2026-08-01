@@ -9,6 +9,8 @@ from typing import Any, cast
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.app.workflow import _protected_record_digest, _resolve_execution_evidence
 from keeper.app.lifecycle import RunStage
 from keeper.app.service import KeeperApplication
@@ -377,7 +379,7 @@ def _qualified_registration(
         "codex",
         executable,
         authorized_by="test-authority",
-    )
+     **provider_authority_kwargs('codex'))
     evidence: dict[str, Any] = {
         "id": "qualification:test",
         "kind": "provider_qualification",

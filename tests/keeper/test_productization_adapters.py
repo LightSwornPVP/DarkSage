@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.providers.adapters import (
     ClaudeCommandAdapter,
     CodexCommandAdapter,
@@ -37,7 +39,7 @@ def test_codex_adapter_uses_argument_array_and_output_schema(tmp_path: Path) -> 
     executable.write_bytes(b"controlled provider")
     registration = create_provider_registration(
         "codex", executable, authorized_by="test"
-    )
+    , **provider_authority_kwargs('codex'))
     command = CodexCommandAdapter(str(executable), registration).build_command(request)
     assert command[:2] == [str(executable.resolve()), "exec"]
     assert command[-1] == "content; Remove-Item -Recurse"
@@ -49,7 +51,7 @@ def test_claude_adapter_uses_argument_array_and_schema(tmp_path: Path) -> None:
     executable.write_bytes(b"controlled provider")
     registration = create_provider_registration(
         "claude", executable, authorized_by="test"
-    )
+    , **provider_authority_kwargs('claude'))
     command = ClaudeCommandAdapter(str(executable), registration).build_command(
         _request(tmp_path)
     )

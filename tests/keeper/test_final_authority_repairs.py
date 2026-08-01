@@ -7,6 +7,8 @@ from typing import Any, cast
 
 import pytest
 
+from tests.keeper.authority_testkit import provider_authority_kwargs
+
 from keeper.app.service import KeeperApplication
 from keeper.cli import main
 from keeper.authority import AuthorityKey
@@ -57,7 +59,7 @@ def test_registration_creation_cannot_fabricate_qualification(
         )
     registration = create_provider_registration(
         "codex", executable, authorized_by="registrar"
-    )
+    , **provider_authority_kwargs('codex'))
 
     assert marker.exists() is False
     assert registration["registration_lifecycle"] == "REGISTERED_UNQUALIFIED"
@@ -74,7 +76,7 @@ def test_protected_qualification_records_actual_output(
     marker = tmp_path / "marker.txt"
     _version_script(executable, marker)
     app.save_provider_paths({"codex": str(executable)})
-    app.register_provider("codex", executable, "registrar")
+    app.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
 
     before = next(
         item for item in app.diagnostics()["providers"] if item["provider_id"] == "codex"
@@ -99,7 +101,7 @@ def test_failed_protected_qualification_stays_unqualified(tmp_path: Path) -> Non
     marker = tmp_path / "marker.txt"
     _version_script(executable, marker, success=False)
     app.save_provider_paths({"codex": str(executable)})
-    app.register_provider("codex", executable, "registrar")
+    app.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
 
     with pytest.raises(PermissionError, match="failed"):
         app.qualify_provider("codex", "qualifier")
@@ -121,7 +123,7 @@ def test_unrecognized_version_output_fails_qualification(tmp_path: Path) -> None
         encoding="utf-8",
     )
     application.save_provider_paths({"codex": str(executable)})
-    application.register_provider("codex", executable, "registrar")
+    application.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
 
     with pytest.raises(PermissionError, match="failed"):
         application.qualify_provider("codex", "qualifier")
@@ -144,7 +146,7 @@ def test_provider_construction_failure_is_finalized(
     executable = tmp_path / "provider.cmd"
     marker = tmp_path / "marker.txt"
     _version_script(executable, marker)
-    application.register_provider("codex", executable, "registrar")
+    application.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
 
     def fail_construction(
         *_args: object, **_kwargs: object
@@ -187,7 +189,7 @@ def test_standalone_batch_uses_composite_qualified_registration(
     executable = tmp_path / "provider.cmd"
     marker = tmp_path / "marker.txt"
     _version_script(executable, marker)
-    authority.register_provider("codex", executable, "registrar")
+    authority.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
     registration = authority.qualify_provider("codex", "qualifier")
     evidence = authority.qualification_evidence()[
         str(registration["qualification_evidence_id"])
@@ -220,7 +222,7 @@ def test_raw_qualification_evidence_in_standalone_config_is_rejected(
     executable = tmp_path / "provider.cmd"
     marker = tmp_path / "marker.txt"
     _version_script(executable, marker)
-    authority.register_provider("codex", executable, "registrar")
+    authority.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
     registration = authority.qualify_provider("codex", "qualifier")
     evidence = authority.qualification_evidence()[
         str(registration["qualification_evidence_id"])
@@ -252,7 +254,7 @@ def test_public_digest_and_wrong_installation_key_do_not_authenticate(
     executable = tmp_path / "provider.cmd"
     marker = tmp_path / "marker.txt"
     _version_script(executable, marker)
-    unqualified = application.register_provider("codex", executable, "registrar")
+    unqualified = application.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
     qualified = application.qualify_provider("codex", "qualifier")
     evidence_by_id = application.qualification_evidence()
     evidence = dict(
@@ -308,7 +310,7 @@ def test_signed_qualification_mutation_and_replay_are_rejected(
     executable = tmp_path / f"{field}.cmd"
     marker = tmp_path / f"{field}.txt"
     _version_script(executable, marker)
-    application.register_provider("codex", executable, "registrar")
+    application.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
     qualified = application.qualify_provider("codex", "qualifier")
     evidence_by_id = application.qualification_evidence()
     evidence_id = str(qualified["qualification_evidence_id"])
@@ -363,7 +365,7 @@ def test_provider_receives_no_authority_key_location(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    application.register_provider("codex", executable, "registrar")
+    application.register_provider("codex", executable, "registrar", **provider_authority_kwargs())
 
     application.qualify_provider("codex", "qualifier")
 
@@ -427,7 +429,7 @@ def test_discovery_preserves_all_disabled_capabilities_and_empty_roles(
         capabilities=disabled,
         role_eligibility=[],
         independence_classification="authoring-only",
-    )
+     **provider_authority_kwargs('codex'))
 
     diagnostic = ProviderDiscovery(
         {"codex": str(executable)}, {"codex": registration}
@@ -448,13 +450,13 @@ def test_unknown_duplicate_and_inconsistent_roles_are_rejected(
     variants = [
         create_provider_registration(
             "codex", executable, authorized_by="registrar"
-        ),
+        , **provider_authority_kwargs('codex')),
         create_provider_registration(
             "codex", executable, authorized_by="registrar"
-        ),
+        , **provider_authority_kwargs('codex')),
         create_provider_registration(
             "codex", executable, authorized_by="registrar"
-        ),
+        , **provider_authority_kwargs('codex')),
     ]
     variants[0]["role_eligibility"] = ["unknown"]
     variants[1]["role_eligibility"] = ["builder", "builder"]

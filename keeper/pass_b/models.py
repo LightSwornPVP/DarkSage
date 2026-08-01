@@ -106,11 +106,29 @@ class ProviderRecord(PassBRecord):
     updated_at: str
     revision: int
     authority_registration_id: str | None = None
+    project_types: tuple[str, ...] = ()
+    effort_levels: tuple[str, ...] = ()
+    pricing_authority_digest: str | None = None
+    pricing_quoted_at: str | None = None
+    pricing_expires_at: str | None = None
 
     KIND = "provider"
     ID_FIELD = "provider_id"
-    TUPLE_FIELDS = ("capabilities", "tool_support", "workspace_support")
-    DEFAULTS = {"authority_registration_id": None}
+    TUPLE_FIELDS = (
+        "capabilities",
+        "tool_support",
+        "workspace_support",
+        "project_types",
+        "effort_levels",
+    )
+    DEFAULTS = {
+        "authority_registration_id": None,
+        "project_types": (),
+        "effort_levels": (),
+        "pricing_authority_digest": None,
+        "pricing_quoted_at": None,
+        "pricing_expires_at": None,
+    }
 
     def __post_init__(self) -> None:
         ProviderClassification(self.classification)
@@ -119,6 +137,14 @@ class ProviderRecord(PassBRecord):
         HealthState(self.health)
         if self.concurrency_limit < 1:
             raise ValueError("provider concurrency limit must be positive")
+        if len(set(self.project_types)) != len(self.project_types):
+            raise ValueError("provider project types must be unique")
+        if len(set(self.effort_levels)) != len(self.effort_levels):
+            raise ValueError("provider effort levels must be unique")
+        if self.pricing_quoted_at is not None:
+            _timestamp(self.pricing_quoted_at, "pricing_quoted_at")
+        if self.pricing_expires_at is not None:
+            _timestamp(self.pricing_expires_at, "pricing_expires_at")
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)
@@ -353,6 +379,7 @@ class ExecutionProfileRecord(PassBRecord):
     created_at: str
     updated_at: str
     revision: int
+    project_type: str | None = None
 
     KIND = "execution_profile"
     ID_FIELD = "execution_profile_id"
@@ -362,6 +389,7 @@ class ExecutionProfileRecord(PassBRecord):
         "expected_evidence",
         "required_capabilities",
     )
+    DEFAULTS = {"project_type": None}
 
     def __post_init__(self) -> None:
         role = AssignmentRole(self.role)
