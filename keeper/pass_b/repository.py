@@ -53,6 +53,7 @@ from keeper.pass_b.models import (
 from keeper.pass_b.providers import (
     ProviderSelectionPolicy,
     provider_selection_policy_digest,
+    validate_provider_execution_declarations,
 )
 
 R = TypeVar("R", bound=PassBRecord)
@@ -581,7 +582,15 @@ class PassBRepository:
                         selection.excluded_independence_keys
                     ),
                     preferred_provider_id=profile.preferred_provider_id,
+                    project_type=profile.project_type,
+                    effort_level=profile.effort_level,
                 ),
+            )
+            validate_provider_execution_declarations(
+                provider,
+                project_type=profile.project_type,
+                effort_level=profile.effort_level,
+                checked_at=assignment.created_at,
             )
             if (
                 account.provider_id != provider.provider_id

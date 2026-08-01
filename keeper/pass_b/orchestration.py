@@ -73,6 +73,7 @@ from keeper.pass_b.providers import (
     ProviderAdapter,
     ProviderSelectionPolicy,
     assignment_to_adapter,
+    validate_provider_execution_declarations,
 )
 from keeper.pass_b.repository import (
     PassBRepository,
@@ -554,6 +555,9 @@ class OrchestrationService:
             canonical_scope(canonical_path, item) for item in write_scopes
         )
         now = self._now()
+        project_type = charter.get("project_type")
+        if not isinstance(project_type, str) or not project_type:
+            raise PermissionError("current charter project type is invalid")
         record = ExecutionProfileRecord(
             execution_profile_id=uuid.uuid4().hex,
             project_id=work_item.project_id,
@@ -584,6 +588,7 @@ class OrchestrationService:
             created_at=now,
             updated_at=now,
             revision=1,
+            project_type=project_type.casefold(),
         )
         if self.repository.insert_execution_profile_bound(record, work_item):
             return record
@@ -676,6 +681,8 @@ class OrchestrationService:
                 privacy_classification=profile.privacy_classification,
                 excluded_independence_keys=frozenset(excluded),
                 preferred_provider_id=profile.preferred_provider_id,
+                project_type=profile.project_type,
+                effort_level=profile.effort_level,
             ),
             selection_counts=counts,
         )
@@ -1630,6 +1637,12 @@ class OrchestrationService:
         provider = self.repository.get(
             ProviderRecord, assignment.provider_id
         )
+        validate_provider_execution_declarations(
+            provider,
+            project_type=(profile.project_type if profile is not None else None),
+            effort_level=(profile.effort_level if profile is not None else None),
+            checked_at=self._now(),
+        )
         now = self._now()
         attempt_id = uuid.uuid4().hex
         provider_input_base = (
@@ -1839,6 +1852,12 @@ class OrchestrationService:
                 expected_work_item=work_item,
                 expected_assignment=assignment,
             )
+        validate_provider_execution_declarations(
+            provider,
+            project_type=(profile.project_type if profile is not None else None),
+            effort_level=(profile.effort_level if profile is not None else None),
+            checked_at=self._now(),
+        )
         claimed = self.repository.claim_launch(attempt_id, self._now())
         self.repository.require_active_launch_ownership(
             attempt_id,

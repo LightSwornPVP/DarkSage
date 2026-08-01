@@ -12,6 +12,7 @@ from keeper.pass_b.models import (
     AssignmentRecord,
     DelegatedModeGrantRecord,
     EvidenceReferenceRecord,
+    ExecutionProfileRecord,
     ReviewRecord,
     WorkspaceReservationRecord,
     WorkflowRecord,
@@ -126,6 +127,11 @@ def test_one_approval_autonomous_completion_reaches_terminal_workflow(
     assert reviewer_paths
     assert producer_paths.isdisjoint(reviewer_paths)
     assert len(reviewer_paths) == len(reviewers)
+    profiles = application.repository.list(
+        ExecutionProfileRecord, project_id=project_id
+    )
+    assert profiles
+    assert all(item.project_type == "software" for item in profiles)
 
 
 def test_completion_coordinator_is_restart_resumable(tmp_path: Path) -> None:

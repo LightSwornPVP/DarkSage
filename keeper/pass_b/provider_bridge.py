@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -34,6 +36,20 @@ _ROLE_ALIASES = MappingProxyType(
         "documentation": "documentation_specialist",
     }
 )
+_PROJECT_TYPES = frozenset(
+    {
+        "business_operations",
+        "design",
+        "general",
+        "marketing",
+        "music",
+        "research",
+        "software",
+        "video",
+        "writing",
+    }
+)
+_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +121,19 @@ def bridge_qualified_provider(
     declared_capabilities = _texts(
         registration, "executive_capability_set"
     )
+    project_types = _texts(registration, "project_types")
+    effort_levels = _texts(registration, "effort_levels")
+    if (
+        project_types != tuple(sorted(project_types))
+        or len(set(project_types)) != len(project_types)
+        or any(item not in _PROJECT_TYPES for item in project_types)
+        or effort_levels != tuple(sorted(effort_levels))
+        or len(set(effort_levels)) != len(effort_levels)
+        or any(item not in _EFFORT_LEVELS for item in effort_levels)
+    ):
+        raise PermissionError(
+            "Authority provider execution declarations are invalid"
+        )
     capabilities = tuple(
         dict.fromkeys(
             [
@@ -133,6 +162,29 @@ def bridge_qualified_provider(
         "cost_tier",
     }:
         raise PermissionError("Authority provider pricing declaration is invalid")
+    current = datetime.now(UTC)
+    try:
+        quoted = datetime.fromisoformat(_text(pricing, "quoted_at"))
+        expires = datetime.fromisoformat(_text(pricing, "expires_at"))
+    except ValueError as error:
+        raise PermissionError(
+            "Authority provider pricing validity window is malformed"
+        ) from error
+    if (
+        quoted.tzinfo is None
+        or expires.tzinfo is None
+        or expires <= quoted
+        or quoted > current
+        or expires <= current
+    ):
+        raise PermissionError(
+            "Authority provider pricing authority is not currently valid"
+        )
+    pricing_digest = hashlib.sha256(
+        json.dumps(pricing, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
     if pricing.get("marginally_free") is True:
         cost_mode = CostMode.FREE
     elif pricing.get("included_plan") is True:
@@ -181,6 +233,11 @@ def bridge_qualified_provider(
         updated_at=now,
         revision=1,
         authority_registration_id=binding.registration_id,
+        project_types=project_types,
+        effort_levels=effort_levels,
+        pricing_authority_digest=pricing_digest,
+        pricing_quoted_at=quoted.isoformat(),
+        pricing_expires_at=expires.isoformat(),
     )
     account = ProviderAccountRecord(
         account_id=account_id,
@@ -240,6 +297,17 @@ def bridge_qualified_provider(
         return provider
     if existing.authority_registration_id != binding.registration_id:
         raise PermissionError("durable provider registration identity changed")
+    if (
+        existing.project_types != project_types
+        or existing.effort_levels != effort_levels
+        or existing.pricing_authority_digest != pricing_digest
+        or existing.pricing_quoted_at != quoted.isoformat()
+        or existing.pricing_expires_at != expires.isoformat()
+        or existing.cost_mode != cost_mode
+    ):
+        raise PermissionError(
+            "durable provider qualification declarations changed"
+        )
     orchestration.attach_adapter(provider_id, adapter)
     return existing
 
