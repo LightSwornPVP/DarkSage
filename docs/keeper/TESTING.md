@@ -81,10 +81,8 @@ no surviving process, and no post-lifecycle authority-blob access. Authority-key
 tests race independent first-installation processes and interrupt publication to
 prove one valid no-overwrite winner and no partial final key.
 
-`python -m keeper.desktop --ui-smoke` creates actual Tk widgets and drives notebook
-events, verifies all nine executive-command-center pages, selects the Workflows
-page, invokes the dashboard System Check button, verifies the visible status update,
-and writes structured evidence beneath the selected data directory when Tcl/Tk is
-available. Headless tests separately verify entry-point wiring, navigation aliases,
-state colors, theme tokens, and the absence of direct authority bypass methods. Exit
-code 78 with a JSON `unavailable` result means the Python runtime lacks a usable
+`python -m keeper.desktop --ui-smoke --data-dir <fresh-isolated-profile> --screenshot-dir <path>` now launches the Qt product shell and renders all 13 pages. `python -m keeper.ui_qml` is the direct Qt entry. `--mock-demo`, `--ui-smoke`, and `--test-ui-fixture` require an explicit empty or previously marked QA profile and refuse the normal Founder profile and protected workflow paths. Release evidence uses the normal Windows platform so system fonts and high-DPI behavior match the installed product; the Qt offscreen backend is retained only for structural CI smoke.
+
+`tests/keeper/test_qml_desktop.py` verifies canonical navigation, primitive/redacted state, durable Keeper Assistant conversation, fail-closed actions, absent Sage surfaces, disabled unsupported authority/provider controls, safe Authority health, source-backed search, and narrow-window Assistant behavior. `tests/keeper/test_desktop_package_lifecycle.py` verifies manifest path confinement, install, repair, rollback, and data-preserving uninstall.
+
+Package verification runs `Keeper.exe --diagnostics --data-dir <isolated-profile>`, `Keeper.exe --mock-demo --data-dir <isolated-qa-profile>`, the 13-page rendered UI smoke with the same isolated QA contract, manifest hashes, protected-content/secret/private-path scans, and the isolated install/repair/upgrade/rollback/uninstall lifecycle. The legacy Tk classes remain covered by compatibility tests but are neither the default product shell nor included in the Qt package.

@@ -9,5 +9,9 @@ python_version = "3.14"
 exclude = ["backend/alembic/"]
 
 [[tool.mypy.overrides]]
+module = "PySide6.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "aiosqlite.*"
 ignore_missing_imports = true

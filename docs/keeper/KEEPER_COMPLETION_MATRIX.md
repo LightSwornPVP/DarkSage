@@ -1,30 +1,24 @@
 # Keeper Completion Matrix
 
-This matrix records the repository-wide completion audit for the final local-use
-release candidate based on merged main `b1e7e6f4c0c3fc5002c596eb5c09a79ce4916d9c`. `COMPLETE` means the supported
-Keeper 1.0 path has an authoritative implementation and verification.
+This matrix describes the local personal-use release candidate. `COMPLETE` means a supported Keeper path exists and is covered by repository verification; it does not grant new authority or imply public deployment.
 
-| Area | Complete | Partial or deferred |
+| Area | Status | Evidence or boundary |
 |---|---|---|
-| Founder and authority | Native Founder identity/authentication; challenge, intent, project, machine, expiry, session and replay binding; Authority reservations; durable receipts; atomic failure; exceptional-action gates | Automatic authority-key rotation is deferred by design; retained verifier migration is future hardening |
-| Project Charters | Creation, validation, approval, versioning, amendment, revocation, budget/provider/authority enforcement; product lifecycle selection, native approval, and atomic planning | Further Founder-facing constraint presentation polish |
-| Workflow orchestration | Durable project creation, one-approval delegated completion, sequential charter-scoped producer handoff, isolated independent review, exact typed-evidence delivery, bounded repair, duplicate-delivery prevention, atomic charter-derived planning, dependency-gated one-winner assignment preparation, terminal workflow completion, claim-before-effect cancellation, and explicit uncertain-cancellation reconciliation | Real external providers remain opt-in and require supported registration/qualification |
-| Provider management | Registration, identity, capability enforcement, multiple sessions, review separation, model evidence, Medium/High effort profiles, durable fair policy selection, cancellation, and conservative recovery | External-provider qualification matrix |
-| Full Delegation | Positive allowlist, current-charter binding, expiry, revocation, replay protection, exceptional-action denials, restart-resumable autonomous sequencing and bounded repair after one charter approval | Founder-facing grant-duration controls |
-| Usage continuity | Atomic pause, durable checkpoint, authenticated reset/resume, shared pools, duplicate prevention | Durable fair queue and richer product controls |
-| Desktop product | Executive dashboard; projects/charters; workflow status; Founder approvals; provider management; audit/typed-reference receipts; recovery; security/settings; first-run setup; system-integrity rail; rendered package smoke | Further decorative polish only; durable services remain authoritative |
-| Recovery | Restart persistence, database interruption, partial delivery, claim-before-effect cancellation, durable cancellation ambiguity, one-use Founder reconciliation, retry/process ownership, and atomic transitions | Consolidated operator UI/runbook |
-| Security | Threat model, confinement, Job Object startup, proof rejection, composition separation, tamper checks, fail-closed behavior | No Critical/High gap found |
-| Packaging | Reproducible standalone `.pyz`, diagnostics, mock workflow, rendered Tk smoke, migrations, integrity and protected-content checks, exact local launch guidance | Managed per-user install/repair/rollback tooling is optional follow-up; application data remains separate |
-| Documentation | Provider, recovery, security, limitations, release checklist, Founder/Charter/Full Delegation and product-shell-accurate daily-use guidance | Editorial polish only |
+| Founder and authority | COMPLETE | Native Founder authentication, exact charter identity, durable approvals, Authority protocol 6 receipts, fail-closed replay and mismatch handling |
+| Project charters | COMPLETE | Durable intake, versioned proposals, one exact Founder approval, active-revision execution binding |
+| Workflow orchestration | COMPLETE | Charter-derived planning, isolated assignments, session/usage claims, independent review, bounded repair, duplicate prevention, completion evidence |
+| Provider management | COMPLETE for supported local use | Durable provider/account/session models and qualification gates; real external providers remain Founder-configured and opt-in |
+| Full delegation | COMPLETE | Positive allowlist, expiry/revocation/current-charter checks, routine work after one approval, prohibited-action denials |
+| Usage continuity | COMPLETE | Shared atomic accounting, authenticated reset observation, durable pause/resume, no paid fallback |
+| Desktop product | COMPLETE | PySide6/Qt Quick shell, 13 source-backed areas, Keeper Assistant, responsive layout, real search, redacted diagnostics, official icon, seven-step setup |
+| Recovery | COMPLETE | Restart persistence, cancellation ordering, uncertainty preservation, supported resume/reconciliation |
+| Security | COMPLETE for threat model 1.0 | Protected-tree confinement, evidence binding, composition separation, provider-code isolation, fail-closed UI boundary |
+| Packaging | COMPLETE | Standalone `Keeper.exe`, hashed manifest, diagnostics, mock workflow, rendered Windows smoke, per-user install/repair/upgrade/rollback/uninstall |
+| Documentation | COMPLETE | Architecture, contract matrix, user guide, installation, release checklist, testing, and troubleshooting updated |
 
-## Dependency-ordered completion backlog
+## Nonblocking backlog
 
-1. Optional managed per-user install/repair/rollback automation.
-2. Authenticated qualification evidence for each Founder-selected real provider.
-3. Consolidated Medium/Low UI and operator polish.
-
-No Critical or High defect was found in the approved Founder, authority,
-delegation, workspace, usage, evidence, or composition boundaries. The partial
-items above are release-completion work and must not be represented as complete
-until their bounded passes are merged.
+1. Qualify additional Founder-selected real providers through the existing supported registration and qualification flow.
+2. Reduce nonfatal `qmllint` unqualified-access and layout-positioning warnings without changing behavior.
+3. Consider richer per-page sort/filter controls after daily-use feedback.
+4. Public release/tagging remains a separate Founder decision.

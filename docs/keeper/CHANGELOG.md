@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replace the default Keeper desktop with a PySide6/Qt Quick executive control center using the official lighthouse identity, 13 source-backed product areas, durable Keeper Assistant conversation, responsive layouts, and protected-path-redacted service health.
+- Add a pinned standalone Windows build plus hashed per-user install, repair, upgrade, one-generation rollback, status, and data-preserving uninstall lifecycle.
 - Require an authenticated Executive commit receipt before KeeperAuthority can bind
   typed reviewer input. The receipt proves the exact delivered-input record,
   reviewer attempt, session slot, usage reservation, and RESERVED launch claim were
