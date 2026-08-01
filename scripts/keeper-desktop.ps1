@@ -8,7 +8,7 @@ $Python = Join-Path $Repository ".venv\Scripts\pythonw.exe"
 if (-not (Test-Path -LiteralPath $Python)) {
     $Python = "pythonw"
 }
-$Arguments = @("-m", "keeper.desktop")
+$Arguments = @("-m", "keeper.ui_qml")
 if ($DataDirectory) {
     $Arguments += @("--data-dir", [IO.Path]::GetFullPath($DataDirectory))
 }

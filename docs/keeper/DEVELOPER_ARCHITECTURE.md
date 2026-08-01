@@ -1,12 +1,9 @@
 # Developer Architecture
 
-`keeper.desktop` is a Tkinter presentation layer over `KeeperApplication`.
-`keeper.app.storage` owns transactional versioned SQLite records. Lifecycle,
-verification policy, Git safety, security, notifications, and reporting are
-separate services. The approved orchestration engine and process-tree provider
-runner remain authoritative for workflow execution.
+`keeper.ui_qml` is the product presentation layer over `KeeperApplication` and `PassBApplication`. `keeper.desktop` retains legacy Tk classes for compatibility tests, but its default entry point delegates to Qt; `--legacy-tk` is explicit.
 
-Provider adapters implement the existing `AgentProvider` request/result boundary.
-No local server or IPC is used. This keeps the attack surface and packaging
-dependency set small while permitting a future presentation layer to reuse the
-display-independent service.
+QML receives only primitive redacted state from `KeeperDesktopController`. It does not import repositories, SQLite records, Executive objects, provider adapters, or KeeperAuthority clients. UI actions call supported application services and cannot synthesize Founder approval, provider qualification, review acceptance, recovery truth, or execution authority.
+
+`keeper.app.storage` owns transactional versioned SQLite records. Lifecycle, verification policy, Git safety, security, notifications, reporting, orchestration, and process-tree provider execution remain separate services. KeeperAuthority remains the authority truth. The desktop health projection uses the existing safe allowlisted health view and does not expose service roots, exchange roots, SIDs, or protected evidence paths.
+
+PySide6 6.10.1 supplies Qt Quick, scaling, accessibility, and Windows integration. Nuitka 4.1.3 builds a standalone per-user artifact. Runtime package contents are hashed and validated by the local lifecycle script before install, repair, upgrade, or rollback.

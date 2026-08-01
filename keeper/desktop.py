@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import threading
 from functools import partial
 from pathlib import Path
@@ -644,6 +643,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--diagnostics", action="store_true")
     result.add_argument("--mock-demo", action="store_true")
     result.add_argument("--ui-smoke", action="store_true")
+    result.add_argument("--screenshot-dir", type=Path)
+    result.add_argument("--test-ui-fixture", action="store_true")
+    result.add_argument("--legacy-tk", action="store_true")
     return result
 
 
@@ -656,56 +658,19 @@ def main(arguments: list[str] | None = None) -> int:
     if options.mock_demo:
         print(json.dumps(application.run_mock_demo(), indent=2))
         return 0
+    if options.legacy_tk:
+        KeeperProductDesktop(application).run()
+        return 0
+    from keeper.ui_qml import run_desktop
+
     if options.ui_smoke:
         application.finish_setup()
-        try:
-            desktop = KeeperProductDesktop(application)
-        except Exception as error:
-            if error.__class__.__name__ == "TclError":
-                print(
-                    json.dumps(
-                        {
-                            "ui_smoke": "unavailable",
-                            "reason": str(error),
-                        }
-                    )
-                )
-                return 78
-            raise
-        desktop.root.update_idletasks()
-        desktop.root.update()
-        pages = desktop.navigation_pages
-        if len(pages) != 9:
-            desktop.root.destroy()
-            raise RuntimeError("Keeper desktop smoke did not render all pages")
-        desktop._show_page("Workflows")
-        desktop.root.update()
-        selected_page = str(desktop.page_title.cget("text"))
-        desktop.refresh_button.invoke()
-        desktop.root.update_idletasks()
-        desktop.root.update()
-        if desktop.status.get() != "Durable state refreshed":
-            desktop.root.destroy()
-            raise RuntimeError("Keeper desktop smoke button callback did not update status")
-        evidence = {
-            "ui_smoke": "passed",
-            "executable": sys.executable,
-            "rendered_pages": len(pages),
-            "selected_page": selected_page,
-            "button_callback": "Refresh",
-            "status_update": desktop.status.get(),
-            "root_viewable": bool(desktop.root.winfo_viewable()),
-        }
-        evidence_path = application.data_directory / "ui-smoke-evidence.json"
-        evidence_path.write_text(
-            json.dumps(evidence, indent=2), encoding="utf-8"
-        )
-        desktop.root.destroy()
-        print(json.dumps({**evidence, "evidence_path": str(evidence_path)}))
-        return 0
-    KeeperProductDesktop(application).run()
-    return 0
-
+    return run_desktop(
+        application,
+        smoke=options.ui_smoke,
+        screenshot_directory=options.screenshot_dir,
+        test_fixture=options.test_ui_fixture,
+    )
 
 if __name__ == "__main__":
     raise SystemExit(main())
