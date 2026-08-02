@@ -359,7 +359,11 @@ def backup(destination: Path) -> Path:
     return destination
 
 
-def upgrade_package(package_source: Path, expected_package_sha256: str) -> dict[str, Any]:
+def upgrade_package(
+    package_source: Path,
+    expected_package_sha256: str,
+    expected_current_sha256: str,
+) -> dict[str, Any]:
     _require_admin()
     candidate = verify_service_package(package_source, expected_package_sha256)
     if candidate.path.is_relative_to(SERVICE_ROOT.resolve()):
@@ -371,7 +375,8 @@ def upgrade_package(package_source: Path, expected_package_sha256: str) -> dict[
         raise PermissionError(
             "installed Authority Service package does not match its manifest"
         )
-    old_digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    current = verify_rollback_package(package, expected_current_sha256)
+    old_digest = current.package_sha256
     backup_path = (
         SERVICE_ROOT / "backups" / f"keeper-authority-{old_digest}.pyz"
     )
@@ -783,6 +788,7 @@ def parser() -> argparse.ArgumentParser:
     upgrade = commands.add_parser("upgrade-package")
     upgrade.add_argument("--package", type=Path, required=True)
     upgrade.add_argument("--expected-sha256", required=True)
+    upgrade.add_argument("--expected-current-sha256", required=True)
     rollback_package_command = commands.add_parser("rollback-package")
     rollback_package_command.add_argument("--package", type=Path, required=True)
     rollback_package_command.add_argument("--expected-sha256", required=True)
@@ -817,7 +823,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 resume=True
             )
         elif options.command == "upgrade-package":
-            value = upgrade_package(options.package, options.expected_sha256)
+            value = upgrade_package(
+                options.package,
+                options.expected_sha256,
+                options.expected_current_sha256,
+            )
         elif options.command == "rollback-package":
             value = rollback_package(options.package, options.expected_sha256)
         elif options.command == "verify-package":

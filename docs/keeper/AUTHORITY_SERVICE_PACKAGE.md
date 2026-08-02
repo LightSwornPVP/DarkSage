@@ -48,11 +48,13 @@ authorized digest. It does not rebuild from source:
 ```powershell
 python -m keeper.authority_service.service_install upgrade-package `
   --package C:\tmp\keeper-authority-release\keeper-authority.pyz `
-  --expected-sha256 <AUTHORIZED_SHA256>
+  --expected-sha256 <AUTHORIZED_NEW_SHA256> `
+  --expected-current-sha256 <AUTHORIZED_INSTALLED_SHA256>
 ```
 
 The lifecycle verifies the candidate before reading or replacing the installed
-package, captures the exact old package as rollback, copies the candidate to a
+package, requires the installed package to match its separately authorized
+current digest, captures and verifies those exact old bytes as rollback, copies the candidate to a
 staging file, re-verifies the staged bytes, atomically replaces the installed
 package, and records the exact package and source-tree identities. The service
 must already be stopped through the separately authorized lifecycle.
