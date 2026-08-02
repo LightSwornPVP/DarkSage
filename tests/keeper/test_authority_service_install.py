@@ -244,7 +244,15 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upgrade rebuilt package")),
     )
 
-    result = service_install.upgrade_package(candidate, candidate_digest)
+    old_digest = hashlib.sha256(old_package).hexdigest().upper()
+    with pytest.raises(PermissionError, match="rollback package SHA-256"):
+        service_install.upgrade_package(candidate, candidate_digest, "0" * 64)
+    assert package.read_bytes() == old_package
+    assert not any((service_root / "backups").iterdir())
+
+    result = service_install.upgrade_package(
+        candidate, candidate_digest, old_digest
+    )
 
     assert package.read_bytes() == candidate.read_bytes()
     assert result["package_sha256"] == candidate_digest
@@ -393,7 +401,7 @@ def test_upgrade_rejects_wrong_hash_before_touching_installed_package(
     candidate = _build(tmp_path, "candidate.pyz")
     monkeypatch.setattr(service_install, "_require_admin", lambda: None)
     with pytest.raises(PermissionError, match="authorization"):
-        service_install.upgrade_package(candidate, "0" * 64)
+        service_install.upgrade_package(candidate, "0" * 64, "0" * 64)
 
 
 def test_rollback_verification_accepts_exact_legacy_package_only(tmp_path: Path) -> None:
