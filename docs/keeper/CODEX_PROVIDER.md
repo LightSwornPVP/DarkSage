@@ -1,7 +1,7 @@
 # Codex subscription provider and Keeper Provider Host
 
 Keeper 1.0 supports the official standalone Windows Codex CLI as an
-authoring-only provider through KeeperAuthority 1.7.0, Authority protocol 7,
+authoring-only provider through KeeperAuthority 1.7.1, Authority protocol 7,
 schema 6, and the per-user `keeper-provider-host/1` protocol. The Provider Host
 is an unelevated execution deputy. It cannot register, qualify, reserve, approve,
 spend, change policy, or fabricate Authority state.
@@ -97,8 +97,9 @@ validated provider observation allowed by the existing reset policy.
 
 ## Per-user lifecycle
 
-Provider Host artifacts are versioned beneath a future per-user installation
-root. The lifecycle accepts the dedicated `KeeperProviderHost.exe` only as part
+Provider Host artifacts are versioned beneath the canonical per-user
+`%LOCALAPPDATA%\Programs\DarkSage\KeeperProviderHost` root. The lifecycle
+accepts the dedicated `KeeperProviderHost.exe` only as part
 of its complete standalone distribution. A SHA-256-bound package manifest names
 every runtime file, size, and digest; missing, additional, changed, linked, or
 escaping files fail closed. Installation copies and revalidates the entire
@@ -110,16 +111,32 @@ launcher stores no password and quotes every trusted path. Both its file and
 containing Startup namespace deny the restricted provider token, preventing
 delete-and-replace attacks through parent-directory rights.
 
-Phase 1 tests this lifecycle only in disposable `C:\tmp` roots. It does not
-install the host, create a real startup entry, enroll a live identity, change
-KeeperAuthority, register/qualify Codex, or make a model request. Those are
-separate Phase 2 Founder-authorized operations.
+An installed Host with no signed enrollment receipt exits successfully in
+`INSTALLED_UNENROLLED` bootstrap-only state. It does not open the runtime pipe,
+accept requests, register or qualify providers, reserve usage, or execute a
+model. A Founder-authenticated protocol-7 enrollment uses an exact Host-signed
+proposal, one short-lived Authority-signed grant, one Host proof, and one
+Authority-signed receipt. The proposal binds the service key, protocol/schema,
+user SID/session/profile, canonical install and Startup selection, manifest,
+executable path/hash/file identity, exact Authenticode status and signer identity
+when present, non-exportable Host public key, pipe, nonce, expiry, and generation.
+KeeperAuthority independently remeasures those values under the authenticated
+named-pipe client before it persists a one-winner `PENDING` record.
 
-Before Phase 2 installs the lifecycle into real per-user paths, the migration
-must bind those paths to Keeper's canonical installation and Startup roots and
-connect update, rollback, and uninstall to an authenticated Authority drain.
-Disposable caller-selected roots and no-op drain callbacks are test composition
-only and are not approved production lifecycle controls.
+Completion stores `ACTIVE` before the gateway is exposed. Lost responses use
+exact, idempotent reconciliation; conflicts, expiry, replay, downgrade, and
+ambiguous activation fail closed. Revocation first removes the live gateway,
+then persists `REVOKED` and returns an Authority-signed revocation record for the
+per-user Startup gate. Host enrollment never creates a provider binding.
+Registration and qualification remain later Authority-owned operations, and the
+Host reports `NO_QUALIFIED_PROVIDERS` until exact qualification is durably bound.
+
+All source verification uses disposable `C:\tmp` roots. Real installation,
+Startup creation, Authority update/restart, Founder enrollment, Codex
+registration/qualification, and any model execution remain distinct live
+operations requiring their applicable Founder authorization. Disposable CLI
+roots and no-op drain callbacks are test composition only; the Phase 2 runbook
+uses the canonical roots and supported Authority lifecycle.
 
 ## Desktop truth
 

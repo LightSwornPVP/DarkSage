@@ -161,10 +161,18 @@ class ProviderHostServer:
         self._claim_message("request", request)
         operation, body = _validated_request(request, hello, host_nonce)
         if operation == "prepare_environment":
+            provider_bin = body.get("provider_bin")
+            if not isinstance(provider_bin, str) or not provider_bin:
+                raise PermissionError("Provider Host provider bin is absent")
             result = self.runtime.prepare_environment(
                 preparation_nonce=str(body["preparation_nonce"]),
-                provider_bin=self.runtime.provider_bin,
+                provider_bin=Path(provider_bin),
             )
+        elif operation == "bind_provider":
+            provider_binding = body.get("provider_binding")
+            if not isinstance(provider_binding, dict):
+                raise PermissionError("Provider Host provider binding is absent")
+            result = self.runtime.bind_provider(provider_binding)
         elif operation in {"execute", "setup"}:
             signed_envelope = body.get("signed_envelope")
             if not isinstance(signed_envelope, dict):
@@ -288,6 +296,7 @@ def _validated_request(
         or value.get("operation")
         not in {
             "prepare_environment",
+            "bind_provider",
             "execute",
             "setup",
             "cancel",

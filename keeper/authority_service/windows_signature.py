@@ -23,6 +23,7 @@ _WTD_CHOICE_FILE = 1
 _WTD_STATEACTION_VERIFY = 1
 _WTD_STATEACTION_CLOSE = 2
 _WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000
+_TRUST_E_NOSIGNATURE = 0x800B0100
 
 
 class _Guid(ctypes.Structure):
@@ -177,7 +178,47 @@ def authenticode_identity(executable: Path) -> dict[str, Any]:
     }
 
 
+def authenticode_enrollment_binding(executable: Path) -> dict[str, Any]:
+    """Measure a reviewed Host package without pretending unsigned means valid.
+
+    Phase-2 development artifacts are locally built and may be explicitly
+    unsigned.  The exact ``NotSigned`` observation is bound alongside the
+    package manifest, executable digest, file identity, and Founder approval.
+    Invalid, expired, revoked, or otherwise untrusted signatures still reject.
+    """
+    if os.name != "nt":
+        raise RuntimeError("Authenticode verification requires Windows")
+    path = executable.resolve(strict=True)
+    status = _verify_trust_status(path)
+    if status == 0:
+        subject, thumbprint = _signer_identity(path)
+        return {
+            "status": "Valid",
+            "publisher_subject": subject,
+            "certificate_thumbprint": thumbprint,
+            "source": "windows-authenticode",
+        }
+    if status & 0xFFFFFFFF == _TRUST_E_NOSIGNATURE:
+        return {
+            "status": "NotSigned",
+            "publisher_subject": None,
+            "certificate_thumbprint": None,
+            "source": "windows-authenticode",
+        }
+    raise PermissionError(
+        f"Authenticode verification failed (status=0x{status & 0xFFFFFFFF:08X})"
+    )
+
+
 def _verify_trust(path: Path) -> None:
+    status = _verify_trust_status(path)
+    if status != 0:
+        raise PermissionError(
+            f"Authenticode verification failed (status=0x{status & 0xFFFFFFFF:08X})"
+        )
+
+
+def _verify_trust_status(path: Path) -> int:
     wintrust = ctypes.WinDLL("wintrust", use_last_error=True)
     verify = wintrust.WinVerifyTrust
     verify.argtypes = [wintypes.HWND, ctypes.POINTER(_Guid), wintypes.LPVOID]
@@ -204,10 +245,7 @@ def _verify_trust(path: Path) -> None:
         verify(None, ctypes.byref(_WINTRUST_ACTION_GENERIC_VERIFY_V2), ctypes.byref(data))
     )
     try:
-        if status != 0:
-            raise PermissionError(
-                f"Authenticode verification failed (status=0x{status & 0xFFFFFFFF:08X})"
-            )
+        return status
     finally:
         data.dwStateAction = _WTD_STATEACTION_CLOSE
         verify(None, ctypes.byref(_WINTRUST_ACTION_GENERIC_VERIFY_V2), ctypes.byref(data))

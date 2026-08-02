@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from keeper.provider_host.identity import PipePeerIdentity, UserBinding, current_user_binding
+from keeper.provider_host.enrollment import (
+    validate_enrollment_receipt,
+    validate_enrollment_revocation,
+)
 from keeper.provider_host.install import ProviderHostInstaller
+from keeper.provider_host.protocol import structured_digest
 from keeper.provider_host.replay_store import ProviderHostStore
 from keeper.provider_host.runtime import HostIdentity, KeeperProviderHost, ProviderBinding
 from keeper.provider_host.server import ProviderHostServer
@@ -48,7 +53,27 @@ def main(arguments: Sequence[str] | None = None) -> int:
     try:
         command = str(options.provider_host_command)
         if command in {"run", "status"}:
-            runtime, server = _build_runtime(options.config.resolve(strict=True))
+            config_path = options.config.resolve()
+            if not config_path.is_file():
+                print(
+                    json.dumps(
+                        {
+                            "installed": True,
+                            "online": False,
+                            "state": "INSTALLED_UNENROLLED",
+                            "provider_state": "NO_QUALIFIED_PROVIDERS",
+                            "founder_action_required": "ENROLL_PROVIDER_HOST",
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            revoked = _revoked_status(config_path)
+            if revoked is not None:
+                print(json.dumps(revoked, indent=2, sort_keys=True))
+                return 0
+            runtime, server = _build_runtime(config_path.resolve(strict=True))
             recovered = runtime.start()
             if command == "status":
                 print(json.dumps({**runtime.status(), "recovered_uncertain": recovered}, indent=2, sort_keys=True))
@@ -102,23 +127,11 @@ def _build_runtime(config_path: Path) -> tuple[KeeperProviderHost, ProviderHostS
         raise PermissionError("Provider Host configured user binding differs")
     state_root = Path(str(config["state_root"])).resolve()
     output_root = Path(str(config["output_root"])).resolve()
-    provider_value = _object(config["provider_binding"], "provider binding")
-    provider = ProviderBinding(
-        provider_id=str(provider_value["provider_id"]),
-        account_id=str(provider_value["account_id"]),
-        session_id=str(provider_value["session_id"]),
-        registration_id=str(provider_value["registration_id"]),
-        qualification_id=str(provider_value["qualification_id"]),
-        executable_path=str(Path(str(provider_value["executable_path"])).resolve(strict=True)),
-        executable_sha256=str(provider_value["executable_sha256"]),
-        executable_size=int(provider_value["executable_size"]),
-        file_identity=_object(provider_value["file_identity"], "file identity"),
-        authenticode_binding=_object(provider_value["authenticode_binding"], "Authenticode binding"),
-        publisher=str(provider_value["publisher"]),
-        version=str(provider_value["version"]),
-        models=tuple(str(item) for item in _list(provider_value["models"], "models")),
-        efforts=tuple(str(item) for item in _list(provider_value["efforts"], "efforts")),
-    )
+    provider: ProviderBinding | None = None
+    provider_value = config.get("provider_binding")
+    if provider_value is not None:
+        provider_mapping = _object(provider_value, "provider binding")
+        provider = ProviderBinding.from_mapping(provider_mapping)
     host_signer = WindowsCngEnvelopeIdentity(
         identity=str(config["host_id"]),
         key_name=str(config["host_key_name"]),
@@ -147,7 +160,22 @@ def _build_runtime(config_path: Path) -> tuple[KeeperProviderHost, ProviderHostS
     authority_peer_value = _object(config["authority_peer"], "Authority peer")
     authority_path = Path(str(authority_peer_value["executable_path"])).resolve(strict=True)
     authority_digest = hashlib.sha256(authority_path.read_bytes()).hexdigest()
-    if authority_digest != authority_peer_value["executable_sha256"]:
+    authority_stat = authority_path.stat()
+    authority_identity = {
+        "device_id": int(authority_stat.st_dev),
+        "file_id": int(authority_stat.st_ino),
+        "modified_ns": int(authority_stat.st_mtime_ns),
+        "schema_version": 1,
+        "size": int(authority_stat.st_size),
+    }
+    if (
+        authority_digest != authority_peer_value["executable_sha256"]
+        or authority_identity
+        != _object(
+            authority_peer_value["executable_file_identity"],
+            "Authority executable file identity",
+        )
+    ):
         raise PermissionError("Provider Host Authority executable changed")
     server = ProviderHostServer(
         pipe_name=str(config["pipe_name"]),
@@ -175,35 +203,97 @@ def _config(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise PermissionError("Provider Host configuration is unavailable") from error
-    expected = {
+    signed_receipt = isinstance(value, dict) and "signature" in value
+    if signed_receipt:
+        unsigned = _object(value.get("payload"), "enrollment receipt payload")
+        runtime_value = _object(
+            unsigned.get("runtime_configuration"), "runtime configuration"
+        )
+        public = _object(
+            runtime_value.get("authority_public_identity"),
+            "Authority public identity",
+        )
+        verifier = RsaPublicIdentity.from_configuration(public).verifier()
+        receipt = validate_enrollment_receipt(
+            value,
+            verifier,
+            expected_enrollment_id=str(unsigned.get("enrollment_id", "")),
+        )
+        value = _object(receipt["runtime_configuration"], "runtime configuration")
+    common = {
         "schema_version",
         "authority_id",
         "authority_peer",
         "authority_public_identity",
+        "enrollment_id",
         "host_id",
         "host_key_name",
         "host_public_identity",
         "output_root",
         "pipe_name",
-        "provider_binding",
         "state_root",
         "user_binding",
     }
-    if not isinstance(value, dict) or set(value) != expected or value.get("schema_version") != 1:
+    schema = value.get("schema_version") if isinstance(value, dict) else None
+    expected = common
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or schema != 2
+        or not signed_receipt
+    ):
         raise PermissionError("Provider Host configuration is invalid")
     return value
+
+
+def _revoked_status(receipt_path: Path) -> dict[str, Any] | None:
+    revocation_path = receipt_path.parent / "provider-host-enrollment-revoked.json"
+    if not revocation_path.is_file():
+        return None
+    try:
+        receipt_record = _object(
+            json.loads(receipt_path.read_text(encoding="utf-8")),
+            "enrollment receipt",
+        )
+        receipt_payload = _object(
+            receipt_record.get("payload"), "enrollment receipt payload"
+        )
+        runtime = _object(
+            receipt_payload.get("runtime_configuration"),
+            "runtime configuration",
+        )
+        public = _object(
+            runtime.get("authority_public_identity"), "Authority public identity"
+        )
+        revocation_record = _object(
+            json.loads(revocation_path.read_text(encoding="utf-8")),
+            "enrollment revocation",
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError(
+            "Provider Host revocation state is unavailable"
+        ) from error
+    verifier = RsaPublicIdentity.from_configuration(public).verifier()
+    revocation = validate_enrollment_revocation(
+        revocation_record,
+        verifier,
+        expected_enrollment_id=str(receipt_payload.get("enrollment_id", "")),
+        expected_receipt_digest=structured_digest(receipt_record),
+    )
+    return {
+        "enrollment_id": revocation["enrollment_id"],
+        "founder_action_required": "CREATE_NEW_PROVIDER_HOST_ENROLLMENT",
+        "installed": True,
+        "online": False,
+        "provider_state": "UNAVAILABLE",
+        "state": "REVOKED",
+    }
 
 
 def _object(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PermissionError(f"Provider Host {label} is invalid")
     return dict(value)
-
-
-def _list(value: object, label: str) -> list[object]:
-    if not isinstance(value, list) or not value:
-        raise PermissionError(f"Provider Host {label} is invalid")
-    return list(value)
 
 
 def _json_value(value: object) -> object:

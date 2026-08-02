@@ -404,6 +404,11 @@ class AuthorityStore:
                             timestamp,
                         ),
                     )
+                elif table == "provider_host_enrollments":
+                    connection.execute(
+                        "INSERT INTO provider_host_enrollments VALUES(?,?,?,?,?,?)",
+                        (identifier, state, serialized, digest, timestamp, timestamp),
+                    )
                 else:
                     raise ValueError("unsupported authority table")
                 if project_id is not None:
@@ -416,7 +421,7 @@ class AuthorityStore:
     def get(self, table: str, identifier: str) -> dict[str, Any] | None:
         if table not in {
             "registrations", "qualifications", "attempts",
-            "launch_authorizations",
+            "launch_authorizations", "provider_host_enrollments",
         }:
             raise ValueError("unsupported authority table")
         with self.connect() as connection:
@@ -446,7 +451,7 @@ class AuthorityStore:
     ) -> None:
         if table not in {
             "registrations", "qualifications", "attempts",
-            "launch_authorizations",
+            "launch_authorizations", "provider_host_enrollments",
         }:
             raise ValueError("unsupported authority table")
         serialized, digest = _serialize(payload)
@@ -493,7 +498,7 @@ class AuthorityStore:
     def list_records(self, table: str) -> list[dict[str, Any]]:
         if table not in {
             "registrations", "qualifications", "attempts",
-            "launch_authorizations",
+            "launch_authorizations", "provider_host_enrollments",
         }:
             raise ValueError("unsupported authority table")
         with self.connect() as connection:
@@ -508,6 +513,135 @@ class AuthorityStore:
             for identifier in identifiers
             if (value := self.get(table, identifier)) is not None
         ]
+
+    def begin_provider_host_enrollment(
+        self,
+        identifier: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically create, or exactly reconcile, one pending enrollment."""
+        serialized, digest = _serialize(payload)
+        timestamp = _now()
+        capability_digest = str(payload.get("founder_capability_digest", ""))
+        proposal_digest = str(payload.get("proposal_digest", ""))
+        generation = payload.get("enrollment_generation")
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise PermissionError("Provider Host enrollment generation is invalid")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT id,state,payload,payload_hash FROM provider_host_enrollments "
+                "ORDER BY created_at"
+            ).fetchall()
+            maximum_generation = 0
+            for row in rows:
+                existing_serialized = str(row["payload"])
+                if hashlib.sha256(existing_serialized.encode("utf-8")).hexdigest() != row["payload_hash"]:
+                    raise RuntimeError("Provider Host enrollment integrity failed")
+                existing = json.loads(existing_serialized)
+                if not isinstance(existing, dict):
+                    raise RuntimeError("Provider Host enrollment is malformed")
+                prior_generation = existing.get("enrollment_generation")
+                if (
+                    isinstance(prior_generation, bool)
+                    or not isinstance(prior_generation, int)
+                    or prior_generation <= 0
+                ):
+                    raise RuntimeError(
+                        "Provider Host enrollment generation is malformed"
+                    )
+                maximum_generation = max(maximum_generation, prior_generation)
+                if (
+                    str(row["id"]) == identifier
+                    and str(row["state"]) == "PENDING"
+                    and existing == payload
+                ):
+                    return {**existing, "service_state": "PENDING"}
+                if existing.get("founder_capability_digest") == capability_digest:
+                    raise PermissionError("Founder Host-enrollment capability is replayed")
+                if existing.get("proposal_digest") == proposal_digest:
+                    raise PermissionError("Provider Host enrollment proposal is replayed")
+                if str(row["state"]) in {"PENDING", "ACTIVE", "UNCERTAIN"}:
+                    raise PermissionError("A Provider Host enrollment is already unresolved")
+            if generation <= maximum_generation:
+                raise PermissionError("Provider Host enrollment generation is stale")
+            connection.execute(
+                "INSERT INTO provider_host_enrollments VALUES(?,?,?,?,?,?)",
+                (identifier, "PENDING", serialized, digest, timestamp, timestamp),
+            )
+        return {**payload, "service_state": "PENDING"}
+
+    def complete_provider_host_enrollment(
+        self,
+        identifier: str,
+        *,
+        proof_digest: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Commit the exact Host proof once; lost acknowledgements reconcile."""
+        serialized, digest = _serialize(payload)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state,payload,payload_hash FROM provider_host_enrollments WHERE id=?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("Provider Host enrollment is absent")
+            current_serialized = str(row["payload"])
+            if hashlib.sha256(current_serialized.encode("utf-8")).hexdigest() != row["payload_hash"]:
+                raise RuntimeError("Provider Host enrollment integrity failed")
+            current = json.loads(current_serialized)
+            if not isinstance(current, dict):
+                raise RuntimeError("Provider Host enrollment is malformed")
+            if str(row["state"]) == "ACTIVE":
+                if current.get("proof_digest") == proof_digest:
+                    return {**current, "service_state": "ACTIVE"}
+                raise PermissionError("Provider Host enrollment proof conflicts")
+            if str(row["state"]) != "PENDING":
+                raise PermissionError("Provider Host enrollment cannot be completed")
+            cursor = connection.execute(
+                "UPDATE provider_host_enrollments SET state='ACTIVE',payload=?,payload_hash=?,updated_at=? "
+                "WHERE id=? AND state='PENDING'",
+                (serialized, digest, _now(), identifier),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("Provider Host enrollment completion lost its claim")
+        return {**payload, "service_state": "ACTIVE"}
+
+    def transition_provider_host_enrollment(
+        self,
+        identifier: str,
+        *,
+        expected: tuple[str, ...],
+        state: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if state not in {"REVOKED", "EXPIRED", "UNCERTAIN"}:
+            raise ValueError("Provider Host enrollment terminal state is invalid")
+        serialized, digest = _serialize(payload)
+        placeholders = ",".join("?" for _ in expected)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE provider_host_enrollments SET state=?,payload=?,payload_hash=?,updated_at=? "
+                f"WHERE id=? AND state IN ({placeholders})",
+                (state, serialized, digest, _now(), identifier, *expected),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("Provider Host enrollment transition was rejected")
+        return {**payload, "service_state": state}
+
+    def current_provider_host_enrollment(self) -> dict[str, Any] | None:
+        records = self.list_records("provider_host_enrollments")
+        unresolved = [
+            value
+            for value in records
+            if value.get("service_state") in {"PENDING", "ACTIVE", "UNCERTAIN"}
+        ]
+        if len(unresolved) > 1:
+            raise RuntimeError("Multiple Provider Host enrollments are unresolved")
+        return unresolved[0] if unresolved else (records[-1] if records else None)
 
     def create_launch_authorization(
         self,

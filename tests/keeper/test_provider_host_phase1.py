@@ -488,10 +488,13 @@ def test_provider_host_setup_is_exact_durable_and_host_executed(
         authority_verifier=AUTHORITY,
         host_signer=HOST,
         store=store,
-        provider_binding=provider,
+        provider_binding=None,
         environment_attestation_key=b"environment-test-key",
     )
     runtime.start()
+    assert runtime.status()["provider_state"] == "NO_QUALIFIED_PROVIDERS"
+    with pytest.raises(PermissionError, match="no qualified provider"):
+        _ = runtime.provider_bin
     attestation = runtime.prepare_environment(
         preparation_nonce="setup-prepare", provider_bin=executable.parent
     )
@@ -571,6 +574,9 @@ def test_provider_host_setup_is_exact_durable_and_host_executed(
         runtime.execute_setup(
             AUTHORITY.sign("keeper-provider-host-provider-setup", setup), runner
         )
+    bound = runtime.bind_provider(provider.as_dict())
+    assert bound["state"] == "QUALIFIED"
+    assert runtime.status()["provider_state"] == "QUALIFIED"
 
 
 def test_authority_gateway_builds_exact_host_setup_contract(tmp_path: Path) -> None:

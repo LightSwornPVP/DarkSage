@@ -112,10 +112,16 @@ class ProviderHostGateway:
             "state": "ACTIVE",
         }
 
-    def prepare_environment(self, preparation_nonce: str) -> dict[str, Any]:
+    def prepare_environment(
+        self, preparation_nonce: str, provider_executable: Path
+    ) -> dict[str, Any]:
+        provider_bin = provider_executable.resolve(strict=True).parent
         result = self._rpc(
             "prepare_environment",
-            {"preparation_nonce": preparation_nonce},
+            {
+                "preparation_nonce": preparation_nonce,
+                "provider_bin": str(provider_bin),
+            },
         )
         if not isinstance(result, dict):
             raise PermissionError("Provider Host environment response is invalid")
@@ -129,6 +135,21 @@ class ProviderHostGateway:
         ):
             raise PermissionError("Provider Host environment response differs")
         return record
+
+    def bind_provider(self, provider_binding: Mapping[str, Any]) -> dict[str, Any]:
+        result = self._rpc(
+            "bind_provider", {"provider_binding": dict(provider_binding)}
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("state") != "QUALIFIED"
+            or result.get("registration_id")
+            != provider_binding.get("registration_id")
+            or result.get("qualification_id")
+            != provider_binding.get("qualification_id")
+        ):
+            raise PermissionError("Provider Host provider binding response differs")
+        return dict(result)
 
     def execute(
         self,

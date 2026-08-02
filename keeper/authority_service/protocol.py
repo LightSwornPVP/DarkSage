@@ -30,6 +30,11 @@ RESPONSE_FIELDS = frozenset(
 class Operation(StrEnum):
     DIAGNOSTICS = "diagnostics"
     AUDIT_PROVENANCE = "audit_provenance"
+    PROVIDER_HOST_ENROLLMENT_STATUS = "provider_host_enrollment_status"
+    BEGIN_PROVIDER_HOST_ENROLLMENT = "begin_provider_host_enrollment"
+    COMPLETE_PROVIDER_HOST_ENROLLMENT = "complete_provider_host_enrollment"
+    RECONCILE_PROVIDER_HOST_ENROLLMENT = "reconcile_provider_host_enrollment"
+    REVOKE_PROVIDER_HOST_ENROLLMENT = "revoke_provider_host_enrollment"
     REGISTER_PROVIDER = "register_provider"
     BEGIN_QUALIFICATION = "begin_qualification"
     FINALIZE_QUALIFICATION = "finalize_qualification"

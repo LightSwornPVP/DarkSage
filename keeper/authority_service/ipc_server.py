@@ -117,6 +117,13 @@ class NamedPipeAuthorityServer:
                     observer is not None
                     and (
                         request.operation is Operation.RESERVE_ATTEMPT
+                        or request.operation
+                        in {
+                            Operation.BEGIN_PROVIDER_HOST_ENROLLMENT,
+                            Operation.COMPLETE_PROVIDER_HOST_ENROLLMENT,
+                            Operation.RECONCILE_PROVIDER_HOST_ENROLLMENT,
+                            Operation.REVOKE_PROVIDER_HOST_ENROLLMENT,
+                        }
                         or (
                             request.operation is Operation.REGISTER_PROVIDER
                             and "model_allowlist" in request.payload

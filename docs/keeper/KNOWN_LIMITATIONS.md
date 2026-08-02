@@ -34,20 +34,24 @@
 - The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
   attempt histories require a future paged signed-snapshot/fence protocol.
-- This source requires KeeperAuthority 1.7.0, protocol 7, and schema 6. Application
+- This source requires KeeperAuthority 1.7.1, protocol 7, and schema 6. Application
   packaging never installs, restarts, updates, or reconfigures that service.
 - The Codex subscription provider is authoring-only. Independent approval remains
   paused until a separately qualified reviewer provider is available.
-- Provider Host lifecycle tooling is implemented and verified only against disposable
-  roots in Phase 1. A Phase 2 migration must constrain the exact per-user install and
-  Startup roots and connect lifecycle mutations to an authenticated Authority drain;
-  the current disposable CLI roots and no-op drain callbacks are not production gates.
-  Phase 1 nevertheless installs and verifies the complete manifest-bound standalone
-  distribution and denies restricted-provider mutation of the disposable Startup
-  namespace; it does not treat a lone executable as an installable package.
-  Live installation, startup registration, enrollment, Authority
-  migration, Codex registration/qualification, and model execution require a separate
-  Phase 2 Founder authorization.
+- Provider Host installation and enrollment are mechanically separate. Source
+  1.7.1 adds the Founder-authenticated protocol-7 enrollment proposal/grant/proof/
+  receipt/revocation lifecycle and permits an enrolled Host to start without a
+  provider binding. Installation before the Authority upgrade remains inert and
+  reports `INSTALLED_UNENROLLED`. Lifecycle verification uses disposable roots;
+  the live Phase 2 migration must use the canonical per-user install and Startup
+  roots plus the supported Authority lifecycle. The currently reviewed Host
+  artifact is not Authenticode-signed, so enrollment binds the exact `NotSigned`
+  status together with its immutable package manifest, executable SHA-256, file
+  identity, canonical path, ACL, and non-exportable Host key; it does not invent a
+  signer. A future signed artifact will instead require and bind the exact valid
+  publisher certificate. Live installation, Authority migration/restart, Founder
+  enrollment, Codex registration/qualification, and model execution remain
+  separately authorized operations.
 - Keeper 1.0 is a personal-use, single-Founder product. It does not claim to
   resist arbitrary code already executing in its trusted Executive interpreter,
   a malicious local administrator, manual same-user database replacement, or

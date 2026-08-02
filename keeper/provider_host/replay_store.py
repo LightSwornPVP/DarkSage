@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -249,6 +251,50 @@ class ProviderHostStore:
                 ).fetchall()
             ]
 
+    def bind_provider(self, value: dict[str, object]) -> None:
+        serialized = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        with self.connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT payload,payload_hash FROM provider_binding WHERE singleton=1"
+                ).fetchone()
+                if row is not None:
+                    current = str(row["payload"])
+                    if hashlib.sha256(current.encode("utf-8")).hexdigest() != row["payload_hash"]:
+                        raise RuntimeError("Provider Host provider binding integrity failed")
+                    if current != serialized:
+                        raise PermissionError("Provider Host provider binding conflicts")
+                    connection.commit()
+                    return
+                connection.execute(
+                    "INSERT INTO provider_binding(singleton,payload,payload_hash,updated_at) "
+                    "VALUES(1,?,?,?)",
+                    (serialized, digest, _now()),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    def provider_binding(self) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT payload,payload_hash FROM provider_binding WHERE singleton=1"
+            ).fetchone()
+        if row is None:
+            return None
+        serialized = str(row["payload"])
+        if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != row["payload_hash"]:
+            raise RuntimeError("Provider Host provider binding integrity failed")
+        value = json.loads(serialized)
+        if not isinstance(value, dict):
+            raise RuntimeError("Provider Host provider binding is malformed")
+        return value
+
     def _migrate(self) -> None:
         with self.connect() as connection:
             connection.executescript(
@@ -268,11 +314,23 @@ class ProviderHostStore:
                 "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
                 "state TEXT NOT NULL,detail TEXT NOT NULL,updated_at TEXT NOT NULL);"
                 "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS provider_binding("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+                "payload TEXT NOT NULL,payload_hash TEXT NOT NULL,updated_at TEXT NOT NULL);"
             )
-            connection.execute(
-                "INSERT INTO metadata(key,value) VALUES('schema_version','1') "
-                "ON CONFLICT(key) DO UPDATE SET value='1'"
-            )
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO metadata(key,value) VALUES('schema_version','2')"
+                )
+            elif str(row[0]) == "1":
+                connection.execute(
+                    "UPDATE metadata SET value='2' WHERE key='schema_version'"
+                )
+            elif str(row[0]) != "2":
+                raise RuntimeError("Provider Host store schema is incompatible")
             connection.commit()
 
 
