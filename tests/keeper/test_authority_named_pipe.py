@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Iterator
 
 import pytest
 
@@ -11,13 +14,42 @@ from keeper.authority_service.client import AuthorityServiceClient
 from keeper.authority_service.core import AuthorityServiceCore
 from keeper.authority_service.ipc_server import NamedPipeAuthorityServer
 from keeper.authority_service.windows_identity import (
+    NamedPipeClientProcessIdentity,
     WindowsTokenIdentity,
     current_process_sid,
 )
 from keeper.authority_service.restricted_process import (
+    authenticated_named_pipe_client,
+    authenticated_profile_primary_token,
     restricted_current_process_token,
     run_restricted_process,
+    token_session_id,
+    token_user_sid_string,
 )
+
+
+class _CapturingPipeBindingObserver:
+    def __init__(self) -> None:
+        self.identity: NamedPipeClientProcessIdentity | None = None
+        self.profile_sid: str | None = None
+        self.profile_session: int | None = None
+
+    @contextmanager
+    def bind_client(self, pipe: int) -> Iterator[None]:
+        with authenticated_named_pipe_client(pipe) as (_, binding):
+            self.identity = binding.revalidate(current_process_sid())
+            with authenticated_profile_primary_token(
+                binding.profile_token
+            ) as profile_token:
+                self.profile_sid = token_user_sid_string(profile_token)
+                self.profile_session = token_session_id(profile_token)
+            yield
+
+    def register_provider(
+        self, provider_id: str, executable: Path, client_sid: str, **values: Any
+    ) -> dict[str, Any]:
+        del provider_id, executable, client_sid, values
+        raise PermissionError("binding-only observer")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows named-pipe test")
@@ -43,7 +75,7 @@ def test_named_pipe_authenticates_client_and_serves_framed_request(
                     "Codex sandbox intentionally presents a restricted token"
                 )
             raise
-        assert result["service_version"] == "1.6.2"
+        assert result["service_version"] == "1.7.0"
         assert result["client_sid"] == current_process_sid()
     finally:
         server.stop()
@@ -66,6 +98,42 @@ def test_named_pipe_rejects_wrong_os_identity(tmp_path: Path) -> None:
             AuthorityServiceClient(
                 pipe_name, timeout_seconds=5
             ).diagnostics()
+    finally:
+        server.stop()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named-pipe test")
+def test_named_pipe_binds_actual_client_pid_session_and_process_token(
+    tmp_path: Path,
+) -> None:
+    pipe_name = rf"\\.\pipe\KeeperAuthority-test-{uuid.uuid4().hex}"
+    observer = _CapturingPipeBindingObserver()
+    core = AuthorityServiceCore(tmp_path / "service", observer=observer)  # type: ignore[arg-type]
+    server = NamedPipeAuthorityServer(
+        core, current_process_sid(), pipe_name=pipe_name
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    assert server.ready.wait(timeout=5)
+    try:
+        with pytest.raises(PermissionError, match="binding-only observer"):
+            AuthorityServiceClient(pipe_name, timeout_seconds=5).register_provider(
+                "codex",
+                Path(sys.executable),
+                executive_capabilities=["provider.execution"],
+                project_types=["coding"],
+                effort_levels=["medium"],
+                pricing_authority={"mode": "INCLUDED_SUBSCRIPTION"},
+            )
+        assert observer.identity is not None
+        assert observer.identity.process_id == os.getpid()
+        assert observer.identity.sid.casefold() == current_process_sid().casefold()
+        assert observer.identity.session_id >= 0
+        assert observer.profile_sid is not None
+        assert observer.profile_sid.casefold() == current_process_sid().casefold()
+        assert observer.profile_session == observer.identity.session_id
     finally:
         server.stop()
         thread.join(timeout=5)

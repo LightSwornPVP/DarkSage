@@ -121,13 +121,27 @@ def bridge_qualified_provider(
     declared_capabilities = _texts(
         registration, "executive_capability_set"
     )
+    role_eligibility_value = registration.get("role_eligibility")
+    role_eligibility = (
+        tuple(str(item) for item in role_eligibility_value)
+        if isinstance(role_eligibility_value, list)
+        else ()
+    )
+    has_explicit_role_eligibility = isinstance(role_eligibility_value, list)
     project_types = _texts(registration, "project_types")
     effort_levels = _texts(registration, "effort_levels")
     if (
         project_types != tuple(sorted(project_types))
         or len(set(project_types)) != len(project_types)
         or any(item not in _PROJECT_TYPES for item in project_types)
-        or effort_levels != tuple(sorted(effort_levels))
+        or (
+            registration.get("registration_schema_version") == 4
+            and effort_levels != ("medium", "high")
+        )
+        or (
+            registration.get("registration_schema_version") != 4
+            and effort_levels != tuple(sorted(effort_levels))
+        )
         or len(set(effort_levels)) != len(effort_levels)
         or any(item not in _EFFORT_LEVELS for item in effort_levels)
     ):
@@ -142,12 +156,17 @@ def bridge_qualified_provider(
                     alias
                     for source, alias in _ROLE_ALIASES.items()
                     if source in {item.casefold() for item in declared_capabilities}
+                    and (
+                        alias != "reviewer"
+                        or not has_explicit_role_eligibility
+                        or "reviewer" in role_eligibility
+                    )
                 ),
             ]
         )
     )
     pricing = registration.get("pricing_authority")
-    if not isinstance(pricing, dict) or set(pricing) != {
+    pricing_core_fields = {
         "pricing_identity",
         "pricing_version",
         "currency",
@@ -160,7 +179,8 @@ def bridge_qualified_provider(
         "expires_at",
         "source",
         "cost_tier",
-    }:
+    }
+    if not isinstance(pricing, dict) or not pricing_core_fields.issubset(pricing):
         raise PermissionError("Authority provider pricing declaration is invalid")
     current = datetime.now(UTC)
     try:
@@ -185,7 +205,19 @@ def bridge_qualified_provider(
             "utf-8"
         )
     ).hexdigest()
-    if pricing.get("marginally_free") is True:
+    if pricing.get("billing_mode") == "included-subscription":
+        if (
+            pricing.get("marginally_free") is not False
+            or pricing.get("included_plan") is not True
+            or pricing.get("api_billing_authorized") is not False
+            or pricing.get("paid_fallback_authorized") is not False
+            or pricing.get("capacity_bounded") is not True
+        ):
+            raise PermissionError(
+                "Authority subscription pricing declaration is contradictory"
+            )
+        cost_mode = CostMode.INCLUDED_SUBSCRIPTION
+    elif pricing.get("marginally_free") is True:
         cost_mode = CostMode.FREE
     elif pricing.get("included_plan") is True:
         cost_mode = CostMode.INCLUDED
@@ -194,6 +226,26 @@ def bridge_qualified_provider(
     now = datetime.now(UTC).isoformat()
     account_id = f"authority-account:{binding.registration_id}"
     pool_id = f"authority-pool:{binding.registration_id}"
+    model_allowlist_value = registration.get("model_allowlist")
+    model_allowlist = (
+        tuple(str(item) for item in model_allowlist_value)
+        if isinstance(model_allowlist_value, list)
+        else (model_id,)
+    )
+    reviewer_eligible = bool(
+        (
+            not has_explicit_role_eligibility
+            and "reviewer" in capabilities
+        )
+        or (
+            any(
+                item in {"reviewer", "post_repair_reviewer"}
+                for item in role_eligibility
+            )
+            and registration.get("independence_classification")
+            == "independent-capable"
+        )
+    )
     descriptor = AdapterDescriptor(
         provider_identity=f"authority:{binding.registration_id}",
         model_identity=model_id,
@@ -238,6 +290,30 @@ def bridge_qualified_provider(
         pricing_authority_digest=pricing_digest,
         pricing_quoted_at=quoted.isoformat(),
         pricing_expires_at=expires.isoformat(),
+        billing_mode=(
+            str(pricing["billing_mode"])
+            if pricing.get("billing_mode") is not None
+            else None
+        ),
+        authentication_mode=str(
+            registration.get("authentication_mode", "")
+        ),
+        reviewer_eligible=reviewer_eligible,
+        model_allowlist=model_allowlist,
+        paid_fallback_authorized=(
+            pricing.get("paid_fallback_authorized") is True
+        ),
+        model_revalidation_expires_at=(
+            str(registration["model_revalidation_expires_at"])
+            if registration.get("model_revalidation_expires_at") is not None
+            else None
+        ),
+        api_billing_authorized=(
+            pricing.get("api_billing_authorized") is True
+        ),
+        subscription_capacity_bounded=(
+            pricing.get("capacity_bounded") is True
+        ),
     )
     account = ProviderAccountRecord(
         account_id=account_id,
@@ -253,20 +329,83 @@ def bridge_qualified_provider(
         updated_at=now,
         revision=1,
     )
+    usage = evidence.get("usage_observation")
+    usage_policy = registration.get("usage_policy")
+    observed_buckets: list[Any] = []
+    if isinstance(usage, dict) and isinstance(usage.get("buckets"), list):
+        observed_buckets = list(usage["buckets"])
+    used_percent: float | None = max(
+        (
+            float(item["used_percent"])
+            for item in observed_buckets
+            if isinstance(item, dict)
+            and isinstance(item.get("used_percent"), (int, float))
+            and not isinstance(item.get("used_percent"), bool)
+        ),
+        default=None,
+    )
+    if used_percent is not None:
+        pool_capacity: float | None = 100.0
+        pool_consumed: float = used_percent
+        pool_remaining: float | None = max(0.0, 100.0 - used_percent)
+        pool_limit_type = "SUBSCRIPTION_RATE_LIMIT_PERCENT"
+    else:
+        budget = (
+            usage_policy.get("keeper_launch_budget")
+            if isinstance(usage_policy, dict)
+            else None
+        )
+        pool_capacity = float(budget) if isinstance(budget, int) else None
+        pool_consumed = 0.0
+        pool_remaining = pool_capacity
+        pool_limit_type = "KEEPER_CONSERVATIVE_LAUNCH_BUDGET"
+    reset_values = [
+        item.get("resets_at")
+        for item in observed_buckets
+        if isinstance(item, dict) and item.get("resets_at") is not None
+    ]
+    reset_at: str | None = None
+    if reset_values:
+        reset_value = min(reset_values, key=lambda item: str(item))
+        if isinstance(reset_value, (int, float)) and not isinstance(
+            reset_value, bool
+        ):
+            reset_at = datetime.fromtimestamp(
+                float(reset_value), tz=UTC
+            ).isoformat()
+        elif isinstance(reset_value, str):
+            parsed_reset = datetime.fromisoformat(reset_value)
+            if parsed_reset.tzinfo is None:
+                raise PermissionError(
+                    "Authority usage reset observation is timezone-naive"
+                )
+            reset_at = parsed_reset.isoformat()
     pool = UsagePoolRecord(
         pool_id=pool_id,
         provider_id=provider_id,
         account_id=account_id,
         identity=descriptor.usage_pool_identity,
-        limit_type="AUTHORITY_DECLARED_INCLUDED",
-        capacity=None,
-        consumed=0.0,
+        limit_type=pool_limit_type,
+        capacity=pool_capacity,
+        consumed=pool_consumed,
         reserved=0.0,
-        remaining=None,
-        reset_at=None,
-        observation_source="KEEPERAUTHORITY_QUALIFICATION",
-        confidence="HIGH",
-        exhausted=False,
+        remaining=pool_remaining,
+        reset_at=reset_at,
+        observation_source=(
+            str(usage.get("source"))
+            if isinstance(usage, dict)
+            else "KEEPERAUTHORITY_QUALIFICATION"
+        ),
+        confidence=(
+            str(usage.get("confidence"))
+            if isinstance(usage, dict)
+            else "LOW"
+        ),
+        exhausted=(
+            usage.get("exhausted") is True
+            if isinstance(usage, dict)
+            else False
+        ),
         last_observed_at=now,
         created_at=now,
         updated_at=now,
@@ -304,6 +443,22 @@ def bridge_qualified_provider(
         or existing.pricing_quoted_at != quoted.isoformat()
         or existing.pricing_expires_at != expires.isoformat()
         or existing.cost_mode != cost_mode
+        or existing.model_allowlist != model_allowlist
+        or existing.authentication_mode
+        != str(registration.get("authentication_mode", ""))
+        or existing.reviewer_eligible != reviewer_eligible
+        or existing.paid_fallback_authorized
+        != (pricing.get("paid_fallback_authorized") is True)
+        or existing.api_billing_authorized
+        != (pricing.get("api_billing_authorized") is True)
+        or existing.subscription_capacity_bounded
+        != (pricing.get("capacity_bounded") is True)
+        or existing.model_revalidation_expires_at
+        != (
+            str(registration["model_revalidation_expires_at"])
+            if registration.get("model_revalidation_expires_at") is not None
+            else None
+        )
     ):
         raise PermissionError(
             "durable provider qualification declarations changed"

@@ -113,9 +113,26 @@ class NamedPipeAuthorityServer:
                 raise PermissionError("authority service concurrency limit reached")
             try:
                 observer = self.core.observer
-                binding = (
-                    observer.bind_client(pipe)
-                    if observer is not None
+                if (
+                    observer is not None
+                    and (
+                        request.operation is Operation.RESERVE_ATTEMPT
+                        or (
+                            request.operation is Operation.REGISTER_PROVIDER
+                            and "model_allowlist" in request.payload
+                        )
+                        or (
+                            request.operation is Operation.BEGIN_QUALIFICATION
+                            and self._subscription_qualification(
+                                request.payload
+                            )
+                        )
+                    )
+                    and hasattr(observer, "bind_authenticated_client")
+                ):
+                    binding = observer.bind_authenticated_client(pipe)
+                elif (
+                    observer is not None
                     and hasattr(observer, "bind_client")
                     and request.operation
                     in {
@@ -124,8 +141,10 @@ class NamedPipeAuthorityServer:
                         Operation.EXECUTE_PROVIDER,
                         Operation.RECORD_PROVIDER_START,
                     }
-                    else nullcontext()
-                )
+                ):
+                    binding = observer.bind_client(pipe)
+                else:
+                    binding = nullcontext()
                 with binding:
                     result = self.core.dispatch(request, client_sid)
                 response = success_response(request_id, result)
@@ -150,6 +169,19 @@ class NamedPipeAuthorityServer:
             kernel32.DisconnectNamedPipe(pipe)
             kernel32.CloseHandle(pipe)
             self._threads.discard(threading.current_thread())
+
+    def _subscription_qualification(
+        self, payload: dict[str, Any]
+    ) -> bool:
+        registration_id = payload.get("registration_id")
+        if not isinstance(registration_id, str):
+            return False
+        registration = self.core.store.get(
+            "registrations", registration_id
+        )
+        if registration is None:
+            return False
+        return registration.get("registration_schema_version") == 4
 
     def _authenticated_client_sid(self, pipe: int) -> str:
         identity = named_pipe_client_identity(pipe)

@@ -154,6 +154,14 @@ class _TestObserver:
         self._active_processes: dict[str, subprocess.Popen[str]] = {}
         self._cancelled_attempts: set[str] = set()
 
+    def validate_registered_executable(
+        self, registration: dict[str, Any]
+    ) -> None:
+        if registration.get("registration_schema_version") == 4:
+            raise PermissionError(
+                "test observer cannot validate a production Codex registration"
+            )
+
     def qualify(
         self, registration: dict[str, Any], challenge: str
     ) -> QualificationObservation:
@@ -198,7 +206,15 @@ class _TestObserver:
         project_types: list[str],
         effort_levels: list[str],
         pricing_authority: dict[str, Any],
+        expected_executable_sha256: str | None = None,
+        expected_executable_size: int | None = None,
+        expected_version: str | None = None,
+        model_allowlist: list[str] | None = None,
+        model_revalidation_expires_at: str | None = None,
+        authentication_policy: dict[str, Any] | None = None,
+        usage_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        del expected_executable_sha256, expected_executable_size
         return create_provider_registration(
             provider_id,
             executable,
@@ -207,7 +223,30 @@ class _TestObserver:
             project_types=project_types,
             effort_levels=effort_levels,
             pricing_authority=pricing_authority,
+            expected_version=expected_version,
+            model_allowlist=model_allowlist,
+            model_revalidation_expires_at=model_revalidation_expires_at,
+            authentication_policy=authentication_policy,
+            usage_policy=usage_policy,
         )
+
+    def preflight_provider(
+        self, registration: dict[str, Any], attempt: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        del registration, attempt
+        return None
+
+    def read_exchange_file(
+        self, value: object, label: str, maximum_bytes: int
+    ) -> tuple[Path, bytes]:
+        del label
+        path = Path(str(value)).resolve(strict=True)
+        if not path.is_relative_to(self.exchange_root):
+            raise PermissionError("test provider path is outside the exchange")
+        content = path.read_bytes()
+        if len(content) > maximum_bytes:
+            raise PermissionError("test provider exchange file is too large")
+        return path, content
 
     def execute_provider(
         self,

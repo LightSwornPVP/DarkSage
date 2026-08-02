@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from keeper.executive.founder_capability import (
 )
 from keeper.providers.adapters import (
     apply_protected_qualification,
+    authority_provider_output_schema,
     canonical_provider_registration_digest,
     create_provider_registration,
     qualification_evidence_digest,
@@ -34,7 +36,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.6.2"
+SERVICE_VERSION = "1.7.0"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
@@ -47,6 +49,12 @@ class QualificationObservation:
     exit_status: int
     raw_version_output: str
     failure_reason: str | None = None
+    authentication_probe: dict[str, Any] | None = None
+    usage_observation: dict[str, Any] | None = None
+    structured_output: dict[str, Any] | None = None
+    production_command: tuple[str, ...] = ()
+    prompt_digest: str | None = None
+    schema_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,16 @@ class ExecutionObservation:
     stderr_path: str
     provider_evidence_digest: str
     finished_at: str
+    usage_observation: dict[str, Any] | None = None
+    model_id: str | None = None
+    reasoning_level: str | None = None
+    command_digest: str | None = None
+    prompt_digest: str | None = None
+    schema_digest: str | None = None
+    structured_event_digest: str | None = None
+    failure_classification: str | None = None
+    provider_host_envelope_digest: str | None = None
+    provider_host_receipt_digest: str | None = None
 
 
 class TrustedObserver(Protocol):
@@ -94,7 +112,18 @@ class TrustedObserver(Protocol):
         project_types: list[str],
         effort_levels: list[str],
         pricing_authority: dict[str, Any],
+        expected_executable_sha256: str | None = None,
+        expected_executable_size: int | None = None,
+        expected_version: str | None = None,
+        model_allowlist: list[str] | None = None,
+        model_revalidation_expires_at: str | None = None,
+        authentication_policy: dict[str, Any] | None = None,
+        usage_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
+
+    def validate_registered_executable(
+        self, registration: dict[str, Any]
+    ) -> None: ...
 
     def observe_process(
         self, attempt: dict[str, Any], pid: int
@@ -106,6 +135,14 @@ class TrustedObserver(Protocol):
         attempt: dict[str, Any],
         on_started: Callable[[ProcessObservation], None],
     ) -> ExecutionObservation: ...
+
+    def preflight_provider(
+        self, registration: dict[str, Any], attempt: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    def read_exchange_file(
+        self, value: object, label: str, maximum_bytes: int
+    ) -> tuple[Path, bytes]: ...
 
     def observe_completion(
         self, attempt: dict[str, Any]
@@ -285,6 +322,18 @@ class AuthorityServiceCore:
         allowed_evidence_root = getattr(
             self.observer, "allowed_evidence_root", None
         )
+        provider_host = getattr(self.observer, "provider_host_status", None)
+        provider_host_status = (
+            provider_host()
+            if callable(provider_host)
+            else {
+                "installed": False,
+                "online": False,
+                "state": "NOT_CONFIGURED",
+                "protocol_compatible": False,
+                "provider_state": "UNAVAILABLE",
+            }
+        )
         return {
             "service_version": SERVICE_VERSION,
             "protocol_version": PROTOCOL_VERSION,
@@ -306,6 +355,7 @@ class AuthorityServiceCore:
                 if isinstance(allowed_evidence_root, Path)
                 else None
             ),
+            "provider_host": provider_host_status,
         }
 
     def _authorize_project_launch(
@@ -449,36 +499,91 @@ class AuthorityServiceCore:
     def _register_provider(
         self, payload: dict[str, Any], client_sid: str
     ) -> dict[str, Any]:
-        _exact(
-            payload,
-            {
-                "provider_id",
-                "executable",
-                "executive_capabilities",
-                "project_types",
-                "effort_levels",
-                "pricing_authority",
-            },
-        )
+        base_fields = {
+            "provider_id",
+            "executable",
+            "executive_capabilities",
+            "project_types",
+            "effort_levels",
+            "pricing_authority",
+        }
+        subscription_fields = base_fields | {
+            "expected_executable_sha256",
+            "expected_executable_size",
+            "expected_version",
+            "model_allowlist",
+            "model_revalidation_expires_at",
+            "authentication_policy",
+            "usage_policy",
+        }
+        if set(payload) not in {frozenset(base_fields), frozenset(subscription_fields)}:
+            raise ValueError("authority operation payload fields are invalid")
         provider_id = _choice(payload["provider_id"], {"codex", "claude"})
         executable = Path(_text(payload["executable"], "provider executable"))
         executive_capabilities = payload["executive_capabilities"]
         project_types = payload["project_types"]
         effort_levels = payload["effort_levels"]
         pricing_authority = payload["pricing_authority"]
+        subscription = set(payload) == subscription_fields
+        expected_executable_sha256 = (
+            _sha256_text(
+                payload["expected_executable_sha256"],
+                "expected provider executable SHA-256",
+            )
+            if subscription
+            else None
+        )
+        expected_executable_size = (
+            _nonnegative_int(
+                payload["expected_executable_size"],
+                "expected provider executable size",
+            )
+            if subscription
+            else None
+        )
+        if subscription and expected_executable_size == 0:
+            raise ValueError("authority expected provider executable size is invalid")
+        model_allowlist = payload.get("model_allowlist")
+        expected_version = payload.get("expected_version")
+        model_revalidation_expires_at = payload.get(
+            "model_revalidation_expires_at"
+        )
+        authentication_policy = payload.get("authentication_policy")
+        usage_policy = payload.get("usage_policy")
         if self.observer is not None and hasattr(
             self.observer, "register_provider"
         ):
+            registration_arguments: dict[str, Any] = {
+                "executive_capabilities": executive_capabilities,
+                "project_types": project_types,
+                "effort_levels": effort_levels,
+                "pricing_authority": pricing_authority,
+            }
+            if subscription:
+                registration_arguments.update(
+                    {
+                        "model_allowlist": model_allowlist,
+                        "expected_executable_sha256": expected_executable_sha256,
+                        "expected_executable_size": expected_executable_size,
+                        "expected_version": expected_version,
+                        "model_revalidation_expires_at": (
+                            model_revalidation_expires_at
+                        ),
+                        "authentication_policy": authentication_policy,
+                        "usage_policy": usage_policy,
+                    }
+                )
             registration = self.observer.register_provider(
                 provider_id,
                 executable,
                 client_sid,
-                executive_capabilities=executive_capabilities,
-                project_types=project_types,
-                effort_levels=effort_levels,
-                pricing_authority=pricing_authority,
+                **registration_arguments,
             )
         else:
+            if subscription:
+                raise PermissionError(
+                    "Codex subscription registration requires the production observer"
+                )
             registration = create_provider_registration(
                 provider_id,
                 executable,
@@ -510,7 +615,42 @@ class AuthorityServiceCore:
             raise PermissionError(
                 f"registration contract is incomplete or invalid: {detail}"
             )
+        if registration.get("registration_schema_version") == 4:
+            self.observer.validate_registered_executable(registration)
+        else:
+            configured = Path(
+                str(registration["canonical_executable_path"])
+            ).resolve(strict=True)
+            executable_content = configured.read_bytes()
+            if (
+                str(configured) != registration["canonical_executable_path"]
+                or hashlib.sha256(executable_content).hexdigest()
+                != registration["executable_sha256"]
+                or len(executable_content) != registration["executable_size"]
+            ):
+                raise PermissionError(
+                    "registered provider executable changed before qualification"
+                )
         qualification_id = f"provider-qualification:{uuid.uuid4().hex}"
+        if (
+            registration.get("registration_schema_version") == 4
+            and hasattr(self.observer, "qualification_identifier")
+        ):
+            qualification_id = str(
+                self.observer.qualification_identifier(registration)
+            )
+            if (
+                not qualification_id.startswith("provider-qualification:")
+                or len(qualification_id)
+                != len("provider-qualification:") + 32
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in qualification_id.split(":", 1)[1]
+                )
+            ):
+                raise PermissionError(
+                    "Provider Host planned qualification ID is invalid"
+                )
         challenge = secrets.token_hex(32)
         start = self.keys.sign(
             "provider-qualification-start",
@@ -539,11 +679,18 @@ class AuthorityServiceCore:
             if observation.raw_version_output
             else ""
         )
-        command = [registration["canonical_executable_path"], "--version"]
+        subscription_qualification = (
+            registration.get("registration_schema_version") == 4
+        )
+        command = (
+            list(observation.production_command)
+            if subscription_qualification
+            else [registration["canonical_executable_path"], "--version"]
+        )
         evidence: dict[str, Any] = {
             "id": qualification_id,
             "kind": "provider_qualification",
-            "schema_version": 2,
+            "schema_version": 3 if subscription_qualification else 2,
             "registration_id": identifier,
             "registration_version": registration["registration_version"],
             "provider_id": registration["logical_provider_id"],
@@ -568,8 +715,44 @@ class AuthorityServiceCore:
                 and qualified_version_is_valid(
                     str(registration["logical_provider_id"]), normalized
                 )
+                and (
+                    not subscription_qualification
+                    or normalized == registration.get("expected_version")
+                )
                 and observation.process_ownership.get("restricted") is True
                 and observation.process_ownership.get("job_confined") is True
+                and (
+                    not subscription_qualification
+                    or (
+                        observation.process_ownership.get("executable")
+                        == registration["canonical_executable_path"]
+                        and observation.process_ownership.get(
+                            "executable_sha256"
+                        )
+                        == registration["executable_sha256"]
+                    )
+                )
+                and (
+                    not subscription_qualification
+                    or (
+                        observation.process_ownership.get("integrity_level")
+                        == "medium"
+                        and isinstance(observation.authentication_probe, dict)
+                        and observation.authentication_probe.get(
+                            "authentication_method"
+                        )
+                        == "chatgpt-subscription"
+                        and observation.structured_output
+                        == {
+                            "status": "ok",
+                            "provider": "codex",
+                            "effort": "medium",
+                            "nonce": "keeper-codex-qualification-v1",
+                        }
+                        and observation.prompt_digest is not None
+                        and observation.schema_digest is not None
+                    )
+                )
                 else "failed"
             ),
             "authorized_by": client_sid,
@@ -577,6 +760,37 @@ class AuthorityServiceCore:
             "event_challenge": challenge,
             "ownership": observation.process_ownership,
             "failure_reason": observation.failure_reason,
+            "authentication_probe": observation.authentication_probe,
+            "usage_observation": observation.usage_observation,
+            "structured_output": observation.structured_output,
+            "qualified_model_id": (
+                registration.get("model_or_service_identity")
+                if subscription_qualification
+                else None
+            ),
+            "qualified_reasoning_level": (
+                "medium" if subscription_qualification else None
+            ),
+            "prompt_digest": observation.prompt_digest,
+            "schema_digest": observation.schema_digest,
+            "registration_configuration_digest": registration[
+                "configuration_digest"
+            ],
+            "pricing_authority_digest": _canonical_digest(
+                registration["pricing_authority"]
+            ),
+            "usage_policy_digest": (
+                _canonical_digest(registration["usage_policy"])
+                if subscription_qualification
+                else None
+            ),
+            "authentication_binding_digest": (
+                _canonical_digest(
+                    registration["windows_authentication_binding"]
+                )
+                if subscription_qualification
+                else None
+            ),
         }
         # Preserve the legacy digest contract while changing the owning writer.
         evidence["qualification_method"] = "protected-registered-launch"
@@ -661,16 +875,49 @@ class AuthorityServiceCore:
             "founder_authenticated_session_id",
             "founder_principal_sid",
         }
-        optional_fields = fields | {"provider_input_required"}
-        if set(payload) not in {
+        accepted_field_sets = {
             frozenset(fields),
-            frozenset(optional_fields),
-        }:
+            frozenset(fields | {"provider_input_required"}),
+            frozenset(fields | {"model_id"}),
+            frozenset(fields | {"provider_input_required", "model_id"}),
+            frozenset(fields | {"model_id", "prompt_digest"}),
+            frozenset(
+                fields
+                | {"provider_input_required", "model_id", "prompt_digest"}
+            ),
+        }
+        host_binding_fields = {
+            "workflow_id",
+            "work_item_id",
+            "assignment_id",
+            "provider_account_id",
+            "workspace_identity",
+            "workspace_reservation_id",
+        }
+        accepted_field_sets |= {
+            frozenset(set(item) | host_binding_fields)
+            for item in tuple(accepted_field_sets)
+        }
+        if set(payload) not in accepted_field_sets:
             raise ValueError("authority operation payload fields are invalid")
         registration_id = _text(payload["registration_id"], "registration ID")
         registration = self.store.get("registrations", registration_id)
         if registration is None or registration.pop("service_state", None) != "QUALIFIED":
             raise PermissionError("provider registration is not service-qualified")
+        valid_registration, detail = validate_provider_registration_contract(
+            registration
+        )
+        if not valid_registration:
+            raise PermissionError(
+                f"provider registration is no longer valid: {detail}"
+            )
+        if (
+            registration.get("registration_schema_version") == 4
+            and not host_binding_fields.issubset(payload)
+        ):
+            raise PermissionError(
+                "Provider Host durable launch binding is incomplete"
+            )
         authorization_id = _text(
             payload["launch_authorization_id"], "launch authorization ID"
         )
@@ -703,23 +950,97 @@ class AuthorityServiceCore:
                 "attempt launch authorization generation is invalid"
             )
         role = _text(payload["role"], "role")
+        normalized_role = _normalized_provider_role(role)
+        eligible_roles = registration.get("role_eligibility")
+        if (
+            not isinstance(eligible_roles, list)
+            or normalized_role not in eligible_roles
+        ):
+            raise PermissionError(
+                "provider role is outside the qualified registration"
+            )
         stage_id = _text(payload["stage_id"], "stage ID")
         provider_input_required_value = payload.get("provider_input_required")
         if provider_input_required_value is None:
-            provider_input_required = role.casefold() == "reviewer"
+            provider_input_required = _reviewer_role(normalized_role)
         elif type(provider_input_required_value) is not bool:
             raise ValueError(
                 "authority provider input requirement is invalid"
             )
         else:
             provider_input_required = provider_input_required_value
-        if role.casefold() == "reviewer" and not provider_input_required:
+        if (
+            registration.get("registration_schema_version") == 4
+            and _reviewer_role(normalized_role)
+            and not provider_input_required
+        ):
             raise PermissionError("reviewer provider input cannot be optional")
         attempt_id = (
             f"provider-attempt:{_text(payload['keeper_run_id'], 'run ID')}:"
             f"{_text(payload['provider_run_id'], 'provider run ID')}"
         )
         challenge = secrets.token_hex(32)
+        reasoning_level = _choice(
+            payload["reasoning_level"],
+            {"low", "medium", "high", "xhigh", "extra-high"},
+        )
+        declared_efforts = registration.get("effort_levels")
+        if (
+            not isinstance(declared_efforts, list)
+            or reasoning_level not in declared_efforts
+        ):
+            raise PermissionError(
+                "provider reasoning effort is outside the qualified declaration"
+            )
+        model_id = payload.get(
+            "model_id", registration.get("model_or_service_identity")
+        )
+        if not isinstance(model_id, str) or not model_id:
+            raise PermissionError("provider model identity is unavailable")
+        model_allowlist = registration.get("model_allowlist")
+        if (
+            registration.get("registration_schema_version") == 4
+            and (
+                "model_id" not in payload
+                or "prompt_digest" not in payload
+                or not isinstance(model_allowlist, list)
+                or model_id not in model_allowlist
+            )
+        ):
+            raise PermissionError(
+                "provider model is outside the qualified allowlist"
+            )
+        authority_prompt: str | None = None
+        output_schema_digest: str | None = None
+        canonical_prompt_path: str
+        if registration.get("registration_schema_version") == 4:
+            if self.observer is None:
+                raise RuntimeError("authority provider observer is unavailable")
+            prompt_path, prompt_content = self.observer.read_exchange_file(
+                payload["prompt_path"], "prompt", 1_048_576
+            )
+            canonical_prompt_path = str(prompt_path)
+            prompt_digest = _sha256_text(
+                payload["prompt_digest"], "prompt digest"
+            )
+            if hashlib.sha256(prompt_content).hexdigest() != prompt_digest:
+                raise PermissionError("Authority provider prompt digest changed")
+            try:
+                authority_prompt = prompt_content.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise PermissionError(
+                    "Authority provider prompt is not UTF-8"
+                ) from error
+            output_schema_digest = _canonical_digest(
+                authority_provider_output_schema(
+                    normalized_role,
+                    provider_input_required=provider_input_required,
+                )
+            )
+        else:
+            canonical_prompt_path = _canonical_path(
+                payload["prompt_path"], "prompt path"
+            )
         record = self.keys.sign(
             "provider-launch-authorization",
             {
@@ -728,6 +1049,45 @@ class AuthorityServiceCore:
                 "schema_version": 1,
                 "registration_id": registration_id,
                 "registration_digest": registration["configuration_digest"],
+                "pricing_authority_digest": _canonical_digest(
+                    registration.get("pricing_authority")
+                ),
+                "usage_policy_digest": (
+                    _canonical_digest(registration["usage_policy"])
+                    if isinstance(registration.get("usage_policy"), dict)
+                    else None
+                ),
+                "authentication_binding_digest": (
+                    _canonical_digest(
+                        registration["windows_authentication_binding"]
+                    )
+                    if isinstance(
+                        registration.get("windows_authentication_binding"),
+                        dict,
+                    )
+                    else None
+                ),
+                "model_allowlist_digest": (
+                    _canonical_digest(registration["model_allowlist"])
+                    if isinstance(registration.get("model_allowlist"), list)
+                    else None
+                ),
+                "subscription_account_binding_digest": (
+                    _canonical_digest(
+                        registration["subscription_account_binding"]
+                    )
+                    if isinstance(
+                        registration.get("subscription_account_binding"), dict
+                    )
+                    else None
+                ),
+                "model_capability_binding_digest": (
+                    _canonical_digest(registration["model_capability_binding"])
+                    if isinstance(
+                        registration.get("model_capability_binding"), dict
+                    )
+                    else None
+                ),
                 "keeper_run_id": payload["keeper_run_id"],
                 "task_id": _text(payload["task_id"], "task ID"),
                 "stage_id": stage_id,
@@ -742,9 +1102,7 @@ class AuthorityServiceCore:
                 "evidence_path": _canonical_path(
                     payload["evidence_path"], "evidence path"
                 ),
-                "prompt_path": _canonical_path(
-                    payload["prompt_path"], "prompt path"
-                ),
+                "prompt_path": canonical_prompt_path,
                 "stdout_path": _canonical_path(
                     payload["stdout_path"], "stdout path"
                 ),
@@ -755,10 +1113,15 @@ class AuthorityServiceCore:
                 "timeout_seconds": _bounded_int(
                     payload["timeout_seconds"], "timeout seconds", 1, 86_400
                 ),
-                "reasoning_level": _choice(
-                    payload["reasoning_level"],
-                    {"low", "medium", "high", "extra-high"},
+                "reasoning_level": reasoning_level,
+                "model_id": model_id,
+                "prompt_digest": (
+                    _sha256_text(payload["prompt_digest"], "prompt digest")
+                    if "prompt_digest" in payload
+                    else None
                 ),
+                "authority_prompt": authority_prompt,
+                "output_schema_digest": output_schema_digest,
                 "environment": _safe_environment(payload["environment"]),
                 "provider_input_required": provider_input_required,
                 "launch_challenge": challenge,
@@ -787,6 +1150,39 @@ class AuthorityServiceCore:
                 "charter_id": payload["charter_id"],
                 "charter_revision": payload["charter_revision"],
                 "task_revision": payload["task_revision"],
+                "workflow_id": (
+                    _text(payload["workflow_id"], "workflow ID")
+                    if "workflow_id" in payload
+                    else None
+                ),
+                "work_item_id": (
+                    _text(payload["work_item_id"], "work item ID")
+                    if "work_item_id" in payload
+                    else None
+                ),
+                "assignment_id": (
+                    _text(payload["assignment_id"], "assignment ID")
+                    if "assignment_id" in payload
+                    else None
+                ),
+                "provider_account_id": (
+                    _text(payload["provider_account_id"], "provider account ID")
+                    if "provider_account_id" in payload
+                    else None
+                ),
+                "workspace_identity": (
+                    _text(payload["workspace_identity"], "workspace identity")
+                    if "workspace_identity" in payload
+                    else None
+                ),
+                "workspace_reservation_id": (
+                    _text(
+                        payload["workspace_reservation_id"],
+                        "workspace reservation ID",
+                    )
+                    if "workspace_reservation_id" in payload
+                    else None
+                ),
             },
         )
         self.store.insert(
@@ -1080,6 +1476,31 @@ class AuthorityServiceCore:
         )
         if registration is None or registration.pop("service_state", None) != "QUALIFIED":
             raise PermissionError("provider registration is not qualified")
+        valid_registration, detail = validate_provider_registration_contract(
+            registration
+        )
+        if not valid_registration:
+            raise PermissionError(
+                f"provider registration is no longer valid: {detail}"
+            )
+        normalized_role = _normalized_provider_role(
+            str(attempt.get("role", ""))
+        )
+        if normalized_role not in registration.get("role_eligibility", []):
+            raise PermissionError(
+                "provider role is outside the qualified registration"
+            )
+        usage_observation = (
+            self.observer.preflight_provider(registration, attempt)
+            if hasattr(self.observer, "preflight_provider")
+            else None
+        )
+        if isinstance(usage_observation, dict):
+            usage_observation = {
+                **usage_observation,
+                "observed_at": usage_observation.get("observed_at") or _now(),
+            }
+        self._validate_codex_preflight_binding(registration, usage_observation)
         claim = self.keys.sign(
             "provider-launch-claim",
             {
@@ -1087,30 +1508,67 @@ class AuthorityServiceCore:
                 "kind": "provider_launch_claim",
                 "claimed_at": _now(),
                 "claim_transaction_id": uuid.uuid4().hex,
+                "usage_observation": usage_observation,
             },
         )
-        self.store.claim_attempt_with_launch_authority(
-            attempt_id,
-            str(attempt["launch_authorization_id"]),
-            int(attempt["authorization_generation"]),
-            client_sid,
-            claim,
-            expected_attempt_state=str(state),
-        )
+        try:
+            self.store.claim_attempt_with_launch_authority(
+                attempt_id,
+                str(attempt["launch_authorization_id"]),
+                int(attempt["authorization_generation"]),
+                client_sid,
+                claim,
+                expected_attempt_state=str(state),
+                provider_usage_policy=registration.get("usage_policy"),
+                usage_observation=usage_observation,
+            )
+        except PermissionError as error:
+            if not str(error).startswith("WAITING_FOR_USAGE_RESET:"):
+                raise
+            waiting = self.keys.sign(
+                "provider-usage-wait",
+                {
+                    **attempt,
+                    "kind": "provider_usage_wait",
+                    "usage_observation": usage_observation,
+                    "wait_reason": str(error).partition(":")[2].strip(),
+                    "waited_at": _now(),
+                },
+            )
+            self.store.transition(
+                "attempts",
+                attempt_id,
+                str(state),
+                "WAITING_FOR_USAGE_RESET",
+                waiting,
+            )
+            raise
         started_result: dict[str, Any] = {}
 
         def on_started(observation: ProcessObservation) -> None:
+            expected_integrity = (
+                "medium"
+                if registration.get("registration_schema_version") == 4
+                else "low"
+            )
             if (
                 not observation.restricted
-                or observation.integrity_level != "low"
+                or observation.integrity_level != expected_integrity
                 or not observation.job_confined
             ):
                 raise PermissionError(
                     "provider restricted confinement was not established"
                 )
-            expected = Path(str(registration["launcher_path"])).resolve()
+            expected_path = str(registration["launcher_path"])
+            observed_path = str(observation.executable)
+            path_matches = (
+                os.path.normcase(os.path.abspath(observed_path))
+                == os.path.normcase(os.path.abspath(expected_path))
+                if registration.get("registration_schema_version") == 4
+                else Path(observed_path).resolve() == Path(expected_path).resolve()
+            )
             if (
-                Path(observation.executable).resolve() != expected
+                not path_matches
                 or observation.executable_sha256
                 != registration["launcher_sha256"]
             ):
@@ -1142,11 +1600,64 @@ class AuthorityServiceCore:
             )
             started_result.update(started)
 
-        observed = self.observer.execute_provider(
-            registration, claim, on_started
-        )
+        try:
+            observed = self.observer.execute_provider(
+                registration, claim, on_started
+            )
+        except Exception:
+            # Once the durable claim is committed, any observer failure before
+            # the service records process start is ambiguous: the observer may
+            # have crossed the external process boundary before its callback.
+            # Preserve the consumed claim as UNCERTAIN so restart/recovery can
+            # reconcile it and the same attempt can never launch again.
+            current = self.store.get("attempts", attempt_id)
+            if isinstance(current, dict):
+                current_state = current.pop("service_state", None)
+                if current_state == "LAUNCH_CLAIMED":
+                    uncertain = self.keys.sign(
+                        "provider-launch-claim",
+                        {
+                            **current,
+                            "launch_claim_state": "UNCERTAIN",
+                            "uncertainty_kind": (
+                                "PROVIDER_START_OBSERVATION_FAILED"
+                            ),
+                            "uncertain_at": _now(),
+                        },
+                    )
+                    self.store.transition(
+                        "attempts",
+                        attempt_id,
+                        "LAUNCH_CLAIMED",
+                        "UNCERTAIN",
+                        uncertain,
+                    )
+            raise
         if not started_result:
             raise RuntimeError("provider start was not service-observed")
+        if registration.get("registration_schema_version") == 4 and (
+            observed.model_id != started_result.get("model_id")
+            or observed.reasoning_level
+            != started_result.get("reasoning_level")
+            or observed.usage_observation
+            != started_result.get("usage_observation")
+            or not observed.command_digest
+            or observed.prompt_digest != started_result.get("prompt_digest")
+            or observed.schema_digest
+            != started_result.get("output_schema_digest")
+            or not observed.structured_event_digest
+            or (
+                getattr(self.observer, "provider_host_gateway", None)
+                is not None
+                and (
+                    not observed.provider_host_envelope_digest
+                    or not observed.provider_host_receipt_digest
+                )
+            )
+        ):
+            raise PermissionError(
+                "Codex execution observation differs from its launch claim"
+            )
         current = self.store.get("attempts", attempt_id)
         if (
             isinstance(current, dict)
@@ -1164,12 +1675,35 @@ class AuthorityServiceCore:
                     "stderr_path": observed.stderr_path,
                 },
             }
-        normalized_result = (
-            "completed" if observed.exit_status == 0 else "failed"
+        normalized_result = {
+            "COMPLETED": "completed",
+            "CANCELLED": "cancelled",
+            "TIMEOUT": "timed_out",
+            "SUBSCRIPTION_EXHAUSTED": "waiting_for_usage_reset",
+            "AUTHENTICATION_FAILED": "failed",
+            "NETWORK_FAILURE": "failed",
+            "INVALID_OUTPUT": "failed",
+            "PROVIDER_ERROR": "failed",
+        }.get(
+            str(observed.failure_classification),
+            "completed" if observed.exit_status == 0 else "failed",
         )
+        completion_source = {
+            **started_result,
+            "execution_command_digest": observed.command_digest,
+            "execution_prompt_digest": observed.prompt_digest,
+            "execution_schema_digest": observed.schema_digest,
+            "structured_event_digest": observed.structured_event_digest,
+            "execution_usage_observation": observed.usage_observation,
+            "failure_classification": observed.failure_classification,
+            "provider_host_envelope_digest": (
+                observed.provider_host_envelope_digest
+            ),
+            "provider_host_receipt_digest": observed.provider_host_receipt_digest,
+        }
         completion = self._completion_record(
             attempt_id,
-            started_result,
+            completion_source,
             observed.provider_evidence_digest,
             observed.exit_status,
             normalized_result,
@@ -1194,6 +1728,36 @@ class AuthorityServiceCore:
                 "stderr_path": observed.stderr_path,
             },
         }
+
+    @staticmethod
+    def _validate_codex_preflight_binding(
+        registration: dict[str, Any],
+        observation: dict[str, Any] | None,
+    ) -> None:
+        policy = registration.get("usage_policy")
+        if policy is None:
+            return
+        if not isinstance(policy, dict):
+            raise PermissionError("provider usage authority is malformed")
+        if not isinstance(observation, dict):
+            raise PermissionError("provider usage state is unavailable")
+        account = registration.get("subscription_account_binding")
+        models = registration.get("model_capability_binding")
+        if (
+            not isinstance(account, dict)
+            or observation.get("authentication_method")
+            != account.get("authentication_method")
+            or observation.get("plan_type") != account.get("plan_type")
+            or observation.get("account_identity_digest")
+            != account.get("account_identity_digest")
+            or not isinstance(models, dict)
+            or observation.get("model_capabilities") != models.get("models")
+            or observation.get("model_allowlist")
+            != registration.get("model_allowlist")
+        ):
+            raise PermissionError(
+                "provider subscription account or model capability changed"
+            )
 
     def _record_provider_start(
         self, payload: dict[str, Any], client_sid: str
@@ -1223,9 +1787,16 @@ class AuthorityServiceCore:
         if expected is None:
             raise PermissionError("provider registration is unavailable")
         expected.pop("service_state", None)
+        expected_path = str(expected["launcher_path"])
+        observed_path = str(observation.executable)
+        path_matches = (
+            os.path.normcase(os.path.abspath(observed_path))
+            == os.path.normcase(os.path.abspath(expected_path))
+            if expected.get("registration_schema_version") == 4
+            else Path(observed_path).resolve() == Path(expected_path).resolve()
+        )
         if (
-            Path(observation.executable).resolve()
-            != Path(str(expected["launcher_path"])).resolve()
+            not path_matches
             or observation.executable_sha256 != expected["launcher_sha256"]
         ):
             raise PermissionError("provider process identity differs from registration")
@@ -1328,8 +1899,30 @@ class AuthorityServiceCore:
                 "attempt_number": attempt["attempt_number"],
                 "provider_run_id": attempt["provider_run_id"],
                 "provider_instance_id": attempt["provider_instance_id"],
+                "model_id": attempt.get("model_id"),
+                "reasoning_level": attempt.get("reasoning_level"),
+                "prompt_digest": attempt.get("prompt_digest"),
+                "output_schema_digest": attempt.get(
+                    "output_schema_digest"
+                ),
                 "registration_id": attempt["registration_id"],
                 "registration_digest": attempt["registration_digest"],
+                "pricing_authority_digest": attempt.get(
+                    "pricing_authority_digest"
+                ),
+                "usage_policy_digest": attempt.get("usage_policy_digest"),
+                "authentication_binding_digest": attempt.get(
+                    "authentication_binding_digest"
+                ),
+                "model_allowlist_digest": attempt.get(
+                    "model_allowlist_digest"
+                ),
+                "subscription_account_binding_digest": attempt.get(
+                    "subscription_account_binding_digest"
+                ),
+                "model_capability_binding_digest": attempt.get(
+                    "model_capability_binding_digest"
+                ),
                 "process_id": attempt["pid"],
                 "process_creation_time": attempt["process_creation_time"],
                 "provider_evidence_digest": evidence_digest,
@@ -1343,6 +1936,33 @@ class AuthorityServiceCore:
                     "executive_commit_receipt_digest"
                 ),
                 "manifest_digest": attempt.get("manifest_digest"),
+                "usage_observation": attempt.get("usage_observation"),
+                "claimed_at": attempt.get("claimed_at"),
+                "started_at": attempt.get("started_at"),
+                "execution_usage_observation": attempt.get(
+                    "execution_usage_observation"
+                ),
+                "execution_command_digest": attempt.get(
+                    "execution_command_digest"
+                ),
+                "execution_prompt_digest": attempt.get(
+                    "execution_prompt_digest"
+                ),
+                "execution_schema_digest": attempt.get(
+                    "execution_schema_digest"
+                ),
+                "structured_event_digest": attempt.get(
+                    "structured_event_digest"
+                ),
+                "failure_classification": attempt.get(
+                    "failure_classification"
+                ),
+                "provider_host_envelope_digest": attempt.get(
+                    "provider_host_envelope_digest"
+                ),
+                "provider_host_receipt_digest": attempt.get(
+                    "provider_host_receipt_digest"
+                ),
                 "exit_status": exit_status,
                 "normalized_result": normalized_result,
                 "terminal_disposition": normalized_result.upper(),
@@ -1575,6 +2195,7 @@ class AuthorityServiceCore:
                 "provider-launch-claim",
                 "provider-start",
                 "provider-completion",
+                "provider-usage-wait",
                 "executive-restore-reconciliation",
                 "executive-restore-reconciliation-fence",
                 "executive-restore-fence-confirmation",
@@ -1782,10 +2403,34 @@ class AuthorityServiceCore:
 def _provider_input_is_required(attempt: dict[str, Any]) -> bool:
     value = attempt.get("provider_input_required")
     if value is None:
-        return str(attempt.get("role", "")).casefold() == "reviewer"
+        return _reviewer_role(
+            _normalized_provider_role(str(attempt.get("role", "")))
+        )
     if type(value) is not bool:
         raise PermissionError("provider input requirement is invalid")
     return value
+
+
+def _normalized_provider_role(role: str) -> str:
+    raw_role = role.casefold()
+    normalized = {
+        "author": "builder",
+        "implementer": "builder",
+        "executive_builder": "builder",
+        "executive_reviewer": "reviewer",
+        "executive_post_repair_reviewer": "post_repair_reviewer",
+    }.get(raw_role)
+    if normalized is not None:
+        return normalized
+    if "review" in raw_role:
+        return "reviewer"
+    if "repair" in raw_role:
+        return "repairer"
+    return "builder"
+
+
+def _reviewer_role(role: str) -> bool:
+    return role in {"reviewer", "post_repair_reviewer"}
 
 
 def _exact(payload: dict[str, Any], fields: set[str]) -> None:

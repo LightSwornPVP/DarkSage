@@ -147,6 +147,18 @@ EXCLUDE_PATHS=(
   "tests/keeper/test_fake_command_provider_workflow.py"
   "docs/keeper/PROVIDERS.md"
   "docs/keeper/KNOWN_LIMITATIONS.md"
+  "docs/keeper/CODEX_PROVIDER.md"
+  "keeper/provider_host/environment.py"
+  "keeper/provider_host/protocol.py"
+  "keeper/provider_host/runtime.py"
+  "keeper/provider_host/windows_process.py"
+  "keeper/authority_service/provider_host_gateway.py"
+  "keeper/executive/authority_gateway.py"
+  "keeper/authority_service/codex_registration.py"
+  "keeper/providers/codex_contract.py"
+  "tests/keeper/test_codex_subscription_provider_contract.py"
+  "tests/keeper/test_product_ui_view_models.py"
+  "tests/keeper/test_provider_host_phase1.py"
 )
 
 hit=0

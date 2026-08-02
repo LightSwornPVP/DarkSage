@@ -111,6 +111,14 @@ class ProviderRecord(PassBRecord):
     pricing_authority_digest: str | None = None
     pricing_quoted_at: str | None = None
     pricing_expires_at: str | None = None
+    billing_mode: str | None = None
+    authentication_mode: str | None = None
+    reviewer_eligible: bool = True
+    model_allowlist: tuple[str, ...] = ()
+    paid_fallback_authorized: bool = False
+    model_revalidation_expires_at: str | None = None
+    api_billing_authorized: bool = False
+    subscription_capacity_bounded: bool = False
 
     KIND = "provider"
     ID_FIELD = "provider_id"
@@ -120,6 +128,7 @@ class ProviderRecord(PassBRecord):
         "workspace_support",
         "project_types",
         "effort_levels",
+        "model_allowlist",
     )
     DEFAULTS = {
         "authority_registration_id": None,
@@ -128,6 +137,14 @@ class ProviderRecord(PassBRecord):
         "pricing_authority_digest": None,
         "pricing_quoted_at": None,
         "pricing_expires_at": None,
+        "billing_mode": None,
+        "authentication_mode": None,
+        "reviewer_eligible": True,
+        "model_allowlist": (),
+        "paid_fallback_authorized": False,
+        "model_revalidation_expires_at": None,
+        "api_billing_authorized": False,
+        "subscription_capacity_bounded": False,
     }
 
     def __post_init__(self) -> None:
@@ -141,10 +158,27 @@ class ProviderRecord(PassBRecord):
             raise ValueError("provider project types must be unique")
         if len(set(self.effort_levels)) != len(self.effort_levels):
             raise ValueError("provider effort levels must be unique")
+        if len(set(self.model_allowlist)) != len(self.model_allowlist):
+            raise ValueError("provider model allowlist must be unique")
+        if any(
+            type(value) is not bool
+            for value in (
+                self.reviewer_eligible,
+                self.paid_fallback_authorized,
+                self.api_billing_authorized,
+                self.subscription_capacity_bounded,
+            )
+        ):
+            raise ValueError("provider authority flags must be Boolean")
         if self.pricing_quoted_at is not None:
             _timestamp(self.pricing_quoted_at, "pricing_quoted_at")
         if self.pricing_expires_at is not None:
             _timestamp(self.pricing_expires_at, "pricing_expires_at")
+        if self.model_revalidation_expires_at is not None:
+            _timestamp(
+                self.model_revalidation_expires_at,
+                "model_revalidation_expires_at",
+            )
         _timestamp(self.created_at, "created_at")
         _timestamp(self.updated_at, "updated_at")
         _positive_revision(self.revision)

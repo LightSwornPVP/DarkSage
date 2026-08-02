@@ -110,8 +110,10 @@ class PassBApplication:
         self.authority_health_client = (
             authority_health_client or authority_client
         )
-        self.project_status: ProjectStatusReader = lambda project_id: _project_status(
-            self.executive, project_id
+        self.project_status: ProjectStatusReader = (
+            lambda project_id: _product_project_status(
+                self.executive, project_id
+            )
         )
         self._test_authority_configured = _test_launch_authority is not None
         if _test_launch_authority is not None:
@@ -747,6 +749,7 @@ class PassBApplication:
                 else "PRODUCTION_HEALTH_ONLY"
             ),
             "last_checked_at": checked_at,
+            "provider_host": value.get("provider_host"),
         }
 
     def _ensure_presentation_state(self) -> None:
@@ -795,6 +798,20 @@ def _project_status(
                 else None
             ),
         }
+    reader = getattr(executive, "project_status", None)
+    if not callable(reader):
+        raise PermissionError("Executive project status reader is unavailable")
+    value = reader(project_id)
+    if not isinstance(value, dict):
+        raise PermissionError("Executive project status is malformed")
+    return value
+
+
+def _product_project_status(
+    executive: ConversationExecutive, project_id: str
+) -> dict[str, Any]:
+    if isinstance(executive, KeeperExecutive):
+        return executive.status(project_id).to_dict()
     reader = getattr(executive, "project_status", None)
     if not callable(reader):
         raise PermissionError("Executive project status reader is unavailable")

@@ -259,6 +259,7 @@ class KeeperDesktopController(QObject):
             "timeline": view.timeline,
             "workflows": view.workflow_rows,
             "providers": view.provider_cards,
+            "providerHost": view.provider_host,
             "usage": view.usage_cards,
             "evidence": view.evidence_cards,
             "evidenceReferences": view.evidence_reference_cards,

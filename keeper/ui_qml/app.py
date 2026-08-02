@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextlib import ExitStack
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import cast
 
@@ -30,8 +32,10 @@ def run_desktop(
     qt_app = (
         cast(QGuiApplication, existing) if existing else QGuiApplication(sys.argv[:1])
     )
-    assets = Path(__file__).resolve().parents[1] / "assets"
-    icon_path = assets / "keeper-official.png"
+    resources = ExitStack()
+    icon_path = resources.enter_context(
+        as_file(files("keeper").joinpath("assets", "keeper-official.png"))
+    )
     qt_app.setWindowIcon(QIcon(str(icon_path)))
     engine = QQmlApplicationEngine()
     controller = KeeperDesktopController(application, test_fixture=test_fixture)
@@ -39,9 +43,12 @@ def run_desktop(
     engine.rootContext().setContextProperty(
         "keeperIcon", QUrl.fromLocalFile(str(icon_path))
     )
-    qml_path = Path(__file__).with_name("qml") / "Main.qml"
+    qml_path = resources.enter_context(
+        as_file(files("keeper.ui_qml").joinpath("qml", "Main.qml"))
+    )
     engine.load(QUrl.fromLocalFile(str(qml_path)))
     if not engine.rootObjects():
+        resources.close()
         return 70
     root = engine.rootObjects()[0]
     if smoke:
@@ -50,8 +57,18 @@ def run_desktop(
         ).resolve()
         target.mkdir(parents=True, exist_ok=True)
         captured: list[str] = []
+        captured_frames: list[dict[str, object]] = []
         failure: list[str] = []
         finished = False
+        variants = (
+            ("wide", 1600, 960),
+            ("minimum", 1120, 700),
+        )
+        frames = tuple(
+            (variant, width, height, page)
+            for variant, width, height in variants
+            for page in NAVIGATION
+        )
 
         def finish() -> None:
             nonlocal finished
@@ -62,6 +79,11 @@ def run_desktop(
                 "ui_smoke": "failed" if failure else "passed",
                 "rendered_pages": len(captured),
                 "pages": captured,
+                "rendered_frames": captured_frames,
+                "supported_sizes": [
+                    {"name": name, "width": width, "height": height}
+                    for name, width, height in variants
+                ],
                 "environment": controller.state_snapshot().get("environment"),
                 "output": str(target),
                 "failure": failure[0] if failure else None,
@@ -69,14 +91,18 @@ def run_desktop(
             (target / "ui-smoke-evidence.json").write_text(
                 json.dumps(evidence, indent=2), encoding="utf-8"
             )
+            print(json.dumps(evidence, sort_keys=True))
             qt_app.exit(1 if failure else 0)
 
         def capture(index: int = 0) -> None:
-            if index >= len(NAVIGATION):
+            if index >= len(frames):
                 finish()
                 return
             try:
-                page = NAVIGATION[index]
+                variant, width, height, page = frames[index]
+                if not isinstance(root, QQuickWindow):
+                    raise TypeError("QML root is not a QQuickWindow")
+                root.resize(width, height)
                 controller.navigate(page)
             except Exception as error:
                 failure.append(str(error))
@@ -85,13 +111,25 @@ def run_desktop(
 
             def grab_settled_frame() -> None:
                 try:
-                    if not isinstance(root, QQuickWindow):
-                        raise TypeError("QML root is not a QQuickWindow")
                     image = root.grabWindow()
-                    safe_name = page.lower().replace(" ", "-") + ".png"
+                    safe_name = (
+                        variant
+                        + "-"
+                        + page.lower().replace(" ", "-")
+                        + ".png"
+                    )
                     if image.isNull() or not image.save(str(target / safe_name)):
                         raise OSError(f"could not save rendered page: {page}")
-                    captured.append(page)
+                    captured.append(f"{variant}:{page}")
+                    captured_frames.append(
+                        {
+                            "page": page,
+                            "variant": variant,
+                            "width": width,
+                            "height": height,
+                            "file": safe_name,
+                        }
+                    )
                 except Exception as error:
                     failure.append(str(error))
                     finish()
@@ -107,9 +145,12 @@ def run_desktop(
             failure.append("UI smoke timed out")
             finish()
 
-        QTimer.singleShot(15_000, timeout)
+        QTimer.singleShot(30_000, timeout)
         QTimer.singleShot(350, capture)
-    return int(qt_app.exec())
+    try:
+        return int(qt_app.exec())
+    finally:
+        resources.close()
 
 
 __all__ = ["run_desktop"]

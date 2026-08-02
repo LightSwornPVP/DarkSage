@@ -772,7 +772,21 @@ class KeeperExecutiveDesktop(_LegacyProductDesktop):
         )
 
     def _render_provider_boundaries(self, view: ProductViewModel) -> None:
+        host = view.provider_host
         lines = [
+            "KEEPER PROVIDER HOST",
+            (
+                f"{host.get('state', 'NOT_CONFIGURED')}  •  "
+                f"protocol {host.get('protocol') or 'NOT REPORTED'}  •  "
+                f"provider {host.get('provider_state', 'UNAVAILABLE')}  •  "
+                f"execution {host.get('execution_state', 'IDLE')}  •  "
+                f"usage {host.get('usage_state', 'UNAVAILABLE')}"
+            ),
+            (
+                "Founder action: "
+                + str(host.get("founder_action_required") or "NONE")
+            ),
+            "",
             "PROVIDER / ACCOUNT DECLARATIONS",
             *[
                 (
@@ -780,6 +794,14 @@ class KeeperExecutiveDesktop(_LegacyProductDesktop):
                     f"  \u2022  cost {card['cost_mode'] or 'UNDECLARED'}"
                     f"  \u2022  privacy {card['privacy'] or 'UNDECLARED'}"
                     f"  \u2022  {len(card['sessions'])} session(s)"
+                    f"\n    Auth {card['authentication_mode'] or 'UNDECLARED'}"
+                    f"  \u2022  billing {card['billing_mode'] or 'UNDECLARED'}"
+                    f"  \u2022  efforts {', '.join(card['effort_levels']) or 'NONE'}"
+                    f"  \u2022  models {', '.join(card['model_allowlist']) or 'NONE'}"
+                    f"\n    Usage {card['usage_state']}"
+                    f"  \u2022  reviewer {card['reviewer_status']}"
+                    f"  \u2022  API billing {card['api_billing']}"
+                    f"  \u2022  paid fallback {card['paid_fallback']}"
                 )
                 for card in view.provider_cards
             ],

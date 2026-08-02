@@ -231,6 +231,9 @@ class PilotConversationExecutive:
             "active_charter": (
                 charter.to_dict() if charter is not None else None
             ),
+            "task_status": tuple(
+                task.to_dict() for task in self.repository.tasks(project_id)
+            ),
         }
 
 
