@@ -1023,3 +1023,83 @@ def test_enrollment_downgrade_and_service_identity_mismatch_reject(
         coordinator.begin(
             {"proposal": changed, "founder_capability": _capability(changed)}, SID
         )
+
+
+def test_packaged_cli_exposes_supported_enrollment_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from keeper.provider_host import cli
+
+    calls: list[tuple[str, object]] = []
+
+    class EnrollmentSurface:
+        def enroll(self, *, generation: int) -> dict[str, object]:
+            calls.append(("enroll", generation))
+            return {"state": "ACTIVE"}
+
+        def resume_authorization(self) -> dict[str, object]:
+            calls.append(("resume", None))
+            return {"state": "ACTIVE"}
+
+        def reconcile(self) -> dict[str, object]:
+            calls.append(("reconcile", None))
+            return {"state": "ACTIVE"}
+
+        def reconcile_expired(self, enrollment_id: str) -> dict[str, object]:
+            calls.append(("expired", enrollment_id))
+            return {"state": "EXPIRED"}
+
+        def revoke(
+            self,
+            *,
+            enrollment_id: str,
+            receipt_digest: str,
+            generation: int,
+        ) -> dict[str, object]:
+            calls.append(
+                ("revoke", (enrollment_id, receipt_digest, generation))
+            )
+            return {"state": "REVOKED"}
+
+    monkeypatch.setattr(cli, "_enrollment_client_factory", EnrollmentSurface)
+    assert cli.main(["enroll", "--generation", "1"]) == 0
+    assert cli.main(["resume-enrollment"]) == 0
+    assert cli.main(["reconcile-enrollment"]) == 0
+    assert cli.main(
+        ["reconcile-expired-enrollment", "--enrollment-id", "enrollment-1"]
+    ) == 0
+    digest = "a" * 64
+    assert cli.main(
+        [
+            "revoke-enrollment",
+            "--enrollment-id",
+            "enrollment-1",
+            "--receipt-digest",
+            digest,
+            "--generation",
+            "2",
+        ]
+    ) == 0
+    assert calls == [
+        ("enroll", 1),
+        ("resume", None),
+        ("reconcile", None),
+        ("expired", "enrollment-1"),
+        ("revoke", ("enrollment-1", digest, 2)),
+    ]
+    assert '"state": "ACTIVE"' in capsys.readouterr().out
+
+
+def test_production_enrollment_cli_fails_closed_on_factory_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from keeper.provider_host import cli
+
+    def unavailable() -> ProviderHostEnrollmentClient:
+        raise PermissionError("exact production enrollment unavailable")
+
+    monkeypatch.setattr(cli, "_enrollment_client_factory", unavailable)
+    assert cli.main(["enroll", "--generation", "1"]) == 2
+    assert "exact production enrollment unavailable" in capsys.readouterr().err

@@ -131,6 +131,22 @@ per-user Startup gate. Host enrollment never creates a provider binding.
 Registration and qualification remain later Authority-owned operations, and the
 Host reports `NO_QUALIFIED_PROVIDERS` until exact qualification is durably bound.
 
+The installed Host executable owns the supported production enrollment surface;
+no protected configuration file is edited by hand. After the matching protocol-7
+Authority update is healthy, the Founder runs:
+
+```powershell
+KeeperProviderHost.exe enrollment-status
+KeeperProviderHost.exe enroll --generation 1
+```
+
+`enroll` displays the normal Windows Founder credential dialog and then performs
+the proposal/grant/proof/receipt exchange through the authenticated Authority
+pipe. Interrupted flows resume only through `resume-enrollment` or
+`reconcile-enrollment`. Revocation requires the exact enrollment ID, receipt
+digest, and next generation through `revoke-enrollment`; arbitrary receipt or
+configuration input is not accepted.
+
 All source verification uses disposable `C:\tmp` roots. Real installation,
 Startup creation, Authority update/restart, Founder enrollment, Codex
 registration/qualification, and any model execution remain distinct live

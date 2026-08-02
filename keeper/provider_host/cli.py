@@ -6,8 +6,14 @@ import json
 import secrets
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
+from keeper.authority_service.client import ProductionAuthorityServiceClient
+from keeper.authority_service.core import SERVICE_VERSION
+from keeper.authority_service.store import SERVICE_SCHEMA_VERSION
+from keeper.executive.founder_auth import ProductionFounderAuthenticator
+from keeper.provider_host.bootstrap import build_production_bootstrap
+from keeper.provider_host.enrollment_client import ProviderHostEnrollmentClient
 from keeper.provider_host.identity import PipePeerIdentity, UserBinding, current_user_binding
 from keeper.provider_host.enrollment import (
     validate_enrollment_receipt,
@@ -23,6 +29,9 @@ from keeper.provider_host.windows_process import (
     CodexSetupRunner,
     ProviderProcessLauncher,
 )
+
+
+_enrollment_client_factory: Callable[[], ProviderHostEnrollmentClient] | None = None
 
 
 def parser() -> argparse.ArgumentParser:
@@ -45,6 +54,17 @@ def parser() -> argparse.ArgumentParser:
     uninstall = commands.add_parser("uninstall-preserve")
     uninstall.add_argument("--install-root", type=Path, required=True)
     uninstall.add_argument("--startup-root", type=Path, required=True)
+    commands.add_parser("enrollment-status")
+    enroll = commands.add_parser("enroll")
+    enroll.add_argument("--generation", type=int, required=True)
+    commands.add_parser("resume-enrollment")
+    commands.add_parser("reconcile-enrollment")
+    expired = commands.add_parser("reconcile-expired-enrollment")
+    expired.add_argument("--enrollment-id", required=True)
+    revoke = commands.add_parser("revoke-enrollment")
+    revoke.add_argument("--enrollment-id", required=True)
+    revoke.add_argument("--receipt-digest", required=True)
+    revoke.add_argument("--generation", type=int, required=True)
     return result
 
 
@@ -81,38 +101,120 @@ def main(arguments: Sequence[str] | None = None) -> int:
             server.serve_forever()
             runtime.logoff()
             return 0
+        if command == "enrollment-status":
+            authority = ProductionAuthorityServiceClient()
+            identity = authority.require_live_identity()
+            status_value = {
+                "authority_identity": {
+                    "protocol_version": identity["protocol_version"],
+                    "schema_version": identity["schema_version"],
+                    "service_key_id": identity["service_key_id"],
+                    "service_version": identity["service_version"],
+                },
+                "enrollment": authority.provider_host_enrollment_status(),
+            }
+            print(json.dumps(status_value, indent=2, sort_keys=True))
+            return 0
+        if command in {
+            "enroll",
+            "resume-enrollment",
+            "reconcile-enrollment",
+            "reconcile-expired-enrollment",
+            "revoke-enrollment",
+        }:
+            client = _production_enrollment_client()
+            if command == "enroll":
+                enrollment_value = client.enroll(generation=options.generation)
+            elif command == "resume-enrollment":
+                enrollment_value = client.resume_authorization()
+            elif command == "reconcile-enrollment":
+                enrollment_value = client.reconcile()
+            elif command == "reconcile-expired-enrollment":
+                enrollment_value = client.reconcile_expired(options.enrollment_id)
+            else:
+                enrollment_value = client.revoke(
+                    enrollment_id=options.enrollment_id,
+                    receipt_digest=options.receipt_digest,
+                    generation=options.generation,
+                )
+            print(json.dumps(enrollment_value, indent=2, sort_keys=True))
+            return 0
         installer = ProviderHostInstaller(
             options.install_root, options.startup_root
         )
         if command == "install":
-            value: object = installer.install(
+            lifecycle_value: object = installer.install(
                 options.artifact,
                 version=options.version,
                 expected_package_sha256=options.package_sha256,
             )
         elif command == "repair":
-            value = installer.repair(
+            lifecycle_value = installer.repair(
                 options.artifact,
                 expected_package_sha256=options.package_sha256,
             )
         elif command == "update":
-            value = installer.update(
+            lifecycle_value = installer.update(
                 options.artifact,
                 version=options.version,
                 expected_package_sha256=options.package_sha256,
                 drain=lambda: None,
             )
         elif command == "rollback":
-            value = installer.rollback(drain=lambda: None)
+            lifecycle_value = installer.rollback(drain=lambda: None)
         elif command == "uninstall-preserve":
-            value = installer.uninstall_preserving_data(drain=lambda: None)
+            lifecycle_value = installer.uninstall_preserving_data(drain=lambda: None)
         else:
             raise ValueError("Provider Host command is unsupported")
-        print(json.dumps(_json_value(value), indent=2, sort_keys=True))
+        print(json.dumps(_json_value(lifecycle_value), indent=2, sort_keys=True))
         return 0
     except (FileNotFoundError, OSError, PermissionError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+
+
+def _production_enrollment_client() -> ProviderHostEnrollmentClient:
+    if _enrollment_client_factory is not None:
+        return _enrollment_client_factory()
+    authority = ProductionAuthorityServiceClient()
+    diagnostics = authority.require_live_identity()
+    if (
+        diagnostics.get("service_version") != SERVICE_VERSION
+        or diagnostics.get("schema_version") != SERVICE_SCHEMA_VERSION
+    ):
+        raise PermissionError(
+            "Provider Host enrollment requires the exact matching KeeperAuthority"
+        )
+    binding = current_user_binding()
+    if str(diagnostics.get("client_sid", "")).casefold() != binding.user_sid.casefold():
+        raise PermissionError("Provider Host enrollment client identity differs")
+    profile = Path(binding.profile_path).resolve(strict=True)
+    installer = ProviderHostInstaller(
+        profile
+        / "AppData"
+        / "Local"
+        / "Programs"
+        / "DarkSage"
+        / "KeeperProviderHost",
+        profile
+        / "AppData"
+        / "Roaming"
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup",
+        owner_sid=binding.user_sid,
+    )
+    bootstrap = build_production_bootstrap(installer, diagnostics)
+    authenticator = ProductionFounderAuthenticator(
+        installer.state / "founder-auth" / "proof-key.dpapi"
+    )
+    return ProviderHostEnrollmentClient(
+        authority=authority,
+        authenticator=authenticator,
+        bootstrap=bootstrap,
+    )
 
 
 def _build_runtime(config_path: Path) -> tuple[KeeperProviderHost, ProviderHostServer]:
