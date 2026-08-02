@@ -6,7 +6,7 @@ import secrets
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 import keeper.authority_service.client as authority_client_module
 from keeper.authority_service.client import (
@@ -80,6 +80,8 @@ class AuthorityExecutionPlan:
     founder_authenticated_session_id: str
     founder_principal_sid: str
     reservation_payload: dict[str, Any]
+    reasoning_level: str = "medium"
+    subscription_contract: bool = False
 
     def binding(self) -> dict[str, Any]:
         value = asdict(self)
@@ -403,7 +405,14 @@ class AuthorityBackedSpecialistGateway:
             model_id = registration.get("model_or_service_identity")
             independence = registration.get("independence_classification")
             effort_levels = registration.get("effort_levels")
+            role_eligibility = registration.get("role_eligibility")
             pricing = registration.get("pricing_authority")
+            pricing_core_fields = {
+                "pricing_identity", "pricing_version", "currency",
+                "estimated_cost", "maximum_cost", "billing_unit",
+                "included_plan", "marginally_free", "quoted_at",
+                "expires_at", "source", "cost_tier",
+            }
             if (
                 not isinstance(capabilities, list)
                 or not capabilities
@@ -417,13 +426,10 @@ class AuthorityBackedSpecialistGateway:
                 or not independence
                 or not isinstance(effort_levels, list)
                 or not effort_levels
+                or not isinstance(role_eligibility, list)
+                or not role_eligibility
                 or not isinstance(pricing, dict)
-                or set(pricing) != {
-                    "pricing_identity", "pricing_version", "currency",
-                    "estimated_cost", "maximum_cost", "billing_unit",
-                    "included_plan", "marginally_free", "quoted_at",
-                    "expires_at", "source", "cost_tier",
-                }
+                or not pricing_core_fields.issubset(pricing)
             ):
                 continue
             try:
@@ -451,6 +457,16 @@ class AuthorityBackedSpecialistGateway:
                     str(pricing["quoted_at"]),
                     str(pricing["expires_at"]),
                     str(pricing["source"]),
+                    (
+                        str(pricing["billing_mode"])
+                        if pricing.get("billing_mode") is not None
+                        else None
+                    ),
+                    pricing.get("incremental_charge_authorized") is True,
+                    pricing.get("api_billing_authorized") is True,
+                    pricing.get("paid_fallback_authorized") is True,
+                    pricing.get("capacity_bounded") is True,
+                    tuple(str(item) for item in role_eligibility),
                 )
             except (TypeError, ValueError):
                 continue
@@ -471,6 +487,7 @@ class AuthorityBackedSpecialistGateway:
         review_instructions: tuple[str, ...] = (),
         workspace: str | None = None,
         reservation_nonce: str | None = None,
+        reasoning_level: str | None = None,
     ) -> AuthorityExecutionPlan:
         key = (
             specialist.provider_id,
@@ -483,8 +500,51 @@ class AuthorityBackedSpecialistGateway:
                 "specialist identity did not come from current Authority state"
             )
         binding, registration = resolved
+        selected_effort = reasoning_level or (
+            "high"
+            if task.retry_count > 0
+            or not set(task.required_capabilities).isdisjoint(
+                {"architecture", "critical analysis", "security"}
+            )
+            else "medium"
+        )
+        if selected_effort not in specialist.effort_levels:
+            raise PermissionError(
+                "assignment effort is outside the qualified provider policy"
+            )
+        model_allowlist = registration.get("model_allowlist")
+        if (
+            isinstance(model_allowlist, list)
+            and specialist.model_id not in model_allowlist
+        ):
+            raise PermissionError(
+                "assignment model is outside the qualified provider policy"
+            )
         launch_task_id = task_id or task.task_id
         launch_role = role or task.role
+        raw_role = launch_role.casefold()
+        normalized_role = {
+            "author": "builder",
+            "implementer": "builder",
+            "executive_builder": "builder",
+            "executive_reviewer": "reviewer",
+            "executive_post_repair_reviewer": "post_repair_reviewer",
+        }.get(raw_role)
+        if normalized_role is None:
+            if "review" in raw_role:
+                normalized_role = "reviewer"
+            elif "repair" in raw_role:
+                normalized_role = "repairer"
+            else:
+                normalized_role = "builder"
+        role_eligibility = registration.get("role_eligibility")
+        if (
+            not isinstance(role_eligibility, list)
+            or normalized_role not in role_eligibility
+        ):
+            raise PermissionError(
+                "assignment role is outside the qualified provider policy"
+            )
         if reservation_nonce is not None and (
             len(reservation_nonce) != 32
             or any(
@@ -582,6 +642,9 @@ class AuthorityBackedSpecialistGateway:
             "task_revision": task.revision,
             "stage_id": task.stage_id,
             "role": launch_role,
+            "model_id": specialist.model_id,
+            "prompt_digest": instructions_digest,
+            "reasoning_level": selected_effort,
             "registration_id": binding.registration_id,
             "qualification_id": binding.qualification_id,
             "workspace": selected_workspace,
@@ -632,7 +695,9 @@ class AuthorityBackedSpecialistGateway:
             "stderr_path": str(stderr_path),
             "workspace": selected_workspace,
             "timeout_seconds": 3600,
-            "reasoning_level": "high",
+            "reasoning_level": selected_effort,
+            "model_id": specialist.model_id,
+            "prompt_digest": instructions_digest,
             "environment": {
                 "KEEPER_EXECUTIVE_BINDING_DIGEST": _digest(binding_material)
             },
@@ -652,6 +717,27 @@ class AuthorityBackedSpecialistGateway:
             "charter_id": task.charter_id,
             "charter_revision": task.charter_revision,
             "task_revision": task.revision,
+            "workflow_id": task.workflow_id,
+            "work_item_id": task.task_id,
+            "assignment_id": launch_task_id,
+            "provider_account_id": (
+                "chatgpt-subscription:"
+                + str(
+                    registration.get("subscription_account_binding", {}).get(
+                        "account_identity_digest", ""
+                    )
+                )
+            ),
+            "workspace_identity": _digest(
+                {"project_id": task.project_id, "workspace": selected_workspace}
+            ),
+            "workspace_reservation_id": _digest(
+                {
+                    "assignment_id": launch_task_id,
+                    "workspace": selected_workspace,
+                    "revision": task.revision,
+                }
+            ),
         }
         return AuthorityExecutionPlan(
             attempt_id,
@@ -687,6 +773,8 @@ class AuthorityBackedSpecialistGateway:
             charter.founder_authenticated_session_id,
             charter.founder_approval_identity,
             reservation_payload,
+            selected_effort,
+            registration.get("registration_schema_version") == 4,
         )
 
     def reserve(self, plan: AuthorityExecutionPlan) -> None:
@@ -701,6 +789,9 @@ class AuthorityBackedSpecialistGateway:
             or attempt.get("registration_id") != plan.registration_id
             or attempt.get("registration_digest")
             != plan.registration_digest
+            or attempt.get("model_id") != plan.model_id
+            or attempt.get("reasoning_level") != plan.reasoning_level
+            or attempt.get("prompt_digest") != plan.instructions_digest
             or attempt.get("task_id") != plan.task_id
             or attempt.get("stage_id") != plan.stage_id
             or attempt.get("role") != plan.role
@@ -720,6 +811,10 @@ class AuthorityBackedSpecialistGateway:
             != plan.founder_principal_sid
             or attempt.get("authorization_expires_at")
             != plan.authorization_expires_at
+            or attempt.get("workflow_id") != plan.workflow_id
+            or attempt.get("work_item_id")
+            != plan.reservation_payload.get("work_item_id")
+            or attempt.get("assignment_id") != plan.task_id
         ):
             raise PermissionError(
                 "Authority attempt reservation binding is invalid"
@@ -793,9 +888,12 @@ class AuthorityBackedSpecialistGateway:
     @staticmethod
     def plan_from_record(record: dict[str, Any]) -> AuthorityExecutionPlan:
         fields = AuthorityExecutionPlan.__dataclass_fields__
-        return AuthorityExecutionPlan(
-            **{name: record[name] for name in fields}
-        )
+        values = {
+            name: record[name] for name in fields if name in record
+        }
+        values.setdefault("reasoning_level", "medium")
+        values.setdefault("subscription_contract", False)
+        return AuthorityExecutionPlan(**cast(Any, values))
 
     def _authenticated_result(
         self,
@@ -812,6 +910,18 @@ class AuthorityBackedSpecialistGateway:
             or completion.get("role") != plan.role
             or completion.get("registration_id") != plan.registration_id
             or completion.get("provider_instance_id") != plan.session_id
+            or (
+                plan.subscription_contract
+                and (
+                    completion.get("model_id") != plan.model_id
+                    or completion.get("reasoning_level")
+                    != plan.reasoning_level
+                    or completion.get("prompt_digest")
+                    != plan.instructions_digest
+                    or completion.get("execution_prompt_digest")
+                    != plan.instructions_digest
+                )
+            )
             or not isinstance(
                 completion.get("provider_evidence_digest"), str
             )
@@ -836,6 +946,7 @@ class AuthorityBackedSpecialistGateway:
             "terminated": "TERMINATED",
             "launch_failed": "LAUNCH_FAILED",
             "uncertain": "UNCERTAIN",
+            "waiting_for_usage_reset": "WAITING_FOR_USAGE_RESET",
         }.get(str(completion.get("normalized_result", "")).casefold(), "UNCERTAIN")
         stdout_path = Path(str(plan.reservation_payload["stdout_path"]))
         stderr_path = Path(str(plan.reservation_payload["stderr_path"]))
@@ -899,6 +1010,13 @@ class AuthorityBackedSpecialistGateway:
             != plan.executable
             or registration.get("executable_sha256")
             != plan.executable_digest
+            or plan.reasoning_level not in registration.get(
+                "effort_levels", []
+            )
+            or (
+                isinstance(registration.get("model_allowlist"), list)
+                and plan.model_id not in registration["model_allowlist"]
+            )
         ):
             raise PermissionError(
                 "Authority provider registration changed before launch"

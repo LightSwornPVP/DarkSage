@@ -405,6 +405,29 @@ class ExecutiveRuntime:
         except BaseException as error:
             current = self.__repository.task(candidate.task_id)
             if (
+                current.authority_attempt_id is not None
+                and self.__gateway.attempt_state(
+                    current.authority_attempt_id
+                )
+                == "WAITING_FOR_USAGE_RESET"
+                and current.revision == owned.revision
+                and current.status
+                in {TaskStatus.EXECUTION_STARTED, TaskStatus.RUNNING}
+            ):
+                try:
+                    self.__repository.mark_execution_waiting_for_usage(
+                        current.task_id,
+                        expected_revision=current.revision,
+                        reason=str(error),
+                    )
+                except PermissionError:
+                    pass
+                return self._pause(
+                    self.__repository.project(project_id),
+                    ExecutiveState.WAITING_FOR_USAGE_RESET,
+                    "Provider usage is exhausted; automatic retry and fallback are disabled.",
+                )
+            if (
                 current.revision == owned.revision
                 and current.status == TaskStatus.LAUNCH_CLAIMED
                 and current.authority_attempt_id is not None
@@ -460,6 +483,12 @@ class ExecutiveRuntime:
                 return self.__repository.project(project_id)
             raise
         self._record_author_evidence(imported, result.evidence_digest)
+        if imported.status == TaskStatus.WAITING:
+            return self._pause(
+                self.__repository.project(project_id),
+                ExecutiveState.WAITING_FOR_USAGE_RESET,
+                "Provider usage is exhausted; automatic retry and fallback are disabled.",
+            )
         if imported.status != TaskStatus.REVIEW_REQUIRED:
             return self._pause(
                 self.__repository.project(project_id),
@@ -752,6 +781,28 @@ class ExecutiveRuntime:
         completion = self.__gateway.reconcile(plan)
         if completion is None:
             state = self.__gateway.attempt_state(plan.authority_attempt_id)
+            if (
+                state == "WAITING_FOR_USAGE_RESET"
+                and task.status
+                in {
+                    TaskStatus.EXECUTION_STARTED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.UNCERTAIN,
+                }
+            ):
+                try:
+                    self.__repository.mark_execution_waiting_for_usage(
+                        task.task_id,
+                        expected_revision=task.revision,
+                        reason="Authority preserved a pre-provider usage pause.",
+                    )
+                except PermissionError:
+                    pass
+                return self._pause(
+                    project,
+                    ExecutiveState.WAITING_FOR_USAGE_RESET,
+                    "Provider usage is exhausted; automatic retry and fallback are disabled.",
+                )
             if (
                 state == "RESERVED"
                 and task.status

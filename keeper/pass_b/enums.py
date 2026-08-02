@@ -17,6 +17,7 @@ class SessionModel(StrEnum):
 class CostMode(StrEnum):
     FREE = "FREE"
     INCLUDED = "INCLUDED"
+    INCLUDED_SUBSCRIPTION = "INCLUDED_SUBSCRIPTION"
     PAID = "PAID"
 
 

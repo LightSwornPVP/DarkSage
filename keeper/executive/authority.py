@@ -483,6 +483,22 @@ def _trusted_provider_cost(specialist: SpecialistProfile) -> float:
         raise PermissionError("trusted provider quote is expired")
     if specialist.currency is None:
         raise PermissionError("trusted provider pricing currency is unavailable")
+    if specialist.billing_mode == "included-subscription":
+        if (
+            specialist.included_plan is not True
+            or specialist.marginally_free is not False
+            or specialist.incremental_charge_authorized is not False
+            or specialist.api_billing_authorized is not False
+            or specialist.paid_fallback_authorized is not False
+            or specialist.capacity_bounded is not True
+            or specialist.cost_tier != 0
+            or specialist.estimated_cost != 0
+            or specialist.maximum_cost != 0
+        ):
+            raise PermissionError(
+                "included-subscription pricing is contradictory"
+            )
+        return 0.0
     if specialist.included_plan and specialist.marginally_free:
         if specialist.cost_tier > 0:
             raise PermissionError(

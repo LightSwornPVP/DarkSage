@@ -229,6 +229,10 @@ def parser() -> argparse.ArgumentParser:
         "authority-backup", help="backup protected authority metadata"
     )
     authority_backup.add_argument("destination", type=Path)
+    provider_host = commands.add_parser(
+        "provider-host", help="run or manage the per-user Keeper Provider Host"
+    )
+    provider_host.add_argument("provider_host_arguments", nargs=argparse.REMAINDER)
     return result
 
 
@@ -236,6 +240,10 @@ def main(arguments: list[str] | None = None) -> int:
     options = parser().parse_args(arguments)
     root = options.root.resolve()
     try:
+        if options.command == "provider-host":
+            from keeper.provider_host.cli import main as provider_host_main
+
+            return provider_host_main(options.provider_host_arguments)
         if options.command == "authority-install":
             value = service_install.AuthorityServiceInstaller(root).install()
             print(json.dumps(value, indent=2, sort_keys=True))

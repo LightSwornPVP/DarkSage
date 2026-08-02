@@ -168,18 +168,53 @@ class KeeperApplication:
         project_types: list[str],
         effort_levels: list[str],
         pricing_authority: dict[str, Any],
+        expected_executable_sha256: str | None = None,
+        expected_executable_size: int | None = None,
+        expected_version: str | None = None,
+        model_allowlist: list[str] | None = None,
+        model_revalidation_expires_at: str | None = None,
+        authentication_policy: dict[str, Any] | None = None,
+        usage_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if provider_id not in {"codex", "claude"} or not authorizer.strip():
             raise PermissionError(
                 "provider registration requires a supported identity and authorizer"
             )
+        declarations: dict[str, Any] = {
+            "executive_capabilities": executive_capabilities,
+            "project_types": project_types,
+            "effort_levels": effort_levels,
+            "pricing_authority": pricing_authority,
+        }
+        extended = (
+            model_allowlist,
+            expected_executable_sha256,
+            expected_executable_size,
+            expected_version,
+            model_revalidation_expires_at,
+            authentication_policy,
+            usage_policy,
+        )
+        if any(item is not None for item in extended):
+            if any(item is None for item in extended):
+                raise ValueError(
+                    "Codex subscription registration declaration is incomplete"
+                )
+            declarations.update(
+                {
+                    "model_allowlist": model_allowlist,
+                    "expected_executable_sha256": expected_executable_sha256,
+                    "expected_executable_size": expected_executable_size,
+                    "expected_version": expected_version,
+                    "model_revalidation_expires_at": (
+                        model_revalidation_expires_at
+                    ),
+                    "authentication_policy": authentication_policy,
+                    "usage_policy": usage_policy,
+                }
+            )
         protected = self.authority.register_provider(
-            provider_id,
-            executable,
-            executive_capabilities=executive_capabilities,
-            project_types=project_types,
-            effort_levels=effort_levels,
-            pricing_authority=pricing_authority,
+            provider_id, executable, **declarations
         )
         registration = protected.get("registration")
         if not isinstance(registration, dict):

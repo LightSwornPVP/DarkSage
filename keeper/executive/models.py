@@ -932,6 +932,12 @@ class SpecialistProfile(StrictRecord):
     quote_timestamp: str | None = None
     quote_expiration: str | None = None
     pricing_source: str | None = None
+    billing_mode: str | None = None
+    incremental_charge_authorized: bool = False
+    api_billing_authorized: bool = False
+    paid_fallback_authorized: bool = False
+    capacity_bounded: bool = False
+    role_eligibility: tuple[str, ...] = ()
 
     FIELDS = frozenset(
         {
@@ -942,6 +948,10 @@ class SpecialistProfile(StrictRecord):
             "currency", "estimated_cost", "maximum_cost", "billing_unit",
             "included_plan", "marginally_free", "quote_timestamp",
             "quote_expiration", "pricing_source",
+            "billing_mode", "incremental_charge_authorized",
+            "api_billing_authorized", "paid_fallback_authorized",
+            "capacity_bounded",
+            "role_eligibility",
         }
     )
 
@@ -969,11 +979,19 @@ class SpecialistProfile(StrictRecord):
             "included_plan": False, "marginally_free": False,
             "quote_timestamp": None, "quote_expiration": None,
             "pricing_source": None,
+            "billing_mode": None,
+            "incremental_charge_authorized": False,
+            "api_billing_authorized": False,
+            "paid_fallback_authorized": False,
+            "capacity_bounded": False,
+            "role_eligibility": (),
         }.items():
             normalized.setdefault(key, default)
         data = cls._validated_data(normalized)
         data["capabilities"] = tuple(data["capabilities"])
         data["project_types"] = tuple(data["project_types"])
+        data["effort_levels"] = tuple(data["effort_levels"])
+        data["role_eligibility"] = tuple(data["role_eligibility"])
         return cls(**data)
 
 

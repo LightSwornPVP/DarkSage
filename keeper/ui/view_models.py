@@ -40,6 +40,7 @@ class ProductViewModel:
     project_cards: tuple[dict[str, Any], ...]
     workflow_rows: tuple[dict[str, Any], ...]
     provider_cards: tuple[dict[str, Any], ...]
+    provider_host: dict[str, Any]
     usage_cards: tuple[dict[str, Any], ...]
     evidence_cards: tuple[dict[str, Any], ...]
     evidence_reference_cards: tuple[dict[str, Any], ...]
@@ -67,6 +68,16 @@ def build_product_view(
         raise ValueError("Sage presentation must remain authority-neutral")
 
     authority = _mapping(safety.get("authority"))
+    provider_host = _mapping(authority.get("provider_host"))
+    if not provider_host:
+        provider_host = {
+            "installed": False,
+            "online": False,
+            "state": "NOT_CONFIGURED",
+            "protocol_compatible": False,
+            "provider_state": "UNAVAILABLE",
+            "founder_action_required": "INSTALL_AND_ENROLL_PROVIDER_HOST",
+        }
     authority_state = str(authority.get("state", "NOT_CONFIGURED"))
     composition = str(
         authority.get("composition") or _composition_label(authority_state)
@@ -229,8 +240,31 @@ def build_product_view(
         for item in _rows(providers.get("accounts"))
     }
     sessions = _rows(providers.get("sessions"))
+    usage_pools = _rows(providers.get("usage_pools"))
+    waiting_provider_ids = {
+        str(item.get("provider_id"))
+        for item in _rows(control.get("waiting_for_usage_reset"))
+        if item.get("provider_id")
+    }
+    waiting_provider_ids.update(
+        str(item.get("provider_id"))
+        for item in _rows(executive.get("task_status"))
+        if (
+            item.get("provider_id")
+            and item.get("status") == "WAITING"
+            and item.get("result_disposition")
+            == "AUTHORITY_WAITING_FOR_USAGE_RESET"
+        )
+    )
     provider_cards = tuple(
-        _provider_card(item, accounts, sessions, composition)
+        _provider_card(
+            item,
+            accounts,
+            sessions,
+            usage_pools,
+            composition,
+            waiting_provider_ids,
+        )
         for item in _rows(providers.get("providers"))
     )
     usage_cards = tuple(
@@ -239,17 +273,26 @@ def build_product_view(
             "provider_id": item.get("provider_id"),
             "consumed": item.get("consumed"),
             "reserved": item.get("reserved"),
-            "remaining": item.get("remaining"),
+            "remaining": (
+                None
+                if str(item.get("provider_id")) in waiting_provider_ids
+                else item.get("remaining")
+            ),
             "reset_at": item.get("reset_at"),
-            "source": item.get("observation_source"),
+            "source": (
+                "KEEPER_EXECUTIVE_WAIT"
+                if str(item.get("provider_id")) in waiting_provider_ids
+                else item.get("observation_source")
+            ),
             "confidence": item.get("confidence"),
             "status": (
                 "WAITING_FOR_USAGE_RESET"
                 if item.get("exhausted")
+                or str(item.get("provider_id")) in waiting_provider_ids
                 else "AVAILABLE"
             ),
         }
-        for item in _rows(providers.get("usage_pools"))
+        for item in usage_pools
     )
 
     reviews = _rows(project.get("reviews"))
@@ -306,6 +349,11 @@ def build_product_view(
             "detail": authority,
         },
         {
+            "label": "KeeperProviderHost",
+            "value": str(provider_host.get("state", "NOT_CONFIGURED")),
+            "detail": provider_host,
+        },
+        {
             "label": "Delegated mode",
             "value": _grant_summary(grant_history),
             "detail": grant_history,
@@ -339,6 +387,8 @@ def build_product_view(
         ("Uncertain", str(uncertain_count)),
         ("Workspace conflicts", str(_workspace_conflicts(control))),
         ("KeeperAuthority", authority_state),
+        ("Provider Host", str(provider_host.get("state", "NOT_CONFIGURED"))),
+        ("Provider readiness", str(provider_host.get("provider_state", "UNAVAILABLE"))),
         ("Delegated mode", _active_grant_count(grant_history)),
     )
     normalized_sage = {
@@ -372,6 +422,7 @@ def build_product_view(
         project_cards=project_cards,
         workflow_rows=workflow_rows,
         provider_cards=provider_cards,
+        provider_host=provider_host,
         usage_cards=usage_cards,
         evidence_cards=evidence_cards,
         evidence_reference_cards=evidence_reference_cards,
@@ -465,7 +516,9 @@ def _provider_card(
     provider: dict[str, Any],
     accounts: dict[str, dict[str, Any]],
     sessions: list[dict[str, Any]],
+    usage_pools: list[dict[str, Any]],
     composition: str,
+    waiting_provider_ids: set[str],
 ) -> dict[str, Any]:
     provider_id = str(provider.get("provider_id", ""))
     matching_sessions = [
@@ -480,6 +533,14 @@ def _provider_card(
         {},
     )
     label = "MOCK" if provider.get("adapter_kind") == "local-mock" else composition
+    usage = next(
+        (
+            item
+            for item in usage_pools
+            if item.get("provider_id") == provider_id
+        ),
+        {},
+    )
     return {
         "provider_id": provider_id,
         "name": provider.get("display_name") or provider_id,
@@ -493,6 +554,45 @@ def _provider_card(
         "sessions": tuple(matching_sessions),
         "active_jobs": sum(int(item.get("active_assignments", 0)) for item in matching_sessions),
         "capacity": sum(int(item.get("concurrency_limit", 0)) for item in matching_sessions),
+        "authentication_mode": provider.get("authentication_mode"),
+        "billing_mode": provider.get("billing_mode"),
+        "effort_levels": tuple(provider.get("effort_levels") or ()),
+        "model_allowlist": tuple(provider.get("model_allowlist") or ()),
+        "qualification_expires_at": provider.get(
+            "model_revalidation_expires_at"
+        ) or provider.get("pricing_expires_at"),
+        "reviewer_eligible": provider.get("reviewer_eligible", True),
+        "reviewer_status": (
+            "AVAILABLE"
+            if provider.get("reviewer_eligible", True)
+            else "SEPARATE QUALIFIED REVIEWER REQUIRED"
+        ),
+        "api_billing": (
+            "ENABLED"
+            if provider.get("api_billing_authorized") is True
+            else "DISABLED"
+        ),
+        "paid_fallback": (
+            "ENABLED"
+            if provider.get("paid_fallback_authorized") is True
+            else "DISABLED"
+        ),
+        "usage_state": (
+            "WAITING_FOR_USAGE_RESET"
+            if usage.get("exhausted") is True
+            or provider_id in waiting_provider_ids
+            else ("UNKNOWN" if usage.get("remaining") is None else "AVAILABLE")
+        ),
+        "usage_remaining": (
+            None if provider_id in waiting_provider_ids else usage.get("remaining")
+        ),
+        "usage_reset_at": usage.get("reset_at"),
+        "usage_source": (
+            "KEEPER_EXECUTIVE_WAIT"
+            if provider_id in waiting_provider_ids
+            else usage.get("observation_source")
+        ),
+        "binary_state": provider.get("health", "UNAVAILABLE"),
     }
 
 

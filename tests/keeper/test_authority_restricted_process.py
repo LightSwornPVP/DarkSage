@@ -1,14 +1,959 @@
 from __future__ import annotations
 
+import ctypes
 import os
+import sys
+import threading
+from contextlib import contextmanager
+from ctypes import wintypes
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from keeper.authority_service.restricted_process import (
+    ProviderLaunchIdentityUncertain,
+    ProviderServiceIdentityUncertain,
+    WindowsSessionQueryResult,
+    WindowsSessionQueryStatus,
+    _create_process_with_bounded_restricted_impersonation,
+    authenticated_client_windows_session_state,
+    authenticated_named_pipe_client,
+    authenticated_named_pipe_client_token,
+    authenticated_profile_primary_token,
+    current_process_token,
+    impersonate_token,
+    profile_restricted_primary_token,
     restricted_current_process_token,
     run_restricted_process,
+    token_environment,
+    token_session_id,
+    token_user_sid_string,
+    windows_session_is_active,
 )
+import keeper.authority_service.restricted_process as restricted_process_module
+
+
+class _FakeWtsApi:
+    def __init__(
+        self,
+        *,
+        state: int = 0,
+        succeeds: bool = True,
+        error: int = 5,
+        size: int | None = None,
+        null_buffer: bool = False,
+        cleanup_fails: bool = False,
+        events: list[str] | None = None,
+    ) -> None:
+        self.state = wintypes.DWORD(state)
+        self.succeeds = succeeds
+        self.error = error
+        self.size = ctypes.sizeof(wintypes.DWORD) if size is None else size
+        self.null_buffer = null_buffer
+        self.cleanup_fails = cleanup_fails
+        self.freed = 0
+        self.events = events
+
+    def WTSQuerySessionInformationW(
+        self,
+        server: object,
+        session_id: int,
+        information_class: int,
+        output: Any,
+        size: Any,
+    ) -> bool:
+        assert getattr(server, "value", server) in {None, 0}
+        assert session_id == 1
+        assert information_class == 8
+        if self.events is not None:
+            self.events.append("query")
+        if not self.succeeds:
+            ctypes.set_last_error(self.error)
+            return False
+        ctypes.cast(size, ctypes.POINTER(wintypes.DWORD)).contents.value = self.size
+        if not self.null_buffer:
+            ctypes.cast(output, ctypes.POINTER(wintypes.LPVOID)).contents.value = (
+                ctypes.addressof(self.state)
+            )
+        return True
+
+    def WTSFreeMemory(self, buffer: Any) -> None:
+        assert ctypes.cast(buffer, wintypes.LPVOID).value == ctypes.addressof(
+            self.state
+        )
+        self.freed += 1
+        if self.events is not None:
+            self.events.append("free")
+        if self.cleanup_fails:
+            raise OSError("synthetic WTS cleanup failure")
+
+
+class _FakeWtsImpersonationAdvapi:
+    def __init__(
+        self,
+        *,
+        impersonate_result: bool = True,
+        revert_result: bool = True,
+        events: list[str] | None = None,
+    ) -> None:
+        self.impersonate_result = impersonate_result
+        self.revert_result = revert_result
+        self.events = events if events is not None else []
+        self.local = threading.local()
+
+    def OpenThreadToken(
+        self,
+        thread: int,
+        access: int,
+        open_as_self: bool,
+        output: Any,
+    ) -> bool:
+        del thread
+        assert access == 0x0008
+        assert open_as_self is True
+        self.events.append("verify")
+        if getattr(self.local, "impersonating", False):
+            ctypes.cast(output, ctypes.POINTER(wintypes.HANDLE)).contents.value = 97
+            return True
+        ctypes.set_last_error(1008)
+        return False
+
+    def ImpersonateNamedPipeClient(self, pipe: int) -> bool:
+        assert pipe == 11
+        self.events.append("impersonate")
+        if not self.impersonate_result:
+            ctypes.set_last_error(5)
+            return False
+        self.local.impersonating = True
+        return True
+
+    def RevertToSelf(self) -> bool:
+        self.events.append("revert")
+        if not self.revert_result:
+            ctypes.set_last_error(5)
+            return False
+        self.local.impersonating = False
+        return True
+
+
+def test_windows_session_query_distinguishes_active_and_api_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_api = _FakeWtsApi(state=0)
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: active_api)
+    active = windows_session_is_active(1)
+    assert active == WindowsSessionQueryResult(
+        WindowsSessionQueryStatus.ACTIVE, state=0
+    )
+    assert active_api.freed == 1
+
+    failed_api = _FakeWtsApi(succeeds=False, error=5)
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: failed_api)
+    failed = windows_session_is_active(1)
+    assert failed == WindowsSessionQueryResult(
+        WindowsSessionQueryStatus.QUERY_FAILED, win32_error=5
+    )
+    assert failed_api.freed == 0
+
+
+@pytest.mark.parametrize("state", range(1, 10))
+def test_windows_session_query_preserves_every_inactive_state(
+    monkeypatch: pytest.MonkeyPatch, state: int
+) -> None:
+    api = _FakeWtsApi(state=state)
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: api)
+    assert windows_session_is_active(1) == WindowsSessionQueryResult(
+        WindowsSessionQueryStatus.INACTIVE, state=state
+    )
+    assert api.freed == 1
+
+
+@pytest.mark.parametrize(
+    "api",
+    [
+        _FakeWtsApi(size=0),
+        _FakeWtsApi(size=8),
+        _FakeWtsApi(null_buffer=True),
+        _FakeWtsApi(state=10),
+        _FakeWtsApi(cleanup_fails=True),
+    ],
+    ids=["empty-size", "oversized", "null-buffer", "invalid-state", "cleanup"],
+)
+def test_windows_session_query_rejects_invalid_shape_or_cleanup(
+    monkeypatch: pytest.MonkeyPatch, api: _FakeWtsApi
+) -> None:
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: api)
+    assert windows_session_is_active(1) == WindowsSessionQueryResult(
+        WindowsSessionQueryStatus.QUERY_FAILED, win32_error=13
+    )
+
+
+def test_authenticated_client_wts_query_has_exact_impersonation_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    advapi = _FakeWtsImpersonationAdvapi(events=events)
+    wts = _FakeWtsApi(state=0, events=events)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi)
+    monkeypatch.setattr(
+        restricted_process_module, "_kernel32", lambda: _FakeKernel32()
+    )
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: wts)
+
+    result = authenticated_client_windows_session_state(11, 1)
+
+    assert result.is_active
+    assert events == [
+        "verify",
+        "verify",
+        "impersonate",
+        "query",
+        "free",
+        "revert",
+        "verify",
+        "verify",
+    ]
+
+
+def test_authenticated_client_wts_query_fails_closed_on_impersonation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    advapi = _FakeWtsImpersonationAdvapi(
+        impersonate_result=False, events=events
+    )
+    wts = _FakeWtsApi(state=0, events=events)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi)
+    monkeypatch.setattr(
+        restricted_process_module, "_kernel32", lambda: _FakeKernel32()
+    )
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: wts)
+
+    with pytest.raises(PermissionError, match="WTS impersonation failed"):
+        authenticated_client_windows_session_state(11, 1)
+
+    assert "query" not in events
+    assert events[-1] == "verify"
+
+
+def test_authenticated_client_wts_query_reports_query_failure_after_reversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    advapi = _FakeWtsImpersonationAdvapi(events=events)
+    wts = _FakeWtsApi(succeeds=False, error=5, events=events)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi)
+    monkeypatch.setattr(
+        restricted_process_module, "_kernel32", lambda: _FakeKernel32()
+    )
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: wts)
+
+    result = authenticated_client_windows_session_state(11, 1)
+
+    assert result == WindowsSessionQueryResult(
+        WindowsSessionQueryStatus.QUERY_FAILED, win32_error=5
+    )
+    assert events.index("query") < events.index("revert")
+    assert events[-1] == "verify"
+
+
+def test_authenticated_client_wts_query_abandons_worker_on_reversion_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    advapi = _FakeWtsImpersonationAdvapi(revert_result=False, events=events)
+    wts = _FakeWtsApi(state=0, events=events)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi)
+    monkeypatch.setattr(
+        restricted_process_module, "_kernel32", lambda: _FakeKernel32()
+    )
+    monkeypatch.setattr(restricted_process_module, "_wtsapi32", lambda: wts)
+
+    with pytest.raises(
+        ProviderLaunchIdentityUncertain, match="reversion could not be verified"
+    ):
+        authenticated_client_windows_session_state(11, 1)
+
+    assert events.count("query") == 1
+    assert events.count("revert") == 1
+
+
+class _FakeKernel32:
+    def __init__(self) -> None:
+        self.closed: list[int] = []
+
+    def CloseHandle(self, handle: object) -> bool:
+        value = getattr(handle, "value", handle)
+        assert isinstance(value, int)
+        self.closed.append(value)
+        return True
+
+    def GetCurrentThread(self) -> int:
+        return 7
+
+
+class _FakeAdvapi32:
+    def __init__(
+        self,
+        *,
+        duplicate_result: bool = True,
+        set_session_result: bool = True,
+    ) -> None:
+        self.duplicate_result = duplicate_result
+        self.set_session_result = set_session_result
+        self.requested_access: int | None = None
+        self.source_token: int | None = None
+        self.selected_session: int | None = None
+
+    def DuplicateTokenEx(
+        self,
+        source: object,
+        access: int,
+        attributes: object,
+        impersonation_level: int,
+        token_type: int,
+        output: Any,
+    ) -> bool:
+        del attributes, impersonation_level, token_type
+        source_value = getattr(source, "value", source)
+        assert isinstance(source_value, int)
+        self.source_token = source_value
+        self.requested_access = access
+        if not self.duplicate_result:
+            return False
+        ctypes.cast(output, ctypes.POINTER(wintypes.HANDLE)).contents.value = 84
+        return True
+
+    def SetTokenInformation(
+        self,
+        token: object,
+        token_class: int,
+        value: Any,
+        size: int,
+    ) -> bool:
+        del token, size
+        assert token_class == 12
+        self.selected_session = ctypes.cast(
+            value, ctypes.POINTER(wintypes.DWORD)
+        ).contents.value
+        return self.set_session_result
+
+
+class _FakeUserenv:
+    def __init__(self, *, succeeds: bool) -> None:
+        self.succeeds = succeeds
+        self.destroyed: list[int] = []
+        self.buffer = ctypes.create_unicode_buffer(
+            "USERPROFILE=C:\\Users\\Founder\0PATH=C:\\bin\0\0"
+        )
+
+    def CreateEnvironmentBlock(
+        self, output: Any, token: int, inherit: bool
+    ) -> bool:
+        del token, inherit
+        if not self.succeeds:
+            return False
+        ctypes.cast(output, ctypes.POINTER(wintypes.LPVOID)).contents.value = (
+            ctypes.addressof(self.buffer)
+        )
+        return True
+
+    def DestroyEnvironmentBlock(self, block: object) -> bool:
+        value = getattr(block, "value", block)
+        assert isinstance(value, int)
+        self.destroyed.append(value)
+        return True
+
+
+class _FakeClientTokenAdvapi32:
+    def __init__(
+        self, *, level: int = 2, revert_result: bool = True
+    ) -> None:
+        self.level = level
+        self.revert_result = revert_result
+        self.requested_access: int | None = None
+        self.revert_calls = 0
+        self.logged_on_calls = 0
+
+    def ImpersonateNamedPipeClient(self, pipe: int) -> bool:
+        assert pipe == 11
+        return True
+
+    def OpenThreadToken(
+        self,
+        thread: int,
+        access: int,
+        open_as_self: bool,
+        output: Any,
+    ) -> bool:
+        assert thread == 7
+        assert open_as_self is True
+        self.requested_access = access
+        ctypes.cast(output, ctypes.POINTER(wintypes.HANDLE)).contents.value = 42
+        return True
+
+    def GetTokenInformation(
+        self,
+        token: int,
+        information_class: int,
+        output: Any,
+        length: int,
+        needed: Any,
+    ) -> bool:
+        assert token == 42
+        assert information_class == 9
+        assert length == ctypes.sizeof(wintypes.DWORD)
+        ctypes.cast(output, ctypes.POINTER(wintypes.DWORD)).contents.value = (
+            self.level
+        )
+        ctypes.cast(needed, ctypes.POINTER(wintypes.DWORD)).contents.value = length
+        return True
+
+    def ImpersonateLoggedOnUser(self, token: int) -> bool:
+        assert token == 42
+        self.logged_on_calls += 1
+        return True
+
+    def RevertToSelf(self) -> bool:
+        self.revert_calls += 1
+        return self.revert_result
+
+
+class _FakeLaunchKernel32:
+    def __init__(self) -> None:
+        self.closed: list[int] = []
+        self.terminated: list[int] = []
+        self.waited: list[int] = []
+
+    def GetCurrentThread(self) -> int:
+        return threading.get_ident()
+
+    def CloseHandle(self, handle: object) -> bool:
+        value = getattr(handle, "value", handle)
+        assert isinstance(value, int)
+        self.closed.append(value)
+        return True
+
+    def TerminateProcess(self, process: int, exit_code: int) -> bool:
+        assert exit_code == 125
+        self.terminated.append(process)
+        return True
+
+    def WaitForSingleObject(self, process: int, timeout: int) -> int:
+        assert timeout == 10_000
+        self.waited.append(process)
+        return 0
+
+
+class _FakeLaunchAdvapi32:
+    def __init__(
+        self,
+        *,
+        impersonate_result: bool = True,
+        revert_result: bool = True,
+        worker_verification_error: int | None = None,
+        service_post_verification_error: int | None = None,
+    ) -> None:
+        self.impersonate_result = impersonate_result
+        self.revert_result = revert_result
+        self.worker_verification_error = worker_verification_error
+        self.service_post_verification_error = service_post_verification_error
+        self.local = threading.local()
+        self.worker_thread_id: int | None = None
+        self.service_thread_id = threading.get_ident()
+        self.service_checks = 0
+        self.events: list[str] = []
+
+    def OpenThreadToken(
+        self,
+        thread: int,
+        access: int,
+        open_as_self: bool,
+        output: Any,
+    ) -> bool:
+        del output
+        assert access == 0x0008
+        assert open_as_self is True
+        if getattr(self.local, "impersonating", False):
+            self.events.append("token-present")
+            return True
+        if (
+            self.worker_thread_id == thread
+            and self.worker_verification_error is not None
+        ):
+            ctypes.set_last_error(self.worker_verification_error)
+            self.events.append("worker-verification-failed")
+            return False
+        if thread == self.service_thread_id:
+            self.service_checks += 1
+            if (
+                self.service_checks > 1
+                and self.service_post_verification_error is not None
+            ):
+                ctypes.set_last_error(self.service_post_verification_error)
+                self.events.append("service-verification-failed")
+                return False
+        ctypes.set_last_error(1008)
+        self.events.append("no-token")
+        return False
+
+    def ImpersonateLoggedOnUser(self, token: int) -> bool:
+        assert token == 84
+        self.worker_thread_id = threading.get_ident()
+        self.events.append("impersonate")
+        if self.impersonate_result:
+            self.local.impersonating = True
+        else:
+            ctypes.set_last_error(5)
+        return self.impersonate_result
+
+    def RevertToSelf(self) -> bool:
+        self.events.append("revert")
+        if self.revert_result:
+            self.local.impersonating = False
+        else:
+            ctypes.set_last_error(5)
+        return self.revert_result
+
+
+def test_named_pipe_client_token_uses_minimum_rights_and_reverts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeClientTokenAdvapi32()
+    kernel32 = _FakeKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+
+    with authenticated_named_pipe_client_token(11) as token:
+        assert token == 42
+        assert kernel32.closed == []
+
+    assert advapi32.requested_access == 0x0002 | 0x0004 | 0x0008
+    assert advapi32.revert_calls == 1
+    assert kernel32.closed == [42]
+
+
+def test_named_pipe_client_token_rejects_insufficient_impersonation_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeClientTokenAdvapi32(level=1)
+    kernel32 = _FakeKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+
+    with pytest.raises(PermissionError, match="insufficient impersonation"):
+        with authenticated_named_pipe_client_token(11):
+            pass
+
+    assert advapi32.revert_calls == 1
+    assert kernel32.closed == [42]
+
+
+def test_named_pipe_client_token_revert_failure_closes_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeClientTokenAdvapi32(revert_result=False)
+    kernel32 = _FakeKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(PermissionError, match="could not be reverted"):
+        with authenticated_named_pipe_client_token(11):
+            pass
+
+    assert kernel32.closed == [42]
+
+
+def test_named_pipe_client_process_token_is_captured_before_verified_reversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeClientTokenAdvapi32()
+    kernel32 = _FakeKernel32()
+    events: list[str] = []
+
+    class Binding:
+        profile_token = 86
+
+    @contextmanager
+    def bind_process(pipe: int, sid: str):  # type: ignore[no-untyped-def]
+        assert pipe == 11
+        assert sid == "S-1-5-21-1000"
+        assert advapi32.revert_calls == 0
+        events.append("bind-process-token")
+        yield Binding()
+        events.append("release-process-token")
+
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(
+        restricted_process_module,
+        "token_user_sid_string",
+        lambda token: "S-1-5-21-1000",
+    )
+    monkeypatch.setattr(
+        restricted_process_module,
+        "authenticated_named_pipe_client_process",
+        bind_process,
+    )
+
+    with authenticated_named_pipe_client(11) as (token, binding):
+        assert token == 42
+        assert binding.profile_token == 86
+        assert advapi32.revert_calls == 1
+        assert kernel32.closed == []
+
+    assert events == ["bind-process-token", "release-process-token"]
+    assert kernel32.closed == [42]
+
+
+def test_named_pipe_client_process_binding_failure_reverts_and_closes_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeClientTokenAdvapi32()
+    kernel32 = _FakeKernel32()
+
+    @contextmanager
+    def reject_binding(pipe: int, sid: str):  # type: ignore[no-untyped-def]
+        del pipe, sid
+        raise PermissionError("process token denied")
+        yield
+
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(
+        restricted_process_module,
+        "token_user_sid_string",
+        lambda token: "S-1-5-21-1000",
+    )
+    monkeypatch.setattr(
+        restricted_process_module,
+        "authenticated_named_pipe_client_process",
+        reject_binding,
+    )
+
+    with pytest.raises(PermissionError, match="process token denied"):
+        with authenticated_named_pipe_client(11):
+            pass
+
+    assert advapi32.revert_calls == 1
+    assert kernel32.closed == [42]
+
+
+def test_bounded_impersonation_reverts_on_body_error_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeClientTokenAdvapi32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        with impersonate_token(42):
+            raise RuntimeError("body failed")
+    assert advapi32.logged_on_calls == 1
+    assert advapi32.revert_calls == 1
+
+    failing = _FakeClientTokenAdvapi32(revert_result=False)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: failing)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+    with pytest.raises(PermissionError, match="could not be reverted"):
+        with impersonate_token(42):
+            pass
+
+
+def test_restricted_launch_impersonates_only_for_create_and_reverts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    process = restricted_process_module._ProcessInformation()
+    create_thread: list[int] = []
+
+    def create_process() -> bool:
+        assert getattr(advapi32.local, "impersonating", False) is True
+        advapi32.events.append("create")
+        create_thread.append(threading.get_ident())
+        process.hProcess = 101
+        process.hThread = 102
+        process.dwProcessId = 4101
+        return True
+
+    _create_process_with_bounded_restricted_impersonation(
+        84, process, create_process
+    )
+    for later_service_step in ("assign-job", "callback", "resume"):
+        assert getattr(advapi32.local, "impersonating", False) is False
+        advapi32.events.append(later_service_step)
+
+    assert create_thread == [advapi32.worker_thread_id]
+    assert create_thread[0] != threading.get_ident()
+    assert advapi32.events == [
+        "no-token",
+        "no-token",
+        "impersonate",
+        "create",
+        "revert",
+        "no-token",
+        "no-token",
+        "assign-job",
+        "callback",
+        "resume",
+    ]
+    assert process.hProcess == 101
+    assert process.hThread == 102
+    assert kernel32.terminated == []
+    assert kernel32.closed == []
+
+
+def test_restricted_launch_impersonation_failure_never_creates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(impersonate_result=False)
+    kernel32 = _FakeLaunchKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    process = restricted_process_module._ProcessInformation()
+    create_calls = 0
+
+    def create_process() -> bool:
+        nonlocal create_calls
+        create_calls += 1
+        return True
+
+    with pytest.raises(PermissionError, match="impersonation failed"):
+        _create_process_with_bounded_restricted_impersonation(
+            84, process, create_process
+        )
+
+    assert create_calls == 0
+    assert advapi32.events == [
+        "no-token",
+        "no-token",
+        "impersonate",
+        "no-token",
+        "no-token",
+    ]
+    assert kernel32.terminated == []
+    assert kernel32.closed == []
+
+
+def test_restricted_launch_create_failure_reverts_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    process = restricted_process_module._ProcessInformation()
+    create_calls = 0
+
+    def create_process() -> bool:
+        nonlocal create_calls
+        assert getattr(advapi32.local, "impersonating", False) is True
+        create_calls += 1
+        ctypes.set_last_error(5)
+        return False
+
+    with pytest.raises(PermissionError, match="creation failed"):
+        _create_process_with_bounded_restricted_impersonation(
+            84, process, create_process
+        )
+
+    assert create_calls == 1
+    assert advapi32.events.index("revert") > advapi32.events.index("impersonate")
+    assert advapi32.events[-1] == "no-token"
+    assert kernel32.terminated == []
+    assert kernel32.closed == []
+
+
+@pytest.mark.parametrize(
+    "advapi32",
+    [
+        _FakeLaunchAdvapi32(revert_result=False),
+        _FakeLaunchAdvapi32(worker_verification_error=5),
+    ],
+    ids=["revert-failure", "verification-failure"],
+)
+def test_restricted_launch_identity_uncertainty_terminates_suspended_process(
+    advapi32: _FakeLaunchAdvapi32,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel32 = _FakeLaunchKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    process = restricted_process_module._ProcessInformation()
+    resumed_or_callback = False
+
+    def create_process() -> bool:
+        nonlocal resumed_or_callback
+        assert resumed_or_callback is False
+        process.hProcess = 101
+        process.hThread = 102
+        process.dwProcessId = 4101
+        return True
+
+    with pytest.raises(
+        ProviderLaunchIdentityUncertain,
+        match="reversion|reverted|verified",
+    ):
+        _create_process_with_bounded_restricted_impersonation(
+            84, process, create_process
+        )
+
+    assert resumed_or_callback is False
+    assert kernel32.terminated == [101]
+    assert kernel32.waited == [101]
+    assert kernel32.closed == [102, 101]
+    assert process.hProcess in {None, 0}
+    assert process.hThread in {None, 0}
+    assert advapi32.worker_thread_id != threading.get_ident()
+
+
+def test_unclean_service_thread_fails_stop_and_terminates_suspended_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(service_post_verification_error=5)
+    kernel32 = _FakeLaunchKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    process = restricted_process_module._ProcessInformation()
+
+    def create_process() -> bool:
+        process.hProcess = 101
+        process.hThread = 102
+        return True
+
+    with pytest.raises(
+        ProviderServiceIdentityUncertain, match="not clean after launch"
+    ):
+        _create_process_with_bounded_restricted_impersonation(
+            84, process, create_process
+        )
+
+    assert kernel32.terminated == [101]
+    assert kernel32.waited == [101]
+    assert kernel32.closed == [102, 101]
+    assert process.hProcess in {None, 0}
+    assert process.hThread in {None, 0}
+
+def test_profile_primary_token_requests_only_documented_rights_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeAdvapi32()
+    kernel32 = _FakeKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+
+    with authenticated_profile_primary_token(42) as token:
+        assert token == 84
+        assert kernel32.closed == []
+
+    assert advapi32.source_token == 42
+    assert advapi32.requested_access == 0x0002 | 0x0008
+    assert kernel32.closed == [84]
+
+
+def test_profile_primary_token_access_denied_is_sanitized_and_leak_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeAdvapi32(duplicate_result=False)
+    kernel32 = _FakeKernel32()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(PermissionError) as caught:
+        with authenticated_profile_primary_token(42):
+            pass
+
+    message = str(caught.value)
+    assert "api=DuplicateTokenEx" in message
+    assert "win32_error=5" in message
+    assert "symbolic=ERROR_ACCESS_DENIED" in message
+    assert "TOKEN_DUPLICATE|TOKEN_QUERY" in message
+    assert kernel32.closed == []
+
+
+def test_loaded_profile_environment_is_created_and_destroyed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    userenv = _FakeUserenv(succeeds=True)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+
+    environment = token_environment(84)
+
+    assert environment["USERPROFILE"] == r"C:\Users\Founder"
+    assert environment["PATH"] == r"C:\bin"
+    assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+
+
+def test_environment_error_five_reports_stage_and_does_not_destroy_null_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    userenv = _FakeUserenv(succeeds=False)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(PermissionError) as caught:
+        token_environment(84)
+
+    message = str(caught.value)
+    assert "api=CreateEnvironmentBlock" in message
+    assert "token_type=primary" in message
+    assert "required_access=TOKEN_QUERY|TOKEN_DUPLICATE" in message
+    assert "win32_error=5" in message
+    assert "symbolic=ERROR_ACCESS_DENIED" in message
+    assert userenv.destroyed == []
+
+
+def test_handle_allowlist_retains_backing_array_through_process_creation_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _AttributeApi:
+        def __init__(self) -> None:
+            self.initialized = 0
+            self.observed_size = 0
+
+        def InitializeProcThreadAttributeList(
+            self, pointer: object, count: int, flags: int, size: object
+        ) -> bool:
+            del count, flags
+            if pointer is None:
+                size._obj.value = 128  # type: ignore[attr-defined]
+                return False
+            self.initialized += 1
+            return True
+
+        def UpdateProcThreadAttribute(
+            self,
+            pointer: object,
+            flags: int,
+            attribute: int,
+            values: object,
+            size: int,
+            previous: object,
+            returned: object,
+        ) -> bool:
+            del pointer, flags, attribute, values, previous, returned
+            self.observed_size = size
+            return True
+
+        def DeleteProcThreadAttributeList(self, pointer: object) -> None:
+            del pointer
+
+    api = _AttributeApi()
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: api)
+    for _ in range(250):
+        buffer, pointer, backing = restricted_process_module._handle_allowlist(
+            [101, 102, 103]
+        )
+        assert len(buffer) == 128
+        assert pointer != 0
+        assert [int(value) for value in backing] == [101, 102, 103]
+        assert api.observed_size == ctypes.sizeof(backing)
+    assert api.initialized == 250
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows security-token test")
@@ -43,6 +988,10 @@ def test_provider_starts_suspended_restricted_low_and_job_confined(
             pytest.skip(
                 "the managed test sandbox rejects restricted-token derivation"
             )
+        if "restricted provider creation failed: 1314" in str(error):
+            pytest.skip(
+                "the unelevated test host lacks CreateProcessAsUser privilege"
+            )
         raise
 
     if (
@@ -60,3 +1009,79 @@ def test_provider_starts_suspended_restricted_low_and_job_confined(
     assert result.integrity_level == "low"
     assert result.job_confined is True
     assert result.timed_out is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows security-token test")
+def test_profile_provider_retains_exact_user_session_but_not_api_keys(
+    tmp_path: Path,
+) -> None:
+    executable = Path(sys.executable)
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper()
+        in {
+            "SYSTEMROOT",
+            "WINDIR",
+            "PATH",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+        }
+    }
+    environment.pop("OPENAI_API_KEY", None)
+    environment.pop("CODEX_API_KEY", None)
+    try:
+        with current_process_token() as source_token:
+            with authenticated_profile_primary_token(source_token) as profile_token:
+                source_sid = token_user_sid_string(profile_token)
+                source_session = token_session_id(profile_token)
+                source_environment = token_environment(profile_token)
+                assert source_sid.startswith("S-1-")
+                assert source_session >= 0
+                assert source_environment.get("USERPROFILE")
+                assert windows_session_is_active(source_session).is_active
+                with profile_restricted_primary_token(profile_token) as token:
+                    result = run_restricted_process(
+                        token,
+                        [
+                            str(executable),
+                            "-I",
+                            "-c",
+                            "import os; assert 'OPENAI_API_KEY' not in os.environ; "
+                            "assert 'CODEX_API_KEY' not in os.environ; "
+                            "print('profile-restricted-ok')",
+                        ],
+                        executable,
+                        tmp_path,
+                        environment,
+                        tmp_path / "profile-stdout.log",
+                        tmp_path / "profile-stderr.log",
+                        10,
+                        integrity_level="medium",
+                    )
+    except PermissionError as error:
+        if "failed: 87" in str(error):
+            pytest.skip(
+                "the managed test sandbox rejects restricted-token derivation"
+            )
+        if "restricted provider creation failed: 1314" in str(error):
+            pytest.skip(
+                "the unelevated test host lacks CreateProcessAsUser privilege"
+            )
+        raise
+    if (
+        result.exit_code == 0xC0000022
+        and os.environ.get("USERNAME") == "CodexSandboxOffline"
+    ):
+        pytest.skip(
+            "the managed sandbox denies its derived user token temp access"
+        )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "profile-restricted-ok"
+    assert result.restricted is True
+    assert result.integrity_level == "medium"
+    assert result.job_confined is True

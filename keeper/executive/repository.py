@@ -1354,6 +1354,85 @@ class ExecutiveRepository:
             )
         return released_task
 
+    def mark_execution_waiting_for_usage(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        reason: str,
+    ) -> ExecutiveTask:
+        """Persist a known pre-provider usage pause and release uncrossed budget."""
+        timestamp = utc_now()
+        with self.__store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_payload, task_hash = self._entity_in_transaction(
+                connection, "executive_tasks", task_id
+            )
+            task = ExecutiveTask.from_dict(task_payload)
+            if (
+                task.revision != expected_revision
+                or task.status
+                not in {
+                    TaskStatus.EXECUTION_STARTED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.UNCERTAIN,
+                }
+                or task.authority_attempt_id is None
+            ):
+                raise PermissionError("usage-wait transition is stale")
+            attempt_payload, attempt_hash = self._entity_in_transaction(
+                connection,
+                "executive_execution_attempts",
+                task.authority_attempt_id,
+            )
+            if attempt_payload.get("subscription_contract") is not True:
+                raise PermissionError(
+                    "usage-wait release is limited to included subscriptions"
+                )
+            reservation_id = attempt_payload.get("budget_reservation_id")
+            if isinstance(reservation_id, str):
+                connection.execute(
+                    "UPDATE executive_budget_reservations SET state='RELEASED' "
+                    "WHERE reservation_id=? AND state IN ('RESERVED','CROSSED')",
+                    (reservation_id,),
+                )
+            waiting_attempt = {
+                **attempt_payload,
+                "state": "WAITING_FOR_USAGE_RESET",
+                "updated_at": timestamp,
+            }
+            waiting_task = replace(
+                task,
+                status=TaskStatus.WAITING.value,
+                result_disposition="AUTHORITY_WAITING_FOR_USAGE_RESET",
+                revision=task.revision + 1,
+                attempt_history=task.attempt_history
+                + (
+                    {
+                        "authority_attempt_id": task.authority_attempt_id,
+                        "state": "WAITING_FOR_USAGE_RESET",
+                        "reason": reason,
+                        "recorded_at": timestamp,
+                    },
+                ),
+                updated_at=timestamp,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_execution_attempts",
+                task.authority_attempt_id,
+                attempt_hash,
+                waiting_attempt,
+            )
+            self._update_entity_cas(
+                connection,
+                "executive_tasks",
+                task.task_id,
+                task_hash,
+                waiting_task.to_dict(),
+            )
+        return waiting_task
+
     def accept_author_completion(
         self,
         task_id: str,
@@ -1456,7 +1535,11 @@ class ExecutiveRepository:
                 target = (
                     TaskStatus.CANCELED
                     if terminal == "CANCELED"
-                    else TaskStatus.FAILED
+                    else (
+                        TaskStatus.WAITING
+                        if terminal == "WAITING_FOR_USAGE_RESET"
+                        else TaskStatus.FAILED
+                    )
                 )
                 failed = replace(
                     task,

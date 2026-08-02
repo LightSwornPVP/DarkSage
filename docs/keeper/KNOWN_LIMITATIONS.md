@@ -34,10 +34,20 @@
 - The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
   attempt histories require a future paged signed-snapshot/fence protocol.
-- This source requires KeeperAuthority 1.6.2, protocol 6, and schema 5. Application
+- This source requires KeeperAuthority 1.7.0, protocol 7, and schema 6. Application
   packaging never installs, restarts, updates, or reconfigures that service.
-- The verified release is a portable zipapp; managed per-user repair/rollback tooling
-  remains optional because manual hash-verified artifact replacement is sufficient.
+- The Codex subscription provider is authoring-only. Independent approval remains
+  paused until a separately qualified reviewer provider is available.
+- Provider Host lifecycle tooling is implemented and verified only against disposable
+  roots in Phase 1. A Phase 2 migration must constrain the exact per-user install and
+  Startup roots and connect lifecycle mutations to an authenticated Authority drain;
+  the current disposable CLI roots and no-op drain callbacks are not production gates.
+  Phase 1 nevertheless installs and verifies the complete manifest-bound standalone
+  distribution and denies restricted-provider mutation of the disposable Startup
+  namespace; it does not treat a lone executable as an installable package.
+  Live installation, startup registration, enrollment, Authority
+  migration, Codex registration/qualification, and model execution require a separate
+  Phase 2 Founder authorization.
 - Keeper 1.0 is a personal-use, single-Founder product. It does not claim to
   resist arbitrary code already executing in its trusted Executive interpreter,
   a malicious local administrator, manual same-user database replacement, or

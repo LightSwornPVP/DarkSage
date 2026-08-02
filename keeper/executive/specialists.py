@@ -95,6 +95,21 @@ class SpecialistSelector:
         independent: bool = False,
         effort_level: str = "medium",
     ) -> SpecialistProfile | None:
+        raw_role = task.role.casefold()
+        normalized_role = {
+            "author": "builder",
+            "implementer": "builder",
+            "executive_builder": "builder",
+            "executive_reviewer": "reviewer",
+            "executive_post_repair_reviewer": "post_repair_reviewer",
+        }.get(raw_role)
+        if normalized_role is None:
+            if "review" in raw_role:
+                normalized_role = "reviewer"
+            elif "repair" in raw_role:
+                normalized_role = "repairer"
+            else:
+                normalized_role = "builder"
         eligible = [
             item
             for item in candidates
@@ -108,6 +123,10 @@ class SpecialistSelector:
                 or "general" in item.project_types
             )
             and effort_level in item.effort_levels
+            and (
+                not item.role_eligibility
+                or normalized_role in item.role_eligibility
+            )
             and (
                 not independent
                 or author is None

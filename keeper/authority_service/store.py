@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SERVICE_SCHEMA_VERSION = 5
+SERVICE_SCHEMA_VERSION = 6
 _EXPECTED_TABLES = {
     "attempts",
     "audit_log",
@@ -21,6 +21,7 @@ _EXPECTED_TABLES = {
     "founder_capability_consumptions",
     "authority_project_versions",
     "restore_reconciliation_fences",
+    "provider_host_enrollments",
 }
 
 
@@ -154,6 +155,14 @@ class AuthorityStore:
                     detail TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS provider_host_enrollments(
+                    id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             row = connection.execute(
@@ -193,7 +202,7 @@ class AuthorityStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    UPDATE service_meta SET value='5' WHERE key='schema_version';
+                    UPDATE service_meta SET value='6' WHERE key='schema_version';
                     """
                 )
             elif int(row["value"]) == 2:
@@ -209,12 +218,16 @@ class AuthorityStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    UPDATE service_meta SET value='5' WHERE key='schema_version';
+                    UPDATE service_meta SET value='6' WHERE key='schema_version';
                     """
                 )
             elif int(row["value"]) in {3, 4}:
                 connection.execute(
-                    "UPDATE service_meta SET value='5' WHERE key='schema_version'"
+                    "UPDATE service_meta SET value='6' WHERE key='schema_version'"
+                )
+            elif int(row["value"]) == 5:
+                connection.execute(
+                    "UPDATE service_meta SET value='6' WHERE key='schema_version'"
                 )
             elif int(row["value"]) != SERVICE_SCHEMA_VERSION:
                 raise RuntimeError("authority service schema is incompatible")
@@ -662,6 +675,8 @@ class AuthorityStore:
         claim: dict[str, Any],
         *,
         expected_attempt_state: str = "RESERVED",
+        provider_usage_policy: object = None,
+        usage_observation: object = None,
     ) -> None:
         serialized, digest = _serialize(claim)
         with self.connect() as connection:
@@ -687,6 +702,13 @@ class AuthorityStore:
                 str(authorization_payload["expires_at"])
             ) <= datetime.now(UTC):
                 raise PermissionError("authoritative launch lease expired")
+            if provider_usage_policy is not None:
+                _assert_provider_usage_claim(
+                    connection,
+                    str(claim.get("registration_id", "")),
+                    provider_usage_policy,
+                    usage_observation,
+                )
             cursor = connection.execute(
                 "UPDATE attempts SET state='LAUNCH_CLAIMED',payload=?,"
                 "payload_hash=?,updated_at=? WHERE id=? AND state=?",
@@ -1032,6 +1054,114 @@ def _payload_project_id(payload: dict[str, Any]) -> str:
     if not isinstance(project_id, str) or not project_id:
         raise ValueError("Authority project identity is invalid")
     return project_id
+
+
+def _assert_provider_usage_claim(
+    connection: sqlite3.Connection,
+    registration_id: str,
+    policy_value: object,
+    observation_value: object,
+) -> None:
+    if not isinstance(policy_value, dict):
+        raise PermissionError("provider usage authority is malformed")
+    if not isinstance(observation_value, dict):
+        raise PermissionError("provider usage state is unavailable")
+    if observation_value.get("exhausted") is True:
+        raise PermissionError(
+            "WAITING_FOR_USAGE_RESET: provider capacity exhausted"
+        )
+    budget = policy_value.get("keeper_launch_budget")
+    window = policy_value.get("budget_window_seconds")
+    if (
+        isinstance(budget, bool)
+        or not isinstance(budget, int)
+        or isinstance(window, bool)
+        or not isinstance(window, int)
+    ):
+        raise PermissionError("provider usage budget is invalid")
+    cutoff = datetime.now(UTC).timestamp() - window
+    launched = 0
+    latest_wait: datetime | None = None
+    rows = connection.execute(
+        "SELECT state,payload FROM attempts"
+    ).fetchall()
+    launched_states = {
+        "LAUNCH_CLAIMED",
+        "EXECUTION_STARTED",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMED_OUT",
+        "UNCERTAIN",
+        "LAUNCH_FAILED",
+    }
+    for row in rows:
+        try:
+            record = json.loads(str(row["payload"]))
+        except json.JSONDecodeError as error:
+            raise PermissionError("provider usage history is malformed") from error
+        if (
+            not isinstance(record, dict)
+            or record.get("registration_id") != registration_id
+        ):
+            continue
+        state = str(row["state"])
+        launched_wait = (
+            state == "WAITING_FOR_USAGE_RESET"
+            and isinstance(record.get("claimed_at"), str)
+            and isinstance(record.get("started_at"), str)
+            and isinstance(record.get("process_id"), int)
+        )
+        if state in launched_states or launched_wait:
+            timestamp = record.get("claimed_at") or record.get("started_at")
+            try:
+                claimed_at = datetime.fromisoformat(str(timestamp))
+            except (TypeError, ValueError) as error:
+                raise PermissionError(
+                    "provider usage history is malformed"
+                ) from error
+            if claimed_at.tzinfo is None:
+                raise PermissionError("provider usage history is malformed")
+            if claimed_at.timestamp() >= cutoff:
+                launched += 1
+        if state == "WAITING_FOR_USAGE_RESET":
+            try:
+                waited = datetime.fromisoformat(
+                    str(record.get("waited_at") or record.get("finished_at"))
+                )
+            except (TypeError, ValueError) as error:
+                raise PermissionError(
+                    "provider usage wait history is malformed"
+                ) from error
+            if waited.tzinfo is None:
+                raise PermissionError(
+                    "provider usage wait history is malformed"
+                )
+            if latest_wait is None or waited > latest_wait:
+                latest_wait = waited
+    if latest_wait is not None:
+        try:
+            observed_at = datetime.fromisoformat(
+                str(observation_value.get("observed_at"))
+            )
+        except (TypeError, ValueError) as error:
+            raise PermissionError(
+                "WAITING_FOR_USAGE_RESET: reset observation is unavailable"
+            ) from error
+        if (
+            observed_at.tzinfo is None
+            or observed_at <= latest_wait
+            or observation_value.get("capacity_state") != "OBSERVED"
+            or observation_value.get("confidence") != "HIGH"
+            or observation_value.get("exhausted") is not False
+        ):
+            raise PermissionError(
+                "WAITING_FOR_USAGE_RESET: reset is not authoritatively observed"
+            )
+    if launched >= budget:
+        raise PermissionError(
+            "WAITING_FOR_USAGE_RESET: Keeper launch budget exhausted"
+        )
 
 
 def _canonical_digest(value: object) -> str:

@@ -12,10 +12,25 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from keeper.evidence_input import review_input_declaration_json_schema
 from keeper.providers.base import AgentRequest, ProcessResult
 from keeper.providers.codex_cli import CliProvider
+from keeper.providers.codex_contract import (
+    build_codex_exec_command,
+    structured_digest,
+    validate_codex_authentication_policy,
+    validate_codex_authenticode_binding,
+    validate_codex_model_capability_binding,
+    validate_codex_model_allowlist,
+    validate_codex_usage_policy,
+    validate_executable_file_identity,
+    validate_subscription_account_binding,
+    validate_subscription_pricing_authority,
+    validate_windows_authentication_binding,
+)
 
 REGISTRATION_SCHEMA_VERSION = 3
+CODEX_SUBSCRIPTION_REGISTRATION_SCHEMA_VERSION = 4
 _SHA256_LENGTH = 64
 _EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
 _EXECUTIVE_CAPABILITIES = frozenset(
@@ -98,6 +113,18 @@ _REGISTRATION_FIELDS = {
     "expires_at",
     "configuration_digest",
 }
+_CODEX_SUBSCRIPTION_REGISTRATION_FIELDS = _REGISTRATION_FIELDS | {
+    "expected_version",
+    "model_allowlist",
+    "model_revalidation_expires_at",
+    "authentication_policy",
+    "windows_authentication_binding",
+    "usage_policy",
+    "authenticode_binding",
+    "subscription_account_binding",
+    "model_capability_binding",
+    "executable_file_identity",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,17 +176,67 @@ class CodexCommandAdapter(CliProvider):
     def build_command(self, request: AgentRequest) -> list[str]:
         schema_path = request.stdout_path.parent / "provider-output-schema.json"
         schema_path.write_text(json.dumps(_domain_schema(request.role)), encoding="utf-8")
+        result_path = request.stdout_path.with_suffix(".result.json")
         prompt = request.prompt_path.read_text(encoding="utf-8")
-        return [
-            self.executable,
-            "exec",
-            "--ephemeral",
-            "--sandbox",
-            "workspace-write",
-            "--output-schema",
-            str(schema_path),
-            prompt,
-        ]
+        models = self.registration.get("model_allowlist")
+        model_id = (
+            str(models[0])
+            if isinstance(models, list) and len(models) == 1
+            else str(self.registration["model_or_service_identity"])
+        )
+        return build_codex_exec_command(
+            Path(self.executable),
+            model_id=model_id,
+            reasoning_level=request.reasoning_level,
+            schema_path=schema_path,
+            output_path=result_path,
+            prompt=prompt,
+        )
+
+    def run(self, request: AgentRequest) -> ProcessResult:
+        events_path = request.stdout_path.with_suffix(".events.jsonl")
+        result_path = events_path.with_suffix(".result.json")
+        raw_request = AgentRequest(
+            request.role,
+            request.prompt_path,
+            request.workspace,
+            request.timeout_seconds,
+            events_path,
+            request.stderr_path,
+            request.reasoning_level,
+            request.on_process_started,
+            request.on_process_owned,
+            request.authority_attempt_id,
+        )
+        result = super().run(raw_request)
+        if result.exit_code:
+            return ProcessResult(
+                result.exit_code,
+                request.stdout_path,
+                request.stderr_path,
+                result.process_id,
+                result.timed_out,
+            )
+        try:
+            domain = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(domain, dict):
+                raise ValueError("Codex result is not a structured object")
+            request.stdout_path.write_text(json.dumps(domain), encoding="utf-8")
+            return ProcessResult(
+                0,
+                request.stdout_path,
+                request.stderr_path,
+                result.process_id,
+                output=domain,
+            )
+        except (json.JSONDecodeError, OSError, ValueError) as error:
+            request.stdout_path.write_text("", encoding="utf-8")
+            request.stderr_path.write_text(
+                f"invalid Codex structured result: {error}", encoding="utf-8"
+            )
+            return ProcessResult(
+                65, request.stdout_path, request.stderr_path, result.process_id
+            )
 
 
 class ClaudeCommandAdapter(CliProvider):
@@ -452,6 +529,17 @@ def create_provider_registration(
     project_types: list[str],
     effort_levels: list[str],
     pricing_authority: dict[str, Any],
+    expected_version: str | None = None,
+    model_allowlist: list[str] | None = None,
+    model_revalidation_expires_at: str | None = None,
+    authentication_policy: dict[str, Any] | None = None,
+    windows_authentication_binding: dict[str, Any] | None = None,
+    usage_policy: dict[str, Any] | None = None,
+    authenticode_binding: dict[str, Any] | None = None,
+    subscription_account_binding: dict[str, Any] | None = None,
+    model_capability_binding: dict[str, Any] | None = None,
+    authority_executable_measurement: dict[str, Any] | None = None,
+    trusted_registration_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_executive_capabilities = _validated_string_authority_list(
         executive_capabilities, "executive capability"
@@ -463,10 +551,131 @@ def create_provider_registration(
     )
     if any(item not in _PROJECT_TYPES for item in normalized_project_types):
         raise ValueError("provider project-type declaration is unsupported")
-    normalized_effort_levels = _validated_effort_levels(effort_levels)
-    normalized_pricing_authority = _validated_pricing_authority(pricing_authority)
-    configured = executable.resolve(strict=True)
+    subscription_contract = any(
+        item is not None
+        for item in (
+            model_allowlist,
+            expected_version,
+            model_revalidation_expires_at,
+            authentication_policy,
+            windows_authentication_binding,
+            usage_policy,
+            authenticode_binding,
+            subscription_account_binding,
+            model_capability_binding,
+            authority_executable_measurement,
+        )
+    )
+    if subscription_contract:
+        if provider_id != "codex" or any(
+            item is None
+            for item in (
+                model_allowlist,
+                expected_version,
+                model_revalidation_expires_at,
+                authentication_policy,
+                windows_authentication_binding,
+                usage_policy,
+                authenticode_binding,
+                subscription_account_binding,
+                model_capability_binding,
+            )
+        ):
+            raise ValueError("Codex subscription registration is incomplete")
+        if effort_levels != ["medium", "high"]:
+            raise ValueError("Codex subscription effort levels must be medium and high")
+        # The schema-4 contract deliberately preserves this semantic order.
+        # Do not reuse the alphabetic normalization used by legacy providers.
+        normalized_effort_levels = ["medium", "high"]
+        normalized_pricing_authority = validate_subscription_pricing_authority(
+            pricing_authority
+        )
+        normalized_model_allowlist = validate_codex_model_allowlist(
+            model_allowlist
+        )
+        if (
+            not isinstance(expected_version, str)
+            or not _version_output_valid("codex", expected_version)
+        ):
+            raise ValueError("Codex expected executable version is invalid")
+        normalized_authentication_policy = validate_codex_authentication_policy(
+            authentication_policy
+        )
+        normalized_authentication_binding = validate_windows_authentication_binding(
+            windows_authentication_binding
+        )
+        normalized_usage_policy = validate_codex_usage_policy(usage_policy)
+        normalized_authenticode_binding = validate_codex_authenticode_binding(
+            authenticode_binding
+        )
+        normalized_subscription_account_binding = (
+            validate_subscription_account_binding(subscription_account_binding)
+        )
+        normalized_model_capability_binding = (
+            validate_codex_model_capability_binding(model_capability_binding)
+        )
+        normalized_executable_measurement = (
+            _validated_executable_measurement(
+                authority_executable_measurement,
+                executable=executable,
+                authenticode_binding=normalized_authenticode_binding,
+            )
+            if authority_executable_measurement is not None
+            else None
+        )
+        normalized_executable_file_identity = (
+            validate_executable_file_identity(
+                normalized_executable_measurement["file_identity"]
+            )
+            if normalized_executable_measurement is not None
+            else None
+        )
+        if [
+            item["model_id"]
+            for item in normalized_model_capability_binding["models"]
+        ] != normalized_model_allowlist:
+            raise ValueError("Codex model capabilities do not match the allowlist")
+        try:
+            model_expiry = datetime.fromisoformat(
+                str(model_revalidation_expires_at)
+            )
+        except ValueError as error:
+            raise ValueError("Codex model revalidation expiry is invalid") from error
+        if model_expiry.tzinfo is None or model_expiry <= datetime.now(UTC):
+            raise ValueError("Codex model revalidation authority is expired")
+    else:
+        normalized_effort_levels = _validated_effort_levels(effort_levels)
+        normalized_pricing_authority = _validated_pricing_authority(pricing_authority)
+        normalized_model_allowlist = None
+        normalized_authentication_policy = None
+        normalized_authentication_binding = None
+        normalized_usage_policy = None
+        normalized_authenticode_binding = None
+        normalized_subscription_account_binding = None
+        normalized_model_capability_binding = None
+        normalized_executable_measurement = None
+        normalized_executable_file_identity = None
+    configured = (
+        Path(str(normalized_executable_measurement["canonical_path"]))
+        if normalized_executable_measurement is not None
+        else executable.resolve(strict=True)
+    )
     registration_nonce = uuid.uuid4().hex
+    generated_registration_id = (
+        f"keeper-provider:{provider_id}:v1:{registration_nonce}"
+    )
+    if trusted_registration_id is not None:
+        expected_prefix = f"keeper-provider:{provider_id}:v1:"
+        if (
+            not trusted_registration_id.startswith(expected_prefix)
+            or len(trusted_registration_id) != len(expected_prefix) + 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in trusted_registration_id[len(expected_prefix) :]
+            )
+        ):
+            raise ValueError("trusted provider registration ID is invalid")
+        generated_registration_id = trusted_registration_id
     capability_values = asdict(capabilities or ProviderCapabilities())
     roles = role_eligibility if role_eligibility is not None else [
         "builder",
@@ -477,36 +686,57 @@ def create_provider_registration(
     launcher = configured
     script: Path | None = None
     if configured.suffix.casefold() in {".cmd", ".bat"}:
+        if subscription_contract:
+            raise ValueError("Codex subscription executable must be a direct binary")
         script = configured
         launcher = Path(os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")).resolve(
             strict=True
         )
-    executable_content = configured.read_bytes()
-    launcher_content = launcher.read_bytes()
+    if normalized_executable_measurement is not None:
+        executable_digest = str(normalized_executable_measurement["sha256"])
+        executable_size = int(normalized_executable_measurement["size"])
+        launcher_digest = executable_digest
+        launcher_size = executable_size
+    else:
+        executable_content = configured.read_bytes()
+        launcher_content = launcher.read_bytes()
+        executable_digest = hashlib.sha256(executable_content).hexdigest()
+        executable_size = len(executable_content)
+        launcher_digest = hashlib.sha256(launcher_content).hexdigest()
+        launcher_size = len(launcher_content)
+        if subscription_contract:
+            normalized_executable_file_identity = _file_identity(configured.stat())
     invocation = invocation_shape or (
         [str(launcher), "/d", "/c", str(script), "{prompt}"]
         if script is not None
         else [str(launcher), "{prompt}"]
     )
+    if subscription_contract and role_eligibility is None:
+        roles = ["builder", "repairer"]
+        independence_classification = "authoring-only"
+        capability_values["reviewer"] = False
+        capability_values["usage_reporting"] = True
     registration: dict[str, Any] = {
-        "registration_schema_version": REGISTRATION_SCHEMA_VERSION,
-        "trusted_registration_id": (
-            f"keeper-provider:{provider_id}:v1:{registration_nonce}"
+        "registration_schema_version": (
+            CODEX_SUBSCRIPTION_REGISTRATION_SCHEMA_VERSION
+            if subscription_contract
+            else REGISTRATION_SCHEMA_VERSION
         ),
+        "trusted_registration_id": generated_registration_id,
         "registration_version": "1",
         "logical_provider_id": provider_id,
         "provider_name": f"{provider_id}-command",
         "provider_type": "local-command",
         "canonical_executable_path": str(configured),
-        "executable_sha256": hashlib.sha256(executable_content).hexdigest(),
-        "executable_size": len(executable_content),
+        "executable_sha256": executable_digest,
+        "executable_size": executable_size,
         "executable_registration_id": (
             f"keeper-executable:{provider_id}:v1:{registration_nonce}"
         ),
         "executable_registration_version": "1",
         "launcher_path": str(launcher),
-        "launcher_sha256": hashlib.sha256(launcher_content).hexdigest(),
-        "launcher_size": len(launcher_content),
+        "launcher_sha256": launcher_digest,
+        "launcher_size": launcher_size,
         "launcher_registration_id": (
             f"keeper-launcher:{provider_id}:v1:{registration_nonce}"
         ),
@@ -526,8 +756,16 @@ def create_provider_registration(
         "working_directory_policy": "task-worktree",
         "allowed_environment": "keeper-filtered",
         "endpoint_identity": "local-process",
-        "authentication_mode": "external-cli-session",
-        "authentication_profile": f"external-session:{provider_id}",
+        "authentication_mode": (
+            "chatgpt-subscription-session"
+            if subscription_contract
+            else "external-cli-session"
+        ),
+        "authentication_profile": (
+            "authority-bound-windows-user-profile"
+            if subscription_contract
+            else f"external-session:{provider_id}"
+        ),
         "capability_set": capability_values,
         "executive_capability_set": normalized_executive_capabilities,
         "project_types": normalized_project_types,
@@ -536,7 +774,12 @@ def create_provider_registration(
         "provider_policy": "registered-command",
         "independence_classification": independence_classification,
         "role_eligibility": roles,
-        "model_or_service_identity": provider_id,
+        "model_or_service_identity": (
+            normalized_model_allowlist[0]
+            if normalized_model_allowlist is not None
+            and len(normalized_model_allowlist) == 1
+            else provider_id
+        ),
         "qualified_version": None,
         "qualification_timestamp": None,
         "qualification_method": "none",
@@ -545,8 +788,8 @@ def create_provider_registration(
         "qualification_evidence_id": None,
         "qualification_evidence_digest": None,
         "qualifying_component_digests": {
-            "executable": hashlib.sha256(executable_content).hexdigest(),
-            "launcher": hashlib.sha256(launcher_content).hexdigest(),
+            "executable": executable_digest,
+            "launcher": launcher_digest,
             "script": (
                 hashlib.sha256(script.read_bytes()).hexdigest()
                 if script is not None
@@ -559,10 +802,85 @@ def create_provider_registration(
         "revoked_at": None,
         "expires_at": None,
     }
+    if subscription_contract:
+        registration.update(
+            {
+                "model_allowlist": normalized_model_allowlist,
+                "expected_version": expected_version,
+                "model_revalidation_expires_at": str(
+                    model_revalidation_expires_at
+                ),
+                "authentication_policy": normalized_authentication_policy,
+                "windows_authentication_binding": normalized_authentication_binding,
+                "usage_policy": normalized_usage_policy,
+                "authenticode_binding": normalized_authenticode_binding,
+                "subscription_account_binding": (
+                    normalized_subscription_account_binding
+                ),
+                "model_capability_binding": normalized_model_capability_binding,
+                "executable_file_identity": normalized_executable_file_identity,
+            }
+        )
     registration["configuration_digest"] = _registration_configuration_digest(
         registration
     )
     return registration
+
+
+def _file_identity(value: os.stat_result) -> dict[str, int]:
+    return validate_executable_file_identity(
+        {
+            "schema_version": 1,
+            "device_id": int(value.st_dev),
+            "file_id": int(value.st_ino),
+            "size": int(value.st_size),
+            "modified_ns": int(value.st_mtime_ns),
+        }
+    )
+
+
+def _validated_executable_measurement(
+    value: object,
+    *,
+    executable: Path,
+    authenticode_binding: dict[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "canonical_path",
+        "sha256",
+        "size",
+        "file_identity",
+        "authenticode_binding",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("Authority executable measurement fields are invalid")
+    result = dict(value)
+    canonical_path = result.get("canonical_path")
+    digest = result.get("sha256")
+    size = result.get("size")
+    if (
+        not isinstance(canonical_path, str)
+        or not canonical_path
+        or not Path(canonical_path).is_absolute()
+        or os.path.normcase(os.path.abspath(str(executable)))
+        != os.path.normcase(canonical_path)
+        or not isinstance(digest, str)
+        or len(digest) != _SHA256_LENGTH
+        or any(character not in "0123456789abcdef" for character in digest)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size <= 0
+        or validate_executable_file_identity(result.get("file_identity"))[
+            "size"
+        ]
+        != size
+        or validate_codex_authenticode_binding(
+            result.get("authenticode_binding")
+        )
+        != authenticode_binding
+    ):
+        raise ValueError("Authority executable measurement is invalid")
+    return result
 
 
 def _validate_discovery_registration(
@@ -576,7 +894,7 @@ def _validate_discovery_registration(
         return False, "Executable was not found; configure its full path in Settings."
     if not isinstance(registration, dict):
         return False, "Configured provider has no immutable registration."
-    if set(registration) != _REGISTRATION_FIELDS:
+    if set(registration) != _registration_fields(registration):
         return False, "Provider registration is malformed or incomplete."
     if not _registration_types_valid(registration):
         return False, "Provider registration field types or values are invalid."
@@ -641,7 +959,9 @@ def validate_provider_registration_contract(
     registration: object,
 ) -> tuple[bool, str]:
     """Validate the Authority-owned record before qualification or execution."""
-    if not isinstance(registration, dict) or set(registration) != _REGISTRATION_FIELDS:
+    if not isinstance(registration, dict) or set(registration) != _registration_fields(
+        registration
+    ):
         return False, "Provider registration is malformed or incomplete."
     if not _registration_types_valid(registration):
         return False, "Provider registration field types or values are invalid."
@@ -694,6 +1014,20 @@ def qualification_evidence_digest(evidence: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _command_flag_value(command: object, flag: str) -> str | None:
+    if not isinstance(command, list) or not all(
+        isinstance(item, str) for item in command
+    ):
+        return None
+    try:
+        index = command.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(command):
+        return None
+    return str(command[index + 1])
+
+
 def apply_protected_qualification(
     registration: dict[str, Any],
     evidence: dict[str, Any],
@@ -713,6 +1047,85 @@ def apply_protected_qualification(
         finished_at = datetime.fromisoformat(str(evidence.get("finished_at")))
     except ValueError as error:
         raise PermissionError("qualification chronology is invalid") from error
+    command = evidence.get("qualification_command")
+    subscription = (
+        updated.get("registration_schema_version")
+        == CODEX_SUBSCRIPTION_REGISTRATION_SCHEMA_VERSION
+    )
+    command_valid = (
+        isinstance(command, list)
+        and all(isinstance(item, str) for item in command)
+        and evidence.get("command_digest")
+        == hashlib.sha256(json.dumps(command).encode("utf-8")).hexdigest()
+    )
+    if subscription:
+        command_valid = bool(
+            command_valid
+            and command
+            and command[0] == updated.get("canonical_executable_path")
+            and command[1:5]
+            == [
+                "exec",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--skip-git-repo-check",
+            ]
+            and _command_flag_value(command, "--sandbox") == "workspace-write"
+            and _command_flag_value(command, "--model")
+            == updated.get("model_or_service_identity")
+            and 'model_reasoning_effort="medium"' in command
+            and "--output-schema" in command
+            and "--output-last-message" in command
+            and evidence.get("schema_version") == 3
+            and evidence.get("qualified_model_id")
+            == updated.get("model_or_service_identity")
+            and evidence.get("normalized_version")
+            == updated.get("expected_version")
+            and evidence.get("qualified_reasoning_level") == "medium"
+            and evidence.get("authentication_probe", {}).get(
+                "authentication_method"
+            )
+            == "chatgpt-subscription"
+            and evidence.get("authentication_probe", {}).get("plan_type")
+            == updated.get("subscription_account_binding", {}).get(
+                "plan_type"
+            )
+            and evidence.get("authentication_probe", {}).get(
+                "account_identity_digest"
+            )
+            == updated.get("subscription_account_binding", {}).get(
+                "account_identity_digest"
+            )
+            and evidence.get("authentication_probe", {}).get("models")
+            == updated.get("model_allowlist")
+            and evidence.get("authentication_probe", {}).get(
+                "model_capabilities"
+            )
+            == updated.get("model_capability_binding", {}).get("models")
+            and evidence.get("structured_output")
+            == {
+                "status": "ok",
+                "provider": "codex",
+                "effort": "medium",
+                "nonce": "keeper-codex-qualification-v1",
+            }
+            and evidence.get("registration_configuration_digest")
+            == updated.get("configuration_digest")
+            and evidence.get("pricing_authority_digest")
+            == structured_digest(updated.get("pricing_authority"))
+            and evidence.get("usage_policy_digest")
+            == structured_digest(updated.get("usage_policy"))
+            and evidence.get("authentication_binding_digest")
+            == structured_digest(updated.get("windows_authentication_binding"))
+            and isinstance(evidence.get("prompt_digest"), str)
+            and isinstance(evidence.get("schema_digest"), str)
+        )
+    else:
+        command_valid = bool(
+            command_valid
+            and command
+            == [updated.get("canonical_executable_path"), "--version"]
+        )
     if (
         started_at.tzinfo is None
         or finished_at.tzinfo is None
@@ -723,14 +1136,7 @@ def apply_protected_qualification(
         or evidence.get("event_challenge") != expected_challenge
         or evidence.get("authorization_reference")
         != expected_authorization_reference
-        or evidence.get("qualification_command")
-        != [updated.get("canonical_executable_path"), "--version"]
-        or evidence.get("command_digest")
-        != hashlib.sha256(
-            json.dumps(
-                [updated.get("canonical_executable_path"), "--version"]
-            ).encode("utf-8")
-        ).hexdigest()
+        or not command_valid
         or not isinstance(evidence.get("provider_instance_id"), str)
         or not evidence["provider_instance_id"]
         or not isinstance(evidence.get("provider_run_id"), str)
@@ -894,10 +1300,20 @@ def qualified_version_is_valid(provider_id: str, value: str) -> bool:
     return _version_output_valid(provider_id, value)
 
 
+def _registration_fields(registration: dict[str, Any]) -> set[str]:
+    if (
+        registration.get("registration_schema_version")
+        == CODEX_SUBSCRIPTION_REGISTRATION_SCHEMA_VERSION
+    ):
+        return _CODEX_SUBSCRIPTION_REGISTRATION_FIELDS
+    return _REGISTRATION_FIELDS
+
+
 def _registration_configuration_digest(registration: dict[str, Any]) -> str:
+    fields = _registration_fields(registration)
     authority = {
         key: registration.get(key)
-        for key in sorted(_REGISTRATION_FIELDS - {"configuration_digest"})
+        for key in sorted(fields - {"configuration_digest"})
     }
     return hashlib.sha256(
         json.dumps(authority, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -932,7 +1348,11 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
         "authorized_at",
         "configuration_digest",
     }
-    if registration.get("registration_schema_version") != REGISTRATION_SCHEMA_VERSION:
+    schema_version = registration.get("registration_schema_version")
+    if schema_version not in {
+        REGISTRATION_SCHEMA_VERSION,
+        CODEX_SUBSCRIPTION_REGISTRATION_SCHEMA_VERSION,
+    }:
         return False
     if any(
         not isinstance(registration.get(key), str) or not registration[key]
@@ -943,7 +1363,10 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
         return False
     if registration["endpoint_identity"] != "local-process":
         return False
-    if registration["authentication_mode"] != "external-cli-session":
+    if registration["authentication_mode"] not in {
+        "external-cli-session",
+        "chatgpt-subscription-session",
+    }:
         return False
     if registration["provider_policy"] != "registered-command":
         return False
@@ -1031,14 +1454,79 @@ def _registration_types_valid(registration: dict[str, Any]) -> bool:
             return False
         if any(item not in _PROJECT_TYPES for item in project_types):
             return False
-        if registration.get("effort_levels") != _validated_effort_levels(
-            registration.get("effort_levels")
-        ):
-            return False
-        if registration.get("pricing_authority") != _validated_pricing_authority(
-            registration.get("pricing_authority")
-        ):
-            return False
+        if schema_version == CODEX_SUBSCRIPTION_REGISTRATION_SCHEMA_VERSION:
+            if (
+                registration.get("logical_provider_id") != "codex"
+                or registration.get("authentication_mode")
+                != "chatgpt-subscription-session"
+                or registration.get("authentication_profile")
+                != "authority-bound-windows-user-profile"
+                or registration.get("independence_classification")
+                != "authoring-only"
+                or registration.get("role_eligibility")
+                != ["builder", "repairer"]
+                or registration.get("effort_levels") != ["medium", "high"]
+                or registration.get("model_or_service_identity")
+                not in validate_codex_model_allowlist(
+                    registration.get("model_allowlist")
+                )
+                or not isinstance(registration.get("expected_version"), str)
+                or not _version_output_valid(
+                    "codex", str(registration.get("expected_version"))
+                )
+                or validate_subscription_pricing_authority(
+                    registration.get("pricing_authority")
+                )
+                != registration.get("pricing_authority")
+                or validate_codex_authentication_policy(
+                    registration.get("authentication_policy")
+                )
+                != registration.get("authentication_policy")
+                or validate_windows_authentication_binding(
+                    registration.get("windows_authentication_binding")
+                )
+                != registration.get("windows_authentication_binding")
+                or validate_codex_usage_policy(registration.get("usage_policy"))
+                != registration.get("usage_policy")
+                or validate_codex_authenticode_binding(
+                    registration.get("authenticode_binding")
+                )
+                != registration.get("authenticode_binding")
+                or validate_executable_file_identity(
+                    registration.get("executable_file_identity")
+                )
+                != registration.get("executable_file_identity")
+                or registration["executable_file_identity"]["size"]
+                != registration.get("executable_size")
+                or validate_subscription_account_binding(
+                    registration.get("subscription_account_binding")
+                )
+                != registration.get("subscription_account_binding")
+                or validate_codex_model_capability_binding(
+                    registration.get("model_capability_binding")
+                )
+                != registration.get("model_capability_binding")
+                or [
+                    item["model_id"]
+                    for item in registration["model_capability_binding"]["models"]
+                ]
+                != registration.get("model_allowlist")
+            ):
+                return False
+            expiry = datetime.fromisoformat(
+                str(registration.get("model_revalidation_expires_at"))
+            )
+            if expiry.tzinfo is None or expiry <= datetime.now(UTC):
+                return False
+        else:
+            if registration.get("effort_levels") != _validated_effort_levels(
+                registration.get("effort_levels")
+            ):
+                return False
+            if registration.get("pricing_authority") != _validated_pricing_authority(
+                registration.get("pricing_authority")
+            ):
+                return False
     except (TypeError, ValueError):
         return False
     if any(
@@ -1338,3 +1826,78 @@ def _domain_schema(role: str) -> dict[str, Any]:
         "properties": properties,
         "additionalProperties": False,
     }
+
+
+def authority_provider_output_schema(
+    role: str, *, provider_input_required: bool
+) -> dict[str, Any]:
+    """Return the one Authority-owned schema used at reserve and launch."""
+    schema = _domain_schema(role)
+    if not provider_input_required or role != "reviewer":
+        return schema
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise PermissionError("provider output schema is unavailable")
+    properties["review_input_declaration"] = (
+        review_input_declaration_json_schema()
+    )
+    required.append("review_input_declaration")
+    return schema
+
+
+def validate_value_against_schema(value: object, schema: object) -> bool:
+    """Validate the strict JSON-Schema subset emitted by Keeper."""
+    if not isinstance(schema, dict):
+        return False
+    if "const" in schema and value != schema["const"]:
+        return False
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return False
+    expected_type = schema.get("type")
+    allowed_types = (
+        tuple(expected_type)
+        if isinstance(expected_type, list)
+        else (expected_type,)
+    )
+    if expected_type is not None and not any(
+        _json_type_matches(value, item) for item in allowed_types
+    ):
+        return False
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        properties = schema.get("properties", {})
+        if not isinstance(required, list) or not isinstance(properties, dict):
+            return False
+        if not all(isinstance(item, str) and item in value for item in required):
+            return False
+        if schema.get("additionalProperties") is False and not set(value).issubset(
+            properties
+        ):
+            return False
+        return all(
+            name not in properties
+            or validate_value_against_schema(item, properties[name])
+            for name, item in value.items()
+        )
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        return item_schema is None or all(
+            validate_value_against_schema(item, item_schema) for item in value
+        )
+    return True
+
+
+def _json_type_matches(value: object, expected: object) -> bool:
+    return {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+        ),
+        "boolean": isinstance(value, bool),
+        "null": value is None,
+    }.get(str(expected), False)

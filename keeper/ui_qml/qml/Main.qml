@@ -625,7 +625,40 @@ ApplicationWindow {
                     // Providers
                     Flickable {
                         contentWidth: width; contentHeight: providerColumn.implicitHeight + 48; clip: true
-                        ColumnLayout { id: providerColumn; width: parent.width - 48; x: 24; y: 24; spacing: 16; PageHeader { title: "Providers"; subtitle: "Qualified providers, accounts, sessions, declared capabilities, and usage."; actionText: "+ Register Provider"; actionEnabled: false } MutedText { text: "Provider registration and qualification remain explicit KeeperAuthority operations; this desktop does not fabricate production authority."; color: warning } KPanel { Layout.fillWidth: true; Layout.preferredHeight: 330; SectionTitle { text: "PROVIDER SESSIONS" } ListView { Layout.fillWidth: true; Layout.fillHeight: true; model: filtered(keeper.state.providers || []); clip: true; delegate: RecordRow { title: text(modelData.name, modelData.provider_id); subtitle: text(modelData.composition, "NOT CONFIGURED") + " • account " + text(modelData.account, "none") + " • jobs " + text(modelData.active_jobs, "0") + "/" + text(modelData.capacity, "0"); state: text(modelData.health, "UNAVAILABLE") } EmptyState { anchors.fill: parent; visible: parent.count === 0; title: "No qualified provider sessions"; detail: "Configure an executable path in Settings, then use the approved Authority workflow to register and qualify it." } } } KPanel { Layout.fillWidth: true; Layout.preferredHeight: 260; SectionTitle { text: "USAGE POOLS" } ListView { Layout.fillWidth: true; Layout.fillHeight: true; model: filtered(keeper.state.usage || []); clip: true; delegate: RecordRow { title: text(modelData.pool_id, "Usage pool"); subtitle: "Consumed " + text(modelData.consumed, "0") + " • reserved " + text(modelData.reserved, "0") + " • remaining " + text(modelData.remaining, "unknown"); state: text(modelData.status, "AVAILABLE") } EmptyState { anchors.fill: parent; visible: parent.count === 0; title: "No usage pools"; detail: "Durable shared-pool accounting appears after a qualified provider session is configured." } } } }
+                        ColumnLayout {
+                            id: providerColumn; width: parent.width - 48; x: 24; y: 24; spacing: 16
+                            PageHeader { title: "Providers"; subtitle: "Qualified providers, accounts, sessions, declared capabilities, and usage."; actionText: "+ Register Provider"; actionEnabled: false }
+                            MutedText { text: "Provider registration and qualification remain explicit KeeperAuthority operations; this desktop does not fabricate production authority."; color: warning }
+                            KPanel {
+                                Layout.fillWidth: true; Layout.preferredHeight: 150
+                                SectionTitle { text: "KEEPER PROVIDER HOST" }
+                                RowLayout { Layout.fillWidth: true; StatusPill { value: keeper.state.providerHost ? text(keeper.state.providerHost.state, "NOT CONFIGURED") : "NOT CONFIGURED" } BodyText { Layout.fillWidth: true; text: keeper.state.providerHost ? "Protocol " + text(keeper.state.providerHost.protocol, "not reported") + " • provider " + text(keeper.state.providerHost.provider_state, "UNAVAILABLE") + " • execution " + text(keeper.state.providerHost.execution_state, "IDLE") + " • usage " + text(keeper.state.providerHost.usage_state, "UNAVAILABLE") : "Per-user execution deputy not configured" } }
+                                MutedText { text: keeper.state.providerHost && keeper.state.providerHost.founder_action_required ? "Founder action required: " + keeper.state.providerHost.founder_action_required : "No Founder action required."; color: keeper.state.providerHost && keeper.state.providerHost.founder_action_required ? warning : success }
+                            }
+                            KPanel {
+                                Layout.fillWidth: true; Layout.preferredHeight: 390
+                                SectionTitle { text: "PROVIDER SESSIONS" }
+                                ListView {
+                                    Layout.fillWidth: true; Layout.fillHeight: true; model: filtered(keeper.state.providers || []); clip: true
+                                    delegate: RecordRow {
+                                        height: 82
+                                        title: text(modelData.name, modelData.provider_id)
+                                        subtitle: text(modelData.composition, "NOT CONFIGURED") + " • " + text(modelData.authentication_mode, "auth undeclared") + " • " + text(modelData.billing_mode, "billing undeclared") + "\nmodels " + (modelData.model_allowlist || []).join(", ") + " • efforts " + (modelData.effort_levels || []).join(", ") + " • usage " + text(modelData.usage_state, "UNKNOWN") + " • reviewer " + text(modelData.reviewer_status, "UNKNOWN") + " • API billing " + text(modelData.api_billing, "DISABLED") + " • paid fallback " + text(modelData.paid_fallback, "DISABLED")
+                                        state: text(modelData.health, "UNAVAILABLE")
+                                    }
+                                    EmptyState { anchors.fill: parent; visible: parent.count === 0; title: "No qualified provider sessions"; detail: "Configure an executable path in Settings, then use the approved Authority workflow to register and qualify it." }
+                                }
+                            }
+                            KPanel {
+                                Layout.fillWidth: true; Layout.preferredHeight: 260
+                                SectionTitle { text: "USAGE POOLS" }
+                                ListView {
+                                    Layout.fillWidth: true; Layout.fillHeight: true; model: filtered(keeper.state.usage || []); clip: true
+                                    delegate: RecordRow { title: text(modelData.pool_id, "Usage pool"); subtitle: "Consumed " + text(modelData.consumed, "0") + " • reserved " + text(modelData.reserved, "0") + " • remaining " + text(modelData.remaining, "unknown") + " • source " + text(modelData.source, "UNKNOWN") + " • confidence " + text(modelData.confidence, "UNKNOWN"); state: text(modelData.status, "AVAILABLE") }
+                                    EmptyState { anchors.fill: parent; visible: parent.count === 0; title: "No usage pools"; detail: "Durable shared-pool accounting appears after a qualified provider session is configured." }
+                                }
+                            }
+                        }
                     }
 
                     // Recovery

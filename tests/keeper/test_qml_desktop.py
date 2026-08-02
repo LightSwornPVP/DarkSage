@@ -20,8 +20,8 @@ class _HealthClient:
     def require_live_identity(self) -> dict[str, object]:
         return {
             "service_version": "test-health-only",
-            "protocol_version": 6,
-            "schema_version": 5,
+            "protocol_version": 7,
+            "schema_version": 6,
             "identity_state": "VERIFIED",
             "provenance_state": "TEST_INJECTION",
             "observer_available": True,
@@ -136,7 +136,7 @@ def test_authority_health_projection_drops_private_service_paths(
     authority = controller.state_snapshot()["diagnostics"]["authority"]
     rendered = repr(authority)
     assert authority["service_version"] == "test-health-only"
-    assert authority["protocol_version"] == 6
+    assert authority["protocol_version"] == 7
     assert "ProgramData" not in rendered
     assert "S-1-5-private" not in rendered
     assert "service_root" not in authority
@@ -155,6 +155,16 @@ def test_qml_search_and_narrow_assistant_are_real_and_source_backed() -> None:
     assert "keeper.runAction(modelData.run_id, \"resume\")" in qml
     assert "keeper.exportRunReport(window.selectedRunId, selectedFile)" in qml
     assert "Math.min(460, Math.max(120, emptyRoot.width - 24))" in qml
+
+
+def test_rendered_smoke_contract_covers_all_pages_at_wide_and_minimum() -> None:
+    source = (
+        Path(__file__).parents[2] / "keeper" / "ui_qml" / "app.py"
+    ).read_text(encoding="utf-8")
+    assert '("wide", 1600, 960)' in source
+    assert '("minimum", 1120, 700)' in source
+    assert "for page in NAVIGATION" in source
+    assert '"rendered_frames": captured_frames' in source
 
 def _is_primitive(value: object) -> bool:
     if value is None or isinstance(value, (str, int, float, bool)):

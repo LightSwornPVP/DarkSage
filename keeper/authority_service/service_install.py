@@ -308,15 +308,28 @@ class AuthorityServiceInstaller:
         with zipfile.ZipFile(
             destination, "w", compression=zipfile.ZIP_DEFLATED
         ) as archive:
-            archive.writestr(
+            _write_deterministic_zip_entry(
+                archive,
                 "__main__.py",
                 "from keeper.authority_service.service_main import main\n"
                 "raise SystemExit(main())\n",
             )
             for path in sorted(keeper_root.rglob("*.py")):
-                archive.write(
-                    path, (Path("keeper") / path.relative_to(keeper_root)).as_posix()
+                _write_deterministic_zip_entry(
+                    archive,
+                    (Path("keeper") / path.relative_to(keeper_root)).as_posix(),
+                    path.read_bytes(),
                 )
+
+
+def _write_deterministic_zip_entry(
+    archive: zipfile.ZipFile, name: str, content: str | bytes
+) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = (0o100644 & 0xFFFF) << 16
+    archive.writestr(info, content)
 
 
 def start() -> None:

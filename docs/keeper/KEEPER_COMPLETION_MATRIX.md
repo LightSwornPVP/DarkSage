@@ -4,7 +4,7 @@ This matrix describes the local personal-use release candidate. `COMPLETE` means
 
 | Area | Status | Evidence or boundary |
 |---|---|---|
-| Founder and authority | COMPLETE | Native Founder authentication, exact charter identity, durable approvals, Authority protocol 6 receipts, fail-closed replay and mismatch handling |
+| Founder and authority | COMPLETE | Native Founder authentication, exact charter identity, durable approvals, Authority protocol 7 receipts, fail-closed replay and mismatch handling |
 | Project charters | COMPLETE | Durable intake, versioned proposals, one exact Founder approval, active-revision execution binding |
 | Workflow orchestration | COMPLETE | Charter-derived planning, isolated assignments, session/usage claims, independent review, bounded repair, duplicate prevention, completion evidence |
 | Provider management | COMPLETE for supported local use | Durable provider/account/session models and qualification gates; real external providers remain Founder-configured and opt-in |

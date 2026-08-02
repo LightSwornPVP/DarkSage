@@ -15,6 +15,11 @@ from keeper.executive.founder_capability import (
 )
 from keeper.authority_service.ipc_server import NamedPipeAuthorityServer
 from keeper.authority_service.observer import ServiceProviderObserver
+from keeper.authority_service.provider_host_gateway import ProviderHostGateway
+from keeper.provider_host.signing import (
+    RsaPublicIdentity,
+    WindowsCngEnvelopeIdentity,
+)
 from keeper.authority_service.provenance import AuthorityProvenanceReporter
 
 
@@ -145,11 +150,51 @@ class AuthorityWindowsService:
 
 def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
     config = _load_config(config_path)
+    provider_host_gateway: ProviderHostGateway | None = None
+    provider_host = config.get("provider_host")
+    if isinstance(provider_host, dict):
+        authority_signer = WindowsCngEnvelopeIdentity(
+            identity=str(provider_host["authority_id"]),
+            key_name=str(provider_host["authority_key_name"]),
+            machine_key=True,
+        )
+        if authority_signer.public_configuration() != provider_host.get(
+            "authority_public_identity"
+        ):
+            raise PermissionError(
+                "Authority Provider Host signing identity differs"
+            )
+        host_verifier = RsaPublicIdentity.from_configuration(
+            provider_host["host_public_identity"]
+        ).verifier()
+        provider_host_gateway = ProviderHostGateway(
+            pipe_name=str(provider_host["pipe_name"]),
+            authority_id=str(provider_host["authority_id"]),
+            host_id=str(provider_host["host_id"]),
+            authority_signer=authority_signer,
+            host_verifier=host_verifier,
+            expected_host_sid=str(provider_host["host_user_sid"]),
+            expected_host_session_id=int(provider_host["host_session_id"]),
+            expected_host_executable=Path(
+                str(provider_host["host_process_executable"])
+            ),
+            expected_host_executable_sha256=str(
+                provider_host["host_process_executable_sha256"]
+            ),
+            expected_host_profile_path=Path(
+                str(provider_host["host_profile_path"])
+            ),
+            sequence_store=Path(
+                str(provider_host["sequence_store"])
+            ),
+        )
     observer = ServiceProviderObserver(
         Path(config["provider_root"]),
         Path(config["allowed_evidence_root"]),
         str(config["provider_account_name"]),
         Path(config["provider_credential_path"]),
+        str(config["authorized_client_sid"]),
+        provider_host_gateway,
     )
     verifier_config = config.get("founder_capability_verifier")
     verifier = (
@@ -166,6 +211,23 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
         ),
         founder_capability_verifier=verifier,
     )
+    if provider_host_gateway is not None:
+        enrollment = provider_host_gateway.enrollment_record()
+        enrollment_id = str(enrollment["enrollment_id"])
+        existing = core.store.get("provider_host_enrollments", enrollment_id)
+        if existing is None:
+            core.store.insert(
+                "provider_host_enrollments",
+                enrollment_id,
+                "ACTIVE",
+                enrollment,
+            )
+        else:
+            existing.pop("service_state", None)
+            if existing != enrollment:
+                raise PermissionError(
+                    "Provider Host protected enrollment differs from durable state"
+                )
     return NamedPipeAuthorityServer(
         core,
         str(config["authorized_client_sid"]),
@@ -191,11 +253,11 @@ def _load_config(path: Path) -> dict[str, Any]:
     }
     schema_version = value.get("schema_version") if isinstance(value, dict) else None
     expected = common | (
-        {"founder_capability_verifier"} if schema_version == 3 else set()
-    )
+        {"founder_capability_verifier"} if schema_version in {3, 4} else set()
+    ) | ({"provider_host"} if schema_version == 4 else set())
     if (
         not isinstance(value, dict)
-        or schema_version not in {2, 3}
+        or schema_version not in {2, 3, 4}
         or set(value) != expected
         or value.get("service_name") != SERVICE_NAME
         or any(
@@ -203,12 +265,56 @@ def _load_config(path: Path) -> dict[str, Any]:
             for key in common - {"schema_version"}
         )
         or (
-            schema_version == 3
+            schema_version in {3, 4}
             and not isinstance(value.get("founder_capability_verifier"), dict)
+        )
+        or (
+            schema_version == 4
+            and not _valid_provider_host_configuration(
+                value.get("provider_host")
+            )
         )
     ):
         raise PermissionError("Authority Service configuration is invalid")
     return value
+
+
+def _valid_provider_host_configuration(value: object) -> bool:
+    fields = {
+        "schema_version",
+        "authority_id",
+        "authority_key_name",
+        "authority_public_identity",
+        "host_id",
+        "host_process_executable",
+        "host_process_executable_sha256",
+        "host_profile_path",
+        "host_public_identity",
+        "host_session_id",
+        "host_user_sid",
+        "pipe_name",
+        "sequence_store",
+    }
+    return (
+        isinstance(value, dict)
+        and set(value) == fields
+        and value.get("schema_version") == 1
+        and isinstance(value.get("authority_public_identity"), dict)
+        and isinstance(value.get("host_public_identity"), dict)
+        and isinstance(value.get("host_session_id"), int)
+        and not isinstance(value.get("host_session_id"), bool)
+        and value["host_session_id"] >= 0
+        and all(
+            isinstance(value.get(name), str) and value[name]
+            for name in fields
+            - {
+                "schema_version",
+                "authority_public_identity",
+                "host_public_identity",
+                "host_session_id",
+            }
+        )
+    )
 
 
 def _unblock_pipe_accept() -> None:
@@ -229,7 +335,22 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    options = parser().parse_args(arguments)
+    values = list(arguments) if arguments is not None else None
+    if values is None:
+        import sys
+
+        values = sys.argv[1:]
+    if values and values[0] == "codex-probe":
+        from keeper.authority_service.codex_probe import main as probe_main
+
+        return probe_main(values[1:])
+    if values and values[0] == "codex-register-once":
+        from keeper.authority_service.codex_registration import (
+            main as registration_main,
+        )
+
+        return registration_main(values[1:])
+    options = parser().parse_args(values)
     host = AuthorityWindowsService(options.config)
     if options.mode == "service":
         host.run_dispatcher()
