@@ -57,6 +57,9 @@
   surface is intentionally limited to the already validated registration and
   qualification evidence; it cannot substitute a provider, executable,
   account, model, or Host binding.
+  Operators invoke it through `keeper-authority
+  codex-reconcile-qualification`; diagnostics keep the Host in
+  `QUALIFICATION_UNCERTAIN` with a Founder action until recovery completes.
 - Keeper 1.0 is a personal-use, single-Founder product. It does not claim to
   resist arbitrary code already executing in its trusted Executive interpreter,
   a malicious local administrator, manual same-user database replacement, or

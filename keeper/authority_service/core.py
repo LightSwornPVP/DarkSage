@@ -380,6 +380,42 @@ class AuthorityServiceCore:
                 "protocol_compatible": False,
                 "provider_state": "UNAVAILABLE",
             }
+        reconciliation_registration_ids = sorted(
+            str(record["trusted_registration_id"])
+            for record in self.store.list_records("registrations")
+            if record.get("service_state") == "UNCERTAIN"
+            and record.get("registration_schema_version") == 4
+            and record.get("registration_lifecycle") == "QUALIFIED"
+            and isinstance(record.get("trusted_registration_id"), str)
+            and record.get("trusted_registration_id")
+            and isinstance(record.get("qualification_evidence_id"), str)
+            and record.get("qualification_evidence_id")
+            and (
+                qualification := self.store.get(
+                    "qualifications", str(record["qualification_evidence_id"])
+                )
+            )
+            is not None
+            and qualification.get("service_state") == "UNCERTAIN"
+            and isinstance(qualification.get("evidence"), dict)
+            and qualification["evidence"].get("registration_id")
+            == record.get("trusted_registration_id")
+        )
+        provider_host_status = dict(provider_host_status)
+        provider_host_status["qualification_reconciliation_required"] = bool(
+            reconciliation_registration_ids
+        )
+        provider_host_status["qualification_reconciliation_count"] = len(
+            reconciliation_registration_ids
+        )
+        provider_host_status["qualification_reconciliation_registration_ids"] = (
+            reconciliation_registration_ids
+        )
+        if reconciliation_registration_ids:
+            provider_host_status["provider_state"] = "QUALIFICATION_UNCERTAIN"
+            provider_host_status["founder_action_required"] = (
+                "RECONCILE_PROVIDER_QUALIFICATION"
+            )
         return {
             "service_version": SERVICE_VERSION,
             "protocol_version": PROTOCOL_VERSION,

@@ -447,6 +447,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
 
         return registration_main(values[1:])
+    if values and values[0] == "codex-reconcile-qualification":
+        from keeper.authority_service.codex_registration import (
+            reconciliation_main,
+        )
+
+        return reconciliation_main(values[1:])
     options = parser().parse_args(values)
     host = AuthorityWindowsService(options.config)
     if options.mode == "service":

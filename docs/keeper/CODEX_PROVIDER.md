@@ -143,6 +143,22 @@ same binding. If the Host commits the binding but its response is lost,
 Authority-owned binding and atomically completes the same records. It accepts no
 replacement provider input and remains one-winner and idempotent.
 
+The supported shipped recovery command is:
+
+```powershell
+keeper-authority codex-reconcile-qualification `
+  --registration-id <persisted-registration-id> `
+  --output-directory <new-empty-response-directory> `
+  --apply
+```
+
+The command exclusively claims its response directory, performs exactly one
+reconciliation request, and persists the complete public Authority response
+before extracting identifiers. Authority diagnostics report
+`QUALIFICATION_UNCERTAIN` and `RECONCILE_PROVIDER_QUALIFICATION` until the exact
+durable pair is reconciled. Re-running against an already claimed response
+directory or an already reconciled registration fails closed.
+
 The installed Host executable owns the supported production enrollment surface;
 no protected configuration file is edited by hand. After the matching protocol-7
 Authority update is healthy, the Founder runs:

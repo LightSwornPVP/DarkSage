@@ -16,6 +16,8 @@ import pytest
 from keeper.authority_service.client import AuthorityServiceClient
 from keeper.authority_service.codex_registration import (
     persist_public_response,
+    reconcile_qualification_once,
+    reconciliation_main,
     register_and_qualify_once,
     registration_declaration,
 )
@@ -602,6 +604,47 @@ def test_lost_provider_bind_response_reconciles_exact_durable_binding(
         client.reconcile_provider_qualification(registration_id)
 
 
+def test_lost_provider_bind_diagnostics_require_exact_reconciliation(
+    tmp_path: Path,
+) -> None:
+    observer = _HostQualificationObserver(lose_first_bind_response=True)
+    core, client = _codex_service(tmp_path, observer)
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    registration = _registration(executable)
+    registration_id = str(registration["trusted_registration_id"])
+    core.store.insert(
+        "registrations",
+        registration_id,
+        "REGISTERED_UNQUALIFIED",
+        registration,
+    )
+
+    with pytest.raises(RuntimeError, match="binding is uncertain"):
+        client.qualify_provider(registration_id)
+
+    status = client.diagnostics()["provider_host"]
+    assert status["provider_state"] == "QUALIFICATION_UNCERTAIN"
+    assert status["founder_action_required"] == (
+        "RECONCILE_PROVIDER_QUALIFICATION"
+    )
+    assert status["qualification_reconciliation_required"] is True
+    assert status["qualification_reconciliation_count"] == 1
+    assert status["qualification_reconciliation_registration_ids"] == [
+        registration_id
+    ]
+
+    client.reconcile_provider_qualification(registration_id)
+    recovered = client.diagnostics()["provider_host"]
+    assert recovered["qualification_reconciliation_required"] is False
+    assert recovered["qualification_reconciliation_count"] == 0
+    assert recovered["qualification_reconciliation_registration_ids"] == []
+    assert recovered["provider_state"] != "QUALIFICATION_UNCERTAIN"
+    assert recovered.get("founder_action_required") != (
+        "RECONCILE_PROVIDER_QUALIFICATION"
+    )
+
+
 def test_crash_before_provider_bind_ack_leaves_non_executable_uncertain_state(
     tmp_path: Path,
 ) -> None:
@@ -807,6 +850,138 @@ def test_one_shot_registration_claim_prevents_duplicate_mutation(
         "operation": "codex-register-and-qualify-once",
         "state": "CLAIMED",
     }
+
+
+def test_one_shot_qualification_reconciliation_persists_exact_response(
+    tmp_path: Path,
+) -> None:
+    class ReconciliationClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.response = {
+                "registration": {
+                    "trusted_registration_id": "registration-1",
+                },
+                "qualification": {
+                    "id": "qualification-1",
+                    "registration_id": "registration-1",
+                },
+                "reconciled": True,
+                "reconciled_at": "2026-08-02T12:00:00+00:00",
+            }
+
+        def reconcile_provider_qualification(
+            self, registration_id: str
+        ) -> dict[str, Any]:
+            self.calls.append(registration_id)
+            return dict(self.response)
+
+    client = ReconciliationClient()
+    output = tmp_path / "reconcile"
+
+    result = reconcile_qualification_once(
+        cast(Any, client), "registration-1", output
+    )
+
+    assert client.calls == ["registration-1"]
+    assert result == {
+        "registration_id": "registration-1",
+        "qualification_id": "qualification-1",
+        "reconciliation_response": str(
+            (output / "qualification-reconciliation-response.json").resolve()
+        ),
+    }
+    assert json.loads(
+        (output / "qualification-reconciliation-response.json").read_text(
+            encoding="utf-8"
+        )
+    ) == client.response
+    assert json.loads(
+        (output / "qualification-reconciliation.claim.json").read_text(
+            encoding="utf-8"
+        )
+    ) == {
+        "schema_version": 1,
+        "operation": "codex-reconcile-qualification-once",
+        "registration_id": "registration-1",
+        "state": "CLAIMED",
+    }
+
+    with pytest.raises(FileExistsError, match="already claimed"):
+        reconcile_qualification_once(
+            cast(Any, client), "registration-1", output
+        )
+    assert client.calls == ["registration-1"]
+
+
+def test_qualification_reconciliation_persists_malformed_response_before_reject(
+    tmp_path: Path,
+) -> None:
+    class MalformedClient:
+        response = {
+            "registration": {"trusted_registration_id": "registration-other"},
+            "qualification": {
+                "id": "qualification-other",
+                "registration_id": "registration-other",
+            },
+            "reconciled": True,
+        }
+
+        def reconcile_provider_qualification(
+            self, registration_id: str
+        ) -> dict[str, Any]:
+            assert registration_id == "registration-1"
+            return dict(self.response)
+
+    output = tmp_path / "malformed"
+    with pytest.raises(RuntimeError, match="persisted.*binding is invalid"):
+        reconcile_qualification_once(
+            cast(Any, MalformedClient()), "registration-1", output
+        )
+
+    assert json.loads(
+        (output / "qualification-reconciliation-response.json").read_text(
+            encoding="utf-8"
+        )
+    ) == MalformedClient.response
+
+
+def test_qualification_reconciliation_cli_requires_explicit_apply(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        reconciliation_main(
+            [
+                "--registration-id",
+                "registration-1",
+                "--output-directory",
+                str(tmp_path / "unused"),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "apply_required": True,
+        "operation": "codex-reconcile-qualification-once",
+        "registration_id": "registration-1",
+    }
+    assert not (tmp_path / "unused").exists()
+
+
+def test_authority_service_entrypoint_exposes_reconciliation_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from keeper.authority_service.service_main import main as authority_main
+
+    with pytest.raises(SystemExit) as stopped:
+        authority_main(["codex-reconcile-qualification", "--help"])
+
+    assert stopped.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "codex-reconcile-qualification" in help_text
+    assert "--registration-id" in help_text
+    assert "--output-directory" in help_text
+    assert "--apply" in help_text
 
 
 def test_subscription_registration_requires_and_forwards_reviewed_identity(
