@@ -104,6 +104,8 @@ class WindowsCngEnvelopeIdentity:
         key_name: str,
         machine_key: bool,
         owner_sid: str | None = None,
+        create_if_missing: bool = True,
+        machine_access_sids: tuple[str, ...] = (),
     ) -> None:
         if os.name != "nt" or not identity or not key_name:
             raise RuntimeError("Provider Host CNG identity requires Windows")
@@ -113,12 +115,26 @@ class WindowsCngEnvelopeIdentity:
             owner_sid is None or not owner_sid.startswith("S-1-")
         ):
             raise ValueError("user CNG identity requires an exact owner SID")
+        if not machine_key and machine_access_sids:
+            raise ValueError("user CNG identity cannot use machine access SIDs")
+        if machine_key and any(
+            not sid.startswith("S-1-") for sid in machine_access_sids
+        ):
+            raise ValueError("machine CNG identity access SID is invalid")
+        if len(set(machine_access_sids)) != len(machine_access_sids):
+            raise ValueError("machine CNG identity access SIDs are duplicated")
         self.identity = identity
         self.key_name = key_name
         self.machine_key = machine_key
         self.owner_sid = owner_sid
+        self.create_if_missing = create_if_missing
+        self.machine_access_sids = machine_access_sids
         modulus, exponent = _public_key(
-            key_name, machine_key=machine_key, owner_sid=owner_sid
+            key_name,
+            machine_key=machine_key,
+            owner_sid=owner_sid,
+            create_if_missing=create_if_missing,
+            machine_access_sids=machine_access_sids,
         )
         self._public = RsaPublicIdentity.from_configuration(
             _public_configuration(identity, modulus, exponent)
@@ -135,6 +151,8 @@ class WindowsCngEnvelopeIdentity:
                 digest,
                 machine_key=self.machine_key,
                 owner_sid=self.owner_sid,
+                create_if_missing=self.create_if_missing,
+                machine_access_sids=self.machine_access_sids,
             ),
             self._public.verify_digest,
             True,
@@ -195,11 +213,21 @@ def _rsa_verify(
 
 
 def _public_key(
-    name: str, *, machine_key: bool, owner_sid: str | None
+    name: str,
+    *,
+    machine_key: bool,
+    owner_sid: str | None,
+    create_if_missing: bool,
+    machine_access_sids: tuple[str, ...],
 ) -> tuple[bytes, bytes]:
     api = _ncrypt()
     provider, key = _open_key(
-        api, name, machine_key=machine_key, owner_sid=owner_sid
+        api,
+        name,
+        machine_key=machine_key,
+        owner_sid=owner_sid,
+        create_if_missing=create_if_missing,
+        machine_access_sids=machine_access_sids,
     )
     try:
         required = wintypes.DWORD()
@@ -249,12 +277,19 @@ def _sign(
     *,
     machine_key: bool,
     owner_sid: str | None,
+    create_if_missing: bool,
+    machine_access_sids: tuple[str, ...],
 ) -> bytes:
     if len(digest) != 32:
         raise ValueError("Provider Host signing digest is invalid")
     api = _ncrypt()
     provider, key = _open_key(
-        api, name, machine_key=machine_key, owner_sid=owner_sid
+        api,
+        name,
+        machine_key=machine_key,
+        owner_sid=owner_sid,
+        create_if_missing=create_if_missing,
+        machine_access_sids=machine_access_sids,
     )
     padding = _BcryptPkcs1PaddingInfo("SHA256")
     digest_buffer = ctypes.create_string_buffer(digest)
@@ -299,6 +334,8 @@ def _open_key(
     *,
     machine_key: bool,
     owner_sid: str | None,
+    create_if_missing: bool = True,
+    machine_access_sids: tuple[str, ...] = (),
 ) -> tuple[ctypes.c_void_p, ctypes.c_void_p]:
     provider = ctypes.c_void_p()
     key = ctypes.c_void_p()
@@ -317,10 +354,20 @@ def _open_key(
     if status == 0:
         if owner_sid is not None:
             _protect_user_key(api, key, owner_sid)
+        elif machine_access_sids:
+            _protect_machine_key(api, key, machine_access_sids)
         return provider, key
     if status & 0xFFFFFFFF not in {0x80090016, 0x8009000D}:
         api.NCryptFreeObject(provider)
         _check(status, "key open")
+    if not create_if_missing:
+        api.NCryptFreeObject(provider)
+        raise PermissionError("Provider Host CNG key is not provisioned")
+    if machine_key and not machine_access_sids:
+        api.NCryptFreeObject(provider)
+        raise PermissionError(
+            "machine Provider Host CNG key requires an explicit access policy"
+        )
     try:
         _check(
             api.NCryptCreatePersistedKey(
@@ -347,6 +394,8 @@ def _open_key(
         _check(api.NCryptFinalizeKey(key, _NCRYPT_SILENT_FLAG), "key finalization")
         if owner_sid is not None:
             _protect_user_key(api, key, owner_sid)
+        elif machine_access_sids:
+            _protect_machine_key(api, key, machine_access_sids)
         return provider, key
     except BaseException:
         if key:
@@ -370,12 +419,41 @@ def _protect_user_key(api: Any, key: ctypes.c_void_p, owner_sid: str) -> None:
         )
 
 
+def _protect_machine_key(
+    api: Any, key: ctypes.c_void_p, access_sids: tuple[str, ...]
+) -> None:
+    """Persist an exact machine-key DACL supplied by elevated lifecycle code."""
+    with _key_security_descriptor_for_sddl(
+        _machine_key_security_sddl(access_sids)
+    ) as (descriptor, length):
+        _check(
+            api.NCryptSetProperty(
+                key,
+                "Security Descr",
+                descriptor,
+                length,
+                _DACL_SECURITY_INFORMATION,
+            ),
+            "machine-key DACL",
+        )
+
+
 @contextmanager
 def _key_security_descriptor(
     owner_sid: str,
 ) -> Iterator[tuple[wintypes.LPVOID, int]]:
     if not owner_sid.startswith("S-1-"):
         raise ValueError("Provider Host key owner SID is invalid")
+    with _key_security_descriptor_for_sddl(
+        _key_security_sddl(owner_sid)
+    ) as value:
+        yield value
+
+
+@contextmanager
+def _key_security_descriptor_for_sddl(
+    sddl: str,
+) -> Iterator[tuple[wintypes.LPVOID, int]]:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
@@ -391,7 +469,6 @@ def _key_security_descriptor(
     kernel32.GetSecurityDescriptorLength.restype = wintypes.DWORD
     kernel32.LocalFree.restype = wintypes.HLOCAL
     descriptor = wintypes.LPVOID()
-    sddl = _key_security_sddl(owner_sid)
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl,
         _SDDL_REVISION_1,
@@ -418,6 +495,17 @@ def _key_security_sddl(owner_sid: str) -> str:
         f"D:P(D;;GA;;;{_RESTRICTED_CODE_SID})"
         f"(A;;GA;;;SY)(A;;GA;;;{owner_sid})"
     )
+
+
+def _machine_key_security_sddl(access_sids: tuple[str, ...]) -> str:
+    if (
+        not access_sids
+        or any(not sid.startswith("S-1-") for sid in access_sids)
+        or len(set(access_sids)) != len(access_sids)
+    ):
+        raise ValueError("Provider Host machine-key access policy is invalid")
+    grants = "".join(f"(A;;GA;;;{sid})" for sid in access_sids)
+    return f"D:P(D;;GA;;;{_RESTRICTED_CODE_SID}){grants}"
 
 
 def _check(status: int, operation: str) -> None:

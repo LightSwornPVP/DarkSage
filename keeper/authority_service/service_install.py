@@ -37,6 +37,7 @@ from keeper.authority_service.service_package import (
     verify_service_package,
 )
 from keeper.authority_service.windows_identity import current_process_sid
+from keeper.provider_host.signing import WindowsCngEnvelopeIdentity
 from keeper.executive.founder_capability import (
     ProductionFounderCapabilityIssuer,
     ProductionFounderCapabilityVerifier,
@@ -53,6 +54,7 @@ INSTALL_ROOT = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Keeper"
 SERVICE_ROOT = INSTALL_ROOT / "AuthorityService"
 MANIFEST_PATH = SERVICE_ROOT / "audit" / "machine-artifacts.json"
 PROVIDER_CREDENTIAL_PATH = SERVICE_ROOT / "config" / "provider-identity.bin"
+PROVIDER_HOST_AUTHORITY_KEY_NAME = "DarkSage.KeeperAuthority.ProviderHost.v1"
 
 
 class AuthorityServiceInstaller:
@@ -359,6 +361,78 @@ def backup(destination: Path) -> Path:
     return destination
 
 
+def verified_recovery_backup(destination: Path) -> dict[str, Any]:
+    """Capture a new immutable, hashed preimage while the service is stopped."""
+    _require_admin()
+    _require_service_stopped("recovery backup")
+    manifest = _load_completed_manifest()
+    source = SERVICE_ROOT / "data"
+    if not source.is_dir():
+        raise FileNotFoundError(
+            "Authority Service protected data is unavailable"
+        )
+    destination = destination.resolve()
+    evidence_path = destination.with_name(destination.name + "-manifest.json")
+    if destination.exists() or evidence_path.exists():
+        raise PermissionError("recovery preimage destination already exists")
+    source_files = _recovery_tree_files(source)
+    shutil.copytree(source, destination)
+    copied_files = _recovery_tree_files(destination)
+    if copied_files != source_files:
+        raise PermissionError("recovery preimage differs from protected state")
+    tree_sha256 = _canonical_sha256(copied_files)
+    evidence = {
+        "schema_version": 1,
+        "captured_at": _now(),
+        "source": str(source.resolve()),
+        "destination": str(destination),
+        "files": copied_files,
+        "tree_sha256": tree_sha256,
+    }
+    atomic_write_json(evidence_path, evidence)
+    persisted_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if persisted_evidence != evidence:
+        raise PermissionError("recovery preimage manifest did not persist exactly")
+    event = {
+        "captured_at": evidence["captured_at"],
+        "destination": str(destination),
+        "manifest": str(evidence_path),
+        "manifest_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest().upper(),
+        "tree_sha256": tree_sha256,
+    }
+    manifest.setdefault("recovery_preimages", []).append(event)
+    _persist_manifest(manifest)
+    return event
+
+
+def _recovery_tree_files(root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+        if path.is_symlink() or attributes & 0x400:
+            raise PermissionError("recovery preimage contains a reparse point")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise PermissionError("recovery preimage contains an unsupported entry")
+        records.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest().upper(),
+            }
+        )
+    if not records:
+        raise PermissionError("recovery preimage is empty")
+    return records
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest().upper()
+
+
 def upgrade_package(
     package_source: Path,
     expected_package_sha256: str,
@@ -383,7 +457,24 @@ def upgrade_package(
     if not backup_path.exists():
         shutil.copy2(package, backup_path)
         _record_file(manifest, backup_path)
+        _persist_manifest(manifest)
+    elif not _artifact_recorded(manifest, backup_path):
+        verify_rollback_package(backup_path, old_digest)
+        _record_file(manifest, backup_path)
+        _persist_manifest(manifest)
+    elif not _recorded_file_matches(manifest, backup_path):
+        raise PermissionError(
+            "Authority package rollback artifact differs from its manifest"
+        )
     rollback = verify_rollback_package(backup_path, old_digest)
+    provider_host_identity: dict[str, Any] | None = None
+    if (
+        candidate.manifest["protocol_version"] >= 7
+        and candidate.manifest["service_schema_version"] >= 6
+    ):
+        provider_host_identity = _provision_provider_host_authority_identity(
+            manifest
+        )
     temporary = package.with_suffix(".pyz.upgrade")
     if temporary.exists():
         raise PermissionError(
@@ -408,6 +499,11 @@ def upgrade_package(
             "protocol_version": candidate.manifest["protocol_version"],
             "schema_version": candidate.manifest["service_schema_version"],
             "backup_path": str(backup_path),
+            "provider_host_authority_key_id": (
+                provider_host_identity["key_id"]
+                if provider_host_identity is not None
+                else None
+            ),
         }
     )
     manifest["package_source_tree_sha256"] = candidate.manifest["source_tree_sha256"]
@@ -426,7 +522,61 @@ def upgrade_package(
         "protocol_version": candidate.manifest["protocol_version"],
         "schema_version": candidate.manifest["service_schema_version"],
         "founder_issuer_key_id": founder_verifier["key_id"],
+        "provider_host_authority_identity": provider_host_identity,
     }
+
+
+def _provision_provider_host_authority_identity(
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Create or verify the exact machine signer outside ServiceMain."""
+    service_sid = account_sid(rf"NT SERVICE\{SERVICE_NAME}")
+    access_sids = (
+        "S-1-5-18",
+        "S-1-5-32-544",
+        service_sid,
+    )
+    existing = manifest.get("provider_host_authority_identity")
+    if existing is not None and (
+        not isinstance(existing, dict)
+        or existing.get("schema_version") != 1
+        or existing.get("key_name") != PROVIDER_HOST_AUTHORITY_KEY_NAME
+        or existing.get("access_sids") != list(access_sids)
+    ):
+        raise PermissionError(
+            "Provider Host Authority identity differs from its lifecycle record"
+        )
+    identity_arguments: dict[str, Any] = {
+        "identity": "keeper-authority-provider-host:provisioned",
+        "key_name": PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        "machine_key": True,
+    }
+    signer = WindowsCngEnvelopeIdentity(
+        **identity_arguments,
+        create_if_missing=existing is None,
+        machine_access_sids=access_sids if existing is None else (),
+    )
+    public = signer.public_configuration()
+    record = {
+        "schema_version": 1,
+        "key_name": PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        "key_id": signer.key_id,
+        "public_identity": public,
+        "access_sids": list(access_sids),
+    }
+    if existing is not None and existing != record:
+        raise PermissionError(
+            "Provider Host Authority identity differs from its lifecycle record"
+        )
+    if existing is not None:
+        WindowsCngEnvelopeIdentity(
+            **identity_arguments,
+            create_if_missing=False,
+            machine_access_sids=access_sids,
+        )
+    manifest["provider_host_authority_identity"] = record
+    _persist_manifest(manifest)
+    return record
 
 
 def rollback_package(package_source: Path, expected_package_sha256: str) -> dict[str, Any]:
@@ -807,6 +957,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("diagnostics")
     backup_parser = commands.add_parser("backup")
     backup_parser.add_argument("destination", type=Path)
+    verified_backup_parser = commands.add_parser("backup-recovery-preimage")
+    verified_backup_parser.add_argument("destination", type=Path)
     commands.add_parser("uninstall-preserve")
     rotate = commands.add_parser("rotate-key")
     rotate.add_argument("confirmation")
@@ -867,6 +1019,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             value = diagnostics()
         elif options.command == "backup":
             value = {"backup": str(backup(options.destination.resolve()))}
+        elif options.command == "backup-recovery-preimage":
+            value = verified_recovery_backup(options.destination)
         elif options.command == "uninstall-preserve":
             value = uninstall_preserving_history()
         elif options.command == "rotate-key":

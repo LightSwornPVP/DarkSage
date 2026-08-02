@@ -85,7 +85,7 @@ def test_authority_service_package_has_exact_service_closure_and_metadata(
     package = _build(tmp_path)
     verified = verify_service_package(package)
 
-    assert verified.manifest["service_version"] == "1.7.1"
+    assert verified.manifest["service_version"] == "1.7.2"
     assert verified.manifest["protocol_version"] == 7
     assert verified.manifest["service_schema_version"] == 6
     assert verified.manifest["provider_host_protocol"] == "keeper-provider-host/1"
@@ -240,6 +240,14 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     )
     monkeypatch.setattr(
         service_install,
+        "_provision_provider_host_authority_identity",
+        lambda value: {
+            "schema_version": 1,
+            "key_id": "keeper-provider-host-rsa:test",
+        },
+    )
+    monkeypatch.setattr(
+        service_install,
         "build_service_package",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upgrade rebuilt package")),
     )
@@ -249,6 +257,26 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
         service_install.upgrade_package(candidate, candidate_digest, "0" * 64)
     assert package.read_bytes() == old_package
     assert not any((service_root / "backups").iterdir())
+
+    monkeypatch.setattr(
+        service_install,
+        "_provision_provider_host_authority_identity",
+        lambda value: (_ for _ in ()).throw(
+            PermissionError("synthetic Provider Host identity failure")
+        ),
+    )
+    with pytest.raises(PermissionError, match="synthetic Provider Host"):
+        service_install.upgrade_package(candidate, candidate_digest, old_digest)
+    assert package.read_bytes() == old_package
+
+    monkeypatch.setattr(
+        service_install,
+        "_provision_provider_host_authority_identity",
+        lambda value: {
+            "schema_version": 1,
+            "key_id": "keeper-provider-host-rsa:test",
+        },
+    )
 
     result = service_install.upgrade_package(
         candidate, candidate_digest, old_digest
@@ -262,15 +290,18 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert persisted["upgrades"][-1]["package_sha256"] == candidate_digest
     assert persisted["upgrades"][-1]["source_tree_sha256"] == verify_service_package(candidate).manifest["source_tree_sha256"]
+    assert persisted["upgrades"][-1]["provider_host_authority_key_id"] == (
+        "keeper-provider-host-rsa:test"
+    )
 
-    real_replace = service_install.os.replace
+    real_replace = os.replace
 
     def replace_then_interrupt(source: Path, destination: Path) -> None:
         real_replace(source, destination)
         if Path(source).suffix == ".rollback":
             raise RuntimeError("simulated interruption after rollback replacement")
 
-    monkeypatch.setattr(service_install.os, "replace", replace_then_interrupt)
+    monkeypatch.setattr(os, "replace", replace_then_interrupt)
     with pytest.raises(RuntimeError, match="simulated interruption"):
         service_install.rollback_package(backup, str(result["backup_sha256"]))
     assert package.read_bytes() == old_package
@@ -278,7 +309,7 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     assert interrupted["package_rollback_claim"]["restored_package_sha256"] == str(
         result["backup_sha256"]
     )
-    monkeypatch.setattr(service_install.os, "replace", real_replace)
+    monkeypatch.setattr(os, "replace", real_replace)
     rollback_result = service_install.rollback_package(
         backup, str(result["backup_sha256"])
     )
