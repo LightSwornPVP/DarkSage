@@ -15,6 +15,10 @@ COMPLETION_PURPOSE = "keeper-provider-host-completion"
 HELLO_PURPOSE = "keeper-provider-host-hello"
 SETUP_PURPOSE = "keeper-provider-host-provider-setup"
 SETUP_RESULT_PURPOSE = "keeper-provider-host-provider-setup-result"
+REQUEST_PURPOSE = "keeper-provider-host-request"
+RESPONSE_PURPOSE = "keeper-provider-host-response"
+STARTED_PURPOSE = "keeper-provider-host-started"
+STARTED_ACK_PURPOSE = "keeper-provider-host-started-ack"
 MAX_FRAME_BYTES = 2 * 1024 * 1024
 
 

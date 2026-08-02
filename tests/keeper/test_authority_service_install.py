@@ -1,51 +1,249 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
+import pytest
+
+from keeper.authority_service import service_install
 from keeper.authority_service.service_install import AuthorityServiceInstaller
+from keeper.authority_service.service_main import SERVICE_NAME
+from keeper.authority_service.service_package import (
+    PACKAGE_MANIFEST,
+    build_service_package,
+    verify_rollback_package,
+    verify_service_package,
+    write_external_manifest,
+)
 
 
-def test_authority_service_package_is_self_contained(
+def _repository() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _build(tmp_path: Path, name: str = "keeper-authority.pyz") -> Path:
+    package = tmp_path / name
+    AuthorityServiceInstaller(_repository())._build_package(package)
+    return package
+
+
+def test_authority_service_package_is_self_contained_and_reachable(
     tmp_path: Path,
 ) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    package = tmp_path / "keeper-authority.pyz"
-    AuthorityServiceInstaller(repository)._build_package(package)
+    package = _build(tmp_path)
 
-    result = subprocess.run(
-        [sys.executable, str(package), "--help"],
-        cwd=tmp_path,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-        timeout=30,
+    for arguments, expected in (
+        (["--help"], "service"),
+        (["codex-probe", "--help"], "codex-probe"),
+        (["codex-register-once", "--help"], "codex-register-once"),
+        (["codex-reconcile-qualification", "--help"], "codex-reconcile-qualification"),
+    ):
+        result = subprocess.run(
+            [sys.executable, str(package), *arguments],
+            cwd=tmp_path,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert expected in result.stdout
+
+
+def test_authority_service_package_is_reproducible_across_roots_and_mtimes(
+    tmp_path: Path,
+) -> None:
+    first_source = tmp_path / "source-a"
+    second_source = tmp_path / "source-b"
+    shutil.copytree(_repository() / "keeper", first_source / "keeper")
+    shutil.copytree(_repository() / "keeper", second_source / "keeper")
+    os.utime(
+        second_source / "keeper" / "authority_service" / "service_main.py",
+        (1_800_000_000, 1_800_000_000),
     )
-
-    assert result.returncode == 0
-    assert "service" in result.stdout
-    assert "console" in result.stdout
-
-
-def test_authority_service_package_is_reproducible_across_source_mtimes(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source"
-    keeper = source / "keeper"
-    keeper.mkdir(parents=True)
-    module = keeper / "__init__.py"
-    module.write_text("VALUE = 1\n", encoding="utf-8")
     first = tmp_path / "first.pyz"
     second = tmp_path / "second.pyz"
-    installer = AuthorityServiceInstaller(source)
 
-    os.utime(module, (1_700_000_000, 1_700_000_000))
-    installer._build_package(first)
-    os.utime(module, (1_800_000_000, 1_800_000_000))
-    installer._build_package(second)
+    build_service_package(first_source, first)
+    build_service_package(second_source, second)
 
     assert first.read_bytes() == second.read_bytes()
+    assert verify_service_package(first).manifest == verify_service_package(second).manifest
+
+
+def test_authority_service_package_has_exact_service_closure_and_metadata(
+    tmp_path: Path,
+) -> None:
+    package = _build(tmp_path)
+    verified = verify_service_package(package)
+
+    assert verified.manifest["service_version"] == "1.7.1"
+    assert verified.manifest["protocol_version"] == 7
+    assert verified.manifest["service_schema_version"] == 6
+    assert verified.manifest["provider_host_protocol"] == "keeper-provider-host/1"
+    with zipfile.ZipFile(package) as archive:
+        infos = archive.infolist()
+        names = [item.filename for item in infos]
+        assert names[-1] == PACKAGE_MANIFEST
+        assert names == [
+            *(entry["path"] for entry in verified.manifest["entries"]),
+            PACKAGE_MANIFEST,
+        ]
+        assert all(item.date_time == (1980, 1, 1, 0, 0, 0) for item in infos)
+        assert all(item.compress_type == zipfile.ZIP_DEFLATED for item in infos)
+        assert all(item.create_system == 3 for item in infos)
+        assert not any(
+            name.startswith(("keeper/app/", "keeper/ui/", "keeper/ui_qml/", "keeper/assets/"))
+            or "__pycache__" in name
+            or name.endswith((".pyc", ".pyo"))
+            for name in names
+        )
+
+
+def test_unrelated_ui_source_does_not_change_authority_package(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(_repository() / "keeper", source / "keeper")
+    first = tmp_path / "first.pyz"
+    second = tmp_path / "second.pyz"
+    build_service_package(source, first)
+    ui_file = source / "keeper" / "ui" / "theme.py"
+    ui_file.parent.mkdir(parents=True, exist_ok=True)
+    ui_file.write_text("UNRELATED = True\n", encoding="utf-8")
+    build_service_package(source, second)
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_required_runtime_source_change_changes_package(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(_repository() / "keeper", source / "keeper")
+    first = tmp_path / "first.pyz"
+    second = tmp_path / "second.pyz"
+    build_service_package(source, first)
+    protocol = source / "keeper" / "authority_service" / "protocol.py"
+    protocol.write_text(protocol.read_text(encoding="utf-8") + "\n# closure change\n", encoding="utf-8")
+    build_service_package(source, second)
+    assert first.read_bytes() != second.read_bytes()
+
+
+def test_package_verification_rejects_hash_tamper_and_extra_entry(tmp_path: Path) -> None:
+    package = _build(tmp_path)
+    digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    verify_service_package(package, digest)
+    with pytest.raises(PermissionError, match="authorization"):
+        verify_service_package(package, "0" * 64)
+
+    changed = tmp_path / "changed.pyz"
+    changed.write_bytes(package.read_bytes())
+    with zipfile.ZipFile(changed, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("keeper/unexpected.py", b"VALUE = 1\n")
+    with pytest.raises(PermissionError, match="entry order|coverage"):
+        verify_service_package(changed)
+
+
+def test_external_manifest_binds_package_and_git_source(tmp_path: Path) -> None:
+    package = _build(tmp_path)
+    verified = verify_service_package(package)
+    manifest_path = write_external_manifest(
+        verified, tmp_path / "entry-manifest.json", source_root=_repository()
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["package_sha256"] == verified.package_sha256
+    assert manifest["package_size"] == package.stat().st_size
+    assert manifest["archive_manifest"] == verified.manifest
+    assert len(manifest["source_commit"]) == 40
+    assert len(manifest["source_tree"]) == 40
+
+
+def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = _build(tmp_path, "candidate.pyz")
+    candidate_digest = hashlib.sha256(candidate.read_bytes()).hexdigest().upper()
+    service_root = tmp_path / "service"
+    package = service_root / "bin" / "keeper-authority.pyz"
+    manifest_path = service_root / "audit" / "machine-artifacts.json"
+    package.parent.mkdir(parents=True)
+    (service_root / "backups").mkdir(parents=True)
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("__main__.py", "print('old service')\n")
+    old_package = package.read_bytes()
+    manifest = {
+        "schema_version": 1,
+        "service_name": SERVICE_NAME,
+        "installation_completed_at": "2026-01-01T00:00:00+00:00",
+        "artifacts": [],
+        "commands": [],
+    }
+    service_install._record_file(manifest, package)
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(service_install, "SERVICE_ROOT", service_root)
+    monkeypatch.setattr(service_install, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "STATE: STOPPED\n"),
+    )
+    monkeypatch.setattr(
+        service_install,
+        "_migrate_founder_capability_configuration",
+        lambda value: {"key_id": "founder-test-key"},
+    )
+    monkeypatch.setattr(
+        service_install,
+        "build_service_package",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upgrade rebuilt package")),
+    )
+
+    result = service_install.upgrade_package(candidate, candidate_digest)
+
+    assert package.read_bytes() == candidate.read_bytes()
+    assert result["package_sha256"] == candidate_digest
+    backup = Path(str(result["backup"]))
+    assert backup.read_bytes() == old_package
+    assert result["backup_sha256"] == hashlib.sha256(old_package).hexdigest().upper()
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert persisted["upgrades"][-1]["package_sha256"] == candidate_digest
+    assert persisted["upgrades"][-1]["source_tree_sha256"] == verify_service_package(candidate).manifest["source_tree_sha256"]
+
+
+def test_upgrade_rejects_wrong_hash_before_touching_installed_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = _build(tmp_path, "candidate.pyz")
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    with pytest.raises(PermissionError, match="authorization"):
+        service_install.upgrade_package(candidate, "0" * 64)
+
+
+def test_rollback_verification_accepts_exact_legacy_package_only(tmp_path: Path) -> None:
+    package = tmp_path / "legacy.pyz"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("__main__.py", "print('legacy service')\n")
+        archive.writestr("keeper/service.py", "VALUE = 1\n")
+    digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    verified = verify_rollback_package(package, digest)
+    assert verified.package_sha256 == digest
+    with pytest.raises(PermissionError, match="SHA-256"):
+        verify_rollback_package(package, "0" * 64)
+
+
+def test_lazy_package_exports_preserve_public_compatibility() -> None:
+    from keeper.executive import AuthorityEvaluator, ExecutiveRepository
+    from keeper.providers import AgentProvider, CliProvider, MockProvider
+
+    assert AuthorityEvaluator.__name__ == "AuthorityEvaluator"
+    assert ExecutiveRepository.__name__ == "ExecutiveRepository"
+    assert AgentProvider.__name__ == "AgentProvider"
+    assert CliProvider.__name__ == "CliProvider"
+    assert MockProvider.__name__ == "MockProvider"

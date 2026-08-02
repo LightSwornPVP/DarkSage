@@ -29,6 +29,11 @@ from keeper.authority_service.provider_identity import (
     unprotect_provider_password,
 )
 from keeper.authority_service.service_main import SERVICE_NAME
+from keeper.authority_service.service_package import (
+    build_service_package,
+    verify_rollback_package,
+    verify_service_package,
+)
 from keeper.authority_service.windows_identity import current_process_sid
 from keeper.executive.founder_capability import (
     ProductionFounderCapabilityIssuer,
@@ -302,34 +307,7 @@ class AuthorityServiceInstaller:
         _persist_manifest(manifest)
 
     def _build_package(self, destination: Path) -> None:
-        keeper_root = self.source_root / "keeper"
-        if not keeper_root.is_dir():
-            raise FileNotFoundError("Keeper package source is unavailable")
-        with zipfile.ZipFile(
-            destination, "w", compression=zipfile.ZIP_DEFLATED
-        ) as archive:
-            _write_deterministic_zip_entry(
-                archive,
-                "__main__.py",
-                "from keeper.authority_service.service_main import main\n"
-                "raise SystemExit(main())\n",
-            )
-            for path in sorted(keeper_root.rglob("*.py")):
-                _write_deterministic_zip_entry(
-                    archive,
-                    (Path("keeper") / path.relative_to(keeper_root)).as_posix(),
-                    path.read_bytes(),
-                )
-
-
-def _write_deterministic_zip_entry(
-    archive: zipfile.ZipFile, name: str, content: str | bytes
-) -> None:
-    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-    info.compress_type = zipfile.ZIP_DEFLATED
-    info.create_system = 3
-    info.external_attr = (0o100644 & 0xFFFF) << 16
-    archive.writestr(info, content)
+        build_service_package(self.source_root, destination)
 
 
 def start() -> None:
@@ -379,9 +357,11 @@ def backup(destination: Path) -> Path:
     return destination
 
 
-def upgrade_package(source_root: Path) -> dict[str, Any]:
+def upgrade_package(package_source: Path, expected_package_sha256: str) -> dict[str, Any]:
     _require_admin()
-    installer = AuthorityServiceInstaller(source_root)
+    candidate = verify_service_package(package_source, expected_package_sha256)
+    if candidate.path.is_relative_to(SERVICE_ROOT.resolve()):
+        raise PermissionError("Authority upgrade candidate must be outside protected service state")
     manifest = _load_completed_manifest()
     query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
     if "RUNNING" in query.stdout or "START_PENDING" in query.stdout:
@@ -400,30 +380,34 @@ def upgrade_package(source_root: Path) -> dict[str, Any]:
     if not backup_path.exists():
         shutil.copy2(package, backup_path)
         _record_file(manifest, backup_path)
+    rollback = verify_rollback_package(backup_path, old_digest)
     temporary = package.with_suffix(".pyz.upgrade")
     if temporary.exists():
         raise PermissionError(
             "Authority Service upgrade staging file already exists"
         )
     try:
-        installer._build_package(temporary)
-        new_digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+        shutil.copy2(candidate.path, temporary)
+        staged = verify_service_package(temporary, candidate.package_sha256)
+        new_digest = staged.package_sha256
         os.replace(temporary, package)
     finally:
         if temporary.exists():
             temporary.unlink()
     _record_file(manifest, package)
-    source_commit = _git_head(installer.source_root)
     manifest.setdefault("upgrades", []).append(
         {
             "upgraded_at": _now(),
             "previous_package_sha256": old_digest,
             "package_sha256": new_digest,
-            "source_commit": source_commit,
+            "source_tree_sha256": candidate.manifest["source_tree_sha256"],
+            "service_version": candidate.manifest["service_version"],
+            "protocol_version": candidate.manifest["protocol_version"],
+            "schema_version": candidate.manifest["service_schema_version"],
             "backup_path": str(backup_path),
         }
     )
-    manifest["source_commit"] = source_commit
+    manifest["package_source_tree_sha256"] = candidate.manifest["source_tree_sha256"]
     _persist_manifest(manifest)
     # The new package deliberately accepts schema 2 in fail-closed mode, so
     # a configuration-migration failure cannot make the stopped service
@@ -433,7 +417,11 @@ def upgrade_package(source_root: Path) -> dict[str, Any]:
         "package": str(package),
         "package_sha256": new_digest,
         "backup": str(backup_path),
-        "source_commit": source_commit,
+        "backup_sha256": rollback.package_sha256,
+        "source_tree_sha256": candidate.manifest["source_tree_sha256"],
+        "service_version": candidate.manifest["service_version"],
+        "protocol_version": candidate.manifest["protocol_version"],
+        "schema_version": candidate.manifest["service_schema_version"],
         "founder_issuer_key_id": founder_verifier["key_id"],
     }
 
@@ -691,7 +679,15 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("install")
     commands.add_parser("resume-install")
-    commands.add_parser("upgrade-package")
+    upgrade = commands.add_parser("upgrade-package")
+    upgrade.add_argument("--package", type=Path, required=True)
+    upgrade.add_argument("--expected-sha256", required=True)
+    verify_package = commands.add_parser("verify-package")
+    verify_package.add_argument("--package", type=Path, required=True)
+    verify_package.add_argument("--expected-sha256", required=True)
+    verify_rollback = commands.add_parser("verify-rollback-package")
+    verify_rollback.add_argument("--package", type=Path, required=True)
+    verify_rollback.add_argument("--expected-sha256", required=True)
     commands.add_parser("provision-provider-identity")
     commands.add_parser("repair-permissions")
     commands.add_parser("start")
@@ -717,7 +713,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 resume=True
             )
         elif options.command == "upgrade-package":
-            value = upgrade_package(options.source_root)
+            value = upgrade_package(options.package, options.expected_sha256)
+        elif options.command == "verify-package":
+            verified = verify_service_package(options.package, options.expected_sha256)
+            value = {
+                "package": str(verified.path),
+                "package_sha256": verified.package_sha256,
+                "package_size": verified.package_size,
+                "manifest": verified.manifest,
+            }
+        elif options.command == "verify-rollback-package":
+            verified_rollback = verify_rollback_package(
+                options.package, options.expected_sha256
+            )
+            value = {
+                "package": str(verified_rollback.path),
+                "package_sha256": verified_rollback.package_sha256,
+                "package_size": verified_rollback.package_size,
+                "rollback": True,
+            }
         elif options.command == "provision-provider-identity":
             value = provision_provider_identity()
         elif options.command == "repair-permissions":
