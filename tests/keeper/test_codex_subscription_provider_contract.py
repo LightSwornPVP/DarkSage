@@ -338,6 +338,38 @@ class _CodexObserver:
         }
 
 
+class _HostQualificationObserver(_CodexObserver):
+    def __init__(self, *, lose_first_bind_response: bool = False) -> None:
+        super().__init__()
+        self.bound: dict[str, Any] | None = None
+        self.bind_calls = 0
+        self.lose_first_bind_response = lose_first_bind_response
+
+    def qualification_identifier(
+        self, registration: dict[str, Any], planned_identifier: str
+    ) -> str:
+        del registration
+        return planned_identifier
+
+    def bind_qualified_provider(
+        self,
+        registration: dict[str, Any],
+        qualification: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.bind_calls += 1
+        binding = {
+            "registration_id": registration["trusted_registration_id"],
+            "qualification_id": qualification["id"],
+            "evidence_digest": qualification["evidence_digest"],
+        }
+        if self.bound is not None and self.bound != binding:
+            raise PermissionError("Provider Host provider binding conflicts")
+        self.bound = binding
+        if self.lose_first_bind_response and self.bind_calls == 1:
+            raise OSError("simulated lost Host bind response")
+        return {**binding, "state": "QUALIFIED"}
+
+
 def _codex_service(
     tmp_path: Path, observer: _CodexObserver
 ) -> tuple[AuthorityServiceCore, AuthorityServiceClient]:
@@ -482,6 +514,122 @@ def _qualified(registration: dict[str, object]) -> dict[str, object]:
         result
     )
     return result
+
+
+def test_unbound_enrolled_host_can_qualify_and_bind_exact_provider(
+    tmp_path: Path,
+) -> None:
+    observer = _HostQualificationObserver()
+    core, client = _codex_service(tmp_path, observer)
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    registration = _registration(executable)
+    registration_id = str(registration["trusted_registration_id"])
+    core.store.insert(
+        "registrations",
+        registration_id,
+        "REGISTERED_UNQUALIFIED",
+        registration,
+    )
+
+    qualified = client.qualify_provider(registration_id)
+
+    qualification_id = str(qualified["qualification"]["id"])
+    assert observer.bound == {
+        "registration_id": registration_id,
+        "qualification_id": qualification_id,
+        "evidence_digest": qualified["qualification"]["evidence_digest"],
+    }
+    assert observer.bind_calls == 1
+    stored_registration = core.store.get("registrations", registration_id)
+    stored_qualification = core.store.get("qualifications", qualification_id)
+    assert stored_registration is not None
+    assert stored_registration["service_state"] == "QUALIFIED"
+    assert stored_registration["provider_binding_state"] == "QUALIFIED"
+    assert stored_qualification is not None
+    assert stored_qualification["service_state"] == "QUALIFIED"
+
+
+def test_lost_provider_bind_response_reconciles_exact_durable_binding(
+    tmp_path: Path,
+) -> None:
+    observer = _HostQualificationObserver(lose_first_bind_response=True)
+    core, client = _codex_service(tmp_path, observer)
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    registration = _registration(executable)
+    registration_id = str(registration["trusted_registration_id"])
+    core.store.insert(
+        "registrations",
+        registration_id,
+        "REGISTERED_UNQUALIFIED",
+        registration,
+    )
+
+    with pytest.raises(RuntimeError, match="binding is uncertain"):
+        client.qualify_provider(registration_id)
+    uncertain = core.store.get("registrations", registration_id)
+    assert uncertain is not None
+    assert uncertain["service_state"] == "UNCERTAIN"
+    assert uncertain["provider_binding_state"] == "UNCERTAIN"
+    assert observer.bound is not None
+    qualification_id = str(uncertain["qualification_evidence_id"])
+    qualification = core.store.get("qualifications", qualification_id)
+    assert qualification is not None
+    assert qualification["service_state"] == "UNCERTAIN"
+
+    recovered = client.reconcile_provider_qualification(registration_id)
+
+    assert recovered["reconciled"] is True
+    assert observer.bind_calls == 2
+    reconciled_registration = core.store.get("registrations", registration_id)
+    reconciled_qualification = core.store.get(
+        "qualifications", qualification_id
+    )
+    assert reconciled_registration is not None
+    assert reconciled_qualification is not None
+    assert reconciled_registration["service_state"] == "QUALIFIED"
+    assert reconciled_qualification["service_state"] == "QUALIFIED"
+    with pytest.raises(PermissionError, match="not eligible"):
+        client.reconcile_provider_qualification(registration_id)
+
+
+def test_crash_before_provider_bind_ack_leaves_non_executable_uncertain_state(
+    tmp_path: Path,
+) -> None:
+    class SimulatedCrash(BaseException):
+        pass
+
+    observer = _HostQualificationObserver()
+
+    def crash_after_durable_host_bind(
+        registration: dict[str, Any], qualification: dict[str, Any]
+    ) -> dict[str, Any]:
+        observer.bound = {
+            "registration_id": registration["trusted_registration_id"],
+            "qualification_id": qualification["id"],
+            "evidence_digest": qualification["evidence_digest"],
+        }
+        raise SimulatedCrash()
+
+    observer.bind_qualified_provider = crash_after_durable_host_bind  # type: ignore[method-assign]
+    core, client = _codex_service(tmp_path, observer)
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    registration = _registration(executable)
+    registration_id = str(registration["trusted_registration_id"])
+    core.store.insert(
+        "registrations",
+        registration_id,
+        "REGISTERED_UNQUALIFIED",
+        registration,
+    )
+
+    with pytest.raises(SimulatedCrash):
+        client.qualify_provider(registration_id)
+    uncertain = core.store.get("registrations", registration_id)
+    assert uncertain is not None
+    assert uncertain["service_state"] == "UNCERTAIN"
 
 
 def test_subscription_registration_is_bounded_and_not_free(tmp_path: Path) -> None:

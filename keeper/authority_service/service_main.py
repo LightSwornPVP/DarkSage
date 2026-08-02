@@ -286,10 +286,23 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
                 ),
                 expected_host_profile_path=Path(str(binding["profile_path"])),
                 sequence_store=core.root / "provider-host-gateway-sequences.db",
+                enrollment_is_active=lambda: (
+                    (
+                        current := core.store.get(
+                            "provider_host_enrollments",
+                            str(receipt["enrollment_id"]),
+                        )
+                    )
+                    is not None
+                    and current.get("service_state") == "ACTIVE"
+                ),
             )
             observer.provider_host_gateway = gateway
 
         def deactivate_provider_host(record: Mapping[str, Any]) -> None:
+            gateway = observer.provider_host_gateway
+            if gateway is not None:
+                gateway.deactivate()
             observer.provider_host_gateway = None
 
         core.configure_provider_host_enrollment(

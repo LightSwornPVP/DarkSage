@@ -37,6 +37,7 @@ class Operation(StrEnum):
     REVOKE_PROVIDER_HOST_ENROLLMENT = "revoke_provider_host_enrollment"
     REGISTER_PROVIDER = "register_provider"
     BEGIN_QUALIFICATION = "begin_qualification"
+    RECONCILE_PROVIDER_QUALIFICATION = "reconcile_provider_qualification"
     FINALIZE_QUALIFICATION = "finalize_qualification"
     RESERVE_ATTEMPT = "reserve_attempt"
     AUTHORIZE_PROJECT_LAUNCH = "authorize_project_launch"

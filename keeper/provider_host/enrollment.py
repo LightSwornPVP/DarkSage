@@ -439,6 +439,8 @@ def redacted_enrollment_status(record: Mapping[str, Any] | None) -> dict[str, An
         "EXPIRED": "CREATE_NEW_PROVIDER_HOST_ENROLLMENT",
         "UNCERTAIN": "RECONCILE_PROVIDER_HOST_ENROLLMENT",
     }.get(state, "RECONCILE_PROVIDER_HOST_ENROLLMENT")
+    if state == "UNCERTAIN" and record.get("uncertainty_kind") == "REVOCATION":
+        action = "COMPLETE_PROVIDER_HOST_REVOCATION"
     return {
         "installed": True,
         "online": False,

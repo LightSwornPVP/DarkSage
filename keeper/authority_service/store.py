@@ -495,6 +495,91 @@ class AuthorityStore:
             if project_id is not None:
                 self._bump_project_version(connection, project_id)
 
+    def stage_provider_qualification_binding(
+        self,
+        registration_id: str,
+        qualification_id: str,
+        registration: dict[str, Any],
+        qualification: dict[str, Any],
+    ) -> None:
+        """Atomically fence a qualified observation before Host binding."""
+        self._transition_provider_qualification_pair(
+            registration_id,
+            qualification_id,
+            expected_registration="REGISTERED_UNQUALIFIED",
+            expected_qualification="EXECUTION_STARTED",
+            state="UNCERTAIN",
+            registration=registration,
+            qualification=qualification,
+        )
+
+    def complete_provider_qualification_binding(
+        self,
+        registration_id: str,
+        qualification_id: str,
+        registration: dict[str, Any],
+        qualification: dict[str, Any],
+    ) -> None:
+        """Atomically publish an exact, idempotently Host-bound qualification."""
+        self._transition_provider_qualification_pair(
+            registration_id,
+            qualification_id,
+            expected_registration="UNCERTAIN",
+            expected_qualification="UNCERTAIN",
+            state="QUALIFIED",
+            registration=registration,
+            qualification=qualification,
+        )
+
+    def _transition_provider_qualification_pair(
+        self,
+        registration_id: str,
+        qualification_id: str,
+        *,
+        expected_registration: str,
+        expected_qualification: str,
+        state: str,
+        registration: dict[str, Any],
+        qualification: dict[str, Any],
+    ) -> None:
+        registration_serialized, registration_digest = _serialize(registration)
+        qualification_serialized, qualification_digest = _serialize(qualification)
+        timestamp = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            registration_cursor = connection.execute(
+                "UPDATE registrations SET state=?,payload=?,payload_hash=?,updated_at=? "
+                "WHERE id=? AND state=?",
+                (
+                    state,
+                    registration_serialized,
+                    registration_digest,
+                    timestamp,
+                    registration_id,
+                    expected_registration,
+                ),
+            )
+            qualification_cursor = connection.execute(
+                "UPDATE qualifications SET state=?,payload=?,payload_hash=?,updated_at=? "
+                "WHERE id=? AND registration_id=? AND state=?",
+                (
+                    state,
+                    qualification_serialized,
+                    qualification_digest,
+                    timestamp,
+                    qualification_id,
+                    registration_id,
+                    expected_qualification,
+                ),
+            )
+            if (
+                registration_cursor.rowcount != 1
+                or qualification_cursor.rowcount != 1
+            ):
+                raise PermissionError(
+                    "Provider qualification binding transition was rejected"
+                )
+
     def list_records(self, table: str) -> list[dict[str, Any]]:
         if table not in {
             "registrations", "qualifications", "attempts",

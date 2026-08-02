@@ -129,7 +129,11 @@ class NamedPipeAuthorityServer:
                             and "model_allowlist" in request.payload
                         )
                         or (
-                            request.operation is Operation.BEGIN_QUALIFICATION
+                            request.operation
+                            in {
+                                Operation.BEGIN_QUALIFICATION,
+                                Operation.RECONCILE_PROVIDER_QUALIFICATION,
+                            }
                             and self._subscription_qualification(
                                 request.payload
                             )
@@ -145,6 +149,7 @@ class NamedPipeAuthorityServer:
                     in {
                         Operation.REGISTER_PROVIDER,
                         Operation.BEGIN_QUALIFICATION,
+                        Operation.RECONCILE_PROVIDER_QUALIFICATION,
                         Operation.EXECUTE_PROVIDER,
                         Operation.RECORD_PROVIDER_START,
                     }

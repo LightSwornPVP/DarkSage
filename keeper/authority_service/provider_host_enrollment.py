@@ -293,6 +293,7 @@ class ProviderHostEnrollmentCoordinator:
         except (OSError, PermissionError, RuntimeError, TypeError, ValueError):
             uncertain = {
                 **{name: value for name, value in stored.items() if name != "service_state"},
+                "uncertainty_kind": "ACTIVATION",
                 "updated_at": self.now().astimezone(UTC).isoformat(),
             }
             self.store.transition_provider_host_enrollment(
@@ -339,7 +340,7 @@ class ProviderHostEnrollmentCoordinator:
         if state == "ACTIVE":
             self.activate(record)
             return self._completion_result(record)
-        if state != "UNCERTAIN":
+        if state != "UNCERTAIN" or record.get("uncertainty_kind") != "ACTIVATION":
             raise PermissionError("Provider Host enrollment cannot be reconciled")
         self.activate(record)
         reconciled = {
@@ -383,8 +384,6 @@ class ProviderHostEnrollmentCoordinator:
         )
         capability_value_digest = capability_digest(capability)
         if record.get("service_state") == "REVOKED":
-            if record.get("revocation_capability_digest") != capability_value_digest:
-                raise PermissionError("Provider Host revocation capability conflicts")
             return self._revocation_result(record)
         for prior in self.store.list_records("provider_host_enrollments"):
             if prior.get("revocation_capability_digest") == capability_value_digest:
@@ -413,14 +412,23 @@ class ProviderHostEnrollmentCoordinator:
             "revoked_at": revoked_at,
             "updated_at": revoked_at,
         }
-        # Remove the live gateway before revocation becomes durable.  A crash in
-        # this interval leaves an ACTIVE record with no gateway (safe and
-        # retryable); the inverse ordering could permit a concurrent launch
-        # after durable revocation.
-        self.deactivate(record)
-        stored = self.store.transition_provider_host_enrollment(
+        revocation_pending = {
+            **revoked,
+            "uncertainty_kind": "REVOCATION",
+        }
+        # Fence restart and every new gateway RPC durably before removing the
+        # live gateway. Any interruption remains non-executable and can only be
+        # completed by the exact Founder-authorized revocation operation.
+        pending = self.store.transition_provider_host_enrollment(
             enrollment_id,
             expected=("ACTIVE", "UNCERTAIN"),
+            state="UNCERTAIN",
+            payload=revocation_pending,
+        )
+        self.deactivate(pending)
+        stored = self.store.transition_provider_host_enrollment(
+            enrollment_id,
+            expected=("UNCERTAIN",),
             state="REVOKED",
             payload=revoked,
         )

@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 from keeper.evidence_input import structured_digest, validate_provider_input
 from keeper.authority_service.key_ring import ServiceKeyRing
@@ -245,6 +245,9 @@ class AuthorityServiceCore:
             ),
             Operation.REGISTER_PROVIDER: self._register_provider,
             Operation.BEGIN_QUALIFICATION: self._qualify_provider,
+            Operation.RECONCILE_PROVIDER_QUALIFICATION: (
+                self._reconcile_provider_qualification
+            ),
             Operation.FINALIZE_QUALIFICATION: self._internal_only,
             Operation.RESERVE_ATTEMPT: self._reserve_attempt,
             Operation.AUTHORIZE_PROJECT_LAUNCH: self._authorize_project_launch,
@@ -724,7 +727,9 @@ class AuthorityServiceCore:
             and hasattr(self.observer, "qualification_identifier")
         ):
             qualification_id = str(
-                self.observer.qualification_identifier(registration)
+                self.observer.qualification_identifier(
+                    registration, qualification_id
+                )
             )
             if (
                 not qualification_id.startswith("provider-qualification:")
@@ -760,7 +765,12 @@ class AuthorityServiceCore:
             registration_id=identifier,
             challenge=challenge,
         )
-        observation = self.observer.qualify(registration, challenge)
+        observed_registration = (
+            {**registration, "_qualification_id": qualification_id}
+            if registration.get("registration_schema_version") == 4
+            else registration
+        )
+        observation = self.observer.qualify(observed_registration, challenge)
         normalized = (
             observation.raw_version_output.splitlines()[0].strip()[:200]
             if observation.raw_version_output
@@ -888,13 +898,7 @@ class AuthorityServiceCore:
             if evidence["qualification_result"] == "qualified"
             else "QUALIFICATION_FAILED"
         )
-        self.store.transition(
-            "qualifications",
-            qualification_id,
-            "EXECUTION_STARTED",
-            state,
-            {"start": start, "evidence": evidence},
-        )
+        qualification_record = {"start": start, "evidence": evidence}
         if state == "QUALIFIED":
             updated = apply_protected_qualification(
                 registration,
@@ -916,48 +920,146 @@ class AuthorityServiceCore:
             updated["configuration_digest"] = canonical_provider_registration_digest(
                 updated
             )
-        self.store.transition(
-            "registrations",
-            identifier,
-            "REGISTERED_UNQUALIFIED",
-            state,
-            updated,
-        )
         if (
             state == "QUALIFIED"
             and subscription_qualification
             and hasattr(self.observer, "bind_qualified_provider")
         ):
+            uncertain_registration = {
+                **updated,
+                "registration_lifecycle": "UNCERTAIN",
+                "provider_binding_state": "UNCERTAIN",
+                "provider_binding_failure": "PENDING_EXACT_BIND",
+            }
+            self.store.stage_provider_qualification_binding(
+                identifier,
+                qualification_id,
+                uncertain_registration,
+                qualification_record,
+            )
             try:
                 self.observer.bind_qualified_provider(updated, evidence)
             except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as error:
                 uncertain_registration = {
-                    **updated,
-                    "registration_lifecycle": "UNCERTAIN",
-                    "provider_binding_state": "UNCERTAIN",
+                    **uncertain_registration,
                     "provider_binding_failure": type(error).__name__,
                 }
                 self.store.transition(
                     "registrations",
                     identifier,
-                    "QUALIFIED",
+                    "UNCERTAIN",
                     "UNCERTAIN",
                     uncertain_registration,
                 )
                 self.store.transition(
                     "qualifications",
                     qualification_id,
-                    "QUALIFIED",
+                    "UNCERTAIN",
                     "UNCERTAIN",
                     {"start": start, "evidence": evidence},
                 )
                 raise RuntimeError(
                     "Provider Host qualification binding is uncertain"
                 ) from error
+            completed_registration = {
+                **updated,
+                "provider_binding_state": "QUALIFIED",
+            }
+            self.store.complete_provider_qualification_binding(
+                identifier,
+                qualification_id,
+                completed_registration,
+                qualification_record,
+            )
+            updated = completed_registration
+        else:
+            self.store.transition(
+                "qualifications",
+                qualification_id,
+                "EXECUTION_STARTED",
+                state,
+                qualification_record,
+            )
+            self.store.transition(
+                "registrations",
+                identifier,
+                "REGISTERED_UNQUALIFIED",
+                state,
+                updated,
+            )
         return {
             "registration": updated,
             "qualification": evidence,
             "qualification_start": start,
+        }
+
+    def _reconcile_provider_qualification(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        if set(payload) != {"registration_id"}:
+            raise PermissionError(
+                "Provider qualification reconciliation fields are invalid"
+            )
+        if self.observer is None or not hasattr(
+            self.observer, "bind_qualified_provider"
+        ):
+            raise RuntimeError("authority provider observer is unavailable")
+        identifier = _text(payload["registration_id"], "registration ID")
+        registration = self.store.get("registrations", identifier)
+        if (
+            registration is None
+            or registration.pop("service_state", None) != "UNCERTAIN"
+            or registration.get("registration_schema_version") != 4
+            or registration.get("registration_lifecycle") != "UNCERTAIN"
+            or registration.get("provider_binding_state") != "UNCERTAIN"
+        ):
+            raise PermissionError(
+                "Provider qualification is not eligible for reconciliation"
+            )
+        qualification_id = registration.get("qualification_evidence_id")
+        if not isinstance(qualification_id, str) or not qualification_id:
+            raise PermissionError(
+                "Provider qualification evidence identity is unavailable"
+            )
+        qualification = self.store.get("qualifications", qualification_id)
+        if (
+            qualification is None
+            or qualification.pop("service_state", None) != "UNCERTAIN"
+            or not isinstance(qualification.get("start"), dict)
+            or not isinstance(qualification.get("evidence"), dict)
+        ):
+            raise PermissionError(
+                "Provider qualification evidence is not reconcilable"
+            )
+        evidence = cast(dict[str, Any], qualification["evidence"])
+        if (
+            evidence.get("id") != qualification_id
+            or evidence.get("registration_id") != identifier
+            or evidence.get("qualification_result") != "qualified"
+            or registration.get("qualification_evidence_digest")
+            != evidence.get("evidence_digest")
+        ):
+            raise PermissionError(
+                "Provider qualification reconciliation binding differs"
+            )
+        completed_registration = {
+            **registration,
+            "registration_lifecycle": "QUALIFIED",
+            "provider_binding_state": "QUALIFIED",
+            "provider_binding_reconciled_at": _now(),
+        }
+        completed_registration.pop("provider_binding_failure", None)
+        self.observer.bind_qualified_provider(completed_registration, evidence)
+        self.store.complete_provider_qualification_binding(
+            identifier,
+            qualification_id,
+            completed_registration,
+            qualification,
+        )
+        return {
+            "registration": completed_registration,
+            "qualification": evidence,
+            "reconciled": True,
         }
 
     def _reserve_attempt(

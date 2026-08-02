@@ -175,6 +175,14 @@ class AuthorityServiceClient:
             {"registration_id": registration_id},
         )
 
+    def reconcile_provider_qualification(
+        self, registration_id: str
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.RECONCILE_PROVIDER_QUALIFICATION,
+            {"registration_id": registration_id},
+        )
+
     def reserve_attempt(self, **identity: Any) -> dict[str, Any]:
         return self.request(Operation.RESERVE_ATTEMPT, dict(identity))
 

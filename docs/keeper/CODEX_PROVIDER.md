@@ -125,11 +125,23 @@ named-pipe client before it persists a one-winner `PENDING` record.
 
 Completion stores `ACTIVE` before the gateway is exposed. Lost responses use
 exact, idempotent reconciliation; conflicts, expiry, replay, downgrade, and
-ambiguous activation fail closed. Revocation first removes the live gateway,
-then persists `REVOKED` and returns an Authority-signed revocation record for the
-per-user Startup gate. Host enrollment never creates a provider binding.
-Registration and qualification remain later Authority-owned operations, and the
-Host reports `NO_QUALIFIED_PROVIDERS` until exact qualification is durably bound.
+ambiguous activation fail closed. Revocation first persists a durable
+`UNCERTAIN` execution fence, disables the live gateway, and then persists
+`REVOKED`; a lost response can retrieve the same signed denial after a fresh,
+exact Founder authentication. A revocation-fenced `UNCERTAIN` record cannot be
+reactivated by enrollment reconciliation after restart. Host enrollment never
+creates a provider binding. Registration and qualification remain later
+Authority-owned operations, and the Host reports `NO_QUALIFIED_PROVIDERS` until
+exact qualification is durably bound.
+
+Qualification begins against an enrolled, ready Host with no provider binding.
+KeeperAuthority durably stages the qualified observation as `UNCERTAIN` before
+requesting the exact Host binding, then publishes the registration and
+qualification as `QUALIFIED` atomically only after the Host acknowledges the
+same binding. If the Host commits the binding but its response is lost,
+`reconcile_provider_qualification(registration_id)` re-sends only the stored
+Authority-owned binding and atomically completes the same records. It accepts no
+replacement provider input and remains one-winner and idempotent.
 
 The installed Host executable owns the supported production enrollment surface;
 no protected configuration file is edited by hand. After the matching protocol-7

@@ -410,8 +410,9 @@ def test_enrollment_deadlock_is_removed_without_provider_binding(tmp_path: Path)
     assert retried["grant"] == begin["grant"]
     assert begin["state"] == "PENDING"
     assert coordinator.status()["state"] == "ENROLLMENT_PENDING"
+    exact_proof = _proof(begin, proposal)
     completed = coordinator.complete(
-        {"enrollment_id": begin["enrollment_id"], "proof": _proof(begin, proposal)},
+        {"enrollment_id": begin["enrollment_id"], "proof": exact_proof},
         SID,
     )
     assert completed["state"] == "ACTIVE"
@@ -525,8 +526,9 @@ def test_enrollment_revocation_requires_exact_new_founder_capability(tmp_path: P
     begin = coordinator.begin(
         {"proposal": proposal, "founder_capability": _capability(proposal)}, SID
     )
+    exact_proof = _proof(begin, proposal)
     completed = coordinator.complete(
-        {"enrollment_id": begin["enrollment_id"], "proof": _proof(begin, proposal)},
+        {"enrollment_id": begin["enrollment_id"], "proof": exact_proof},
         SID,
     )
     binding = {
@@ -572,14 +574,141 @@ def test_enrollment_revocation_requires_exact_new_founder_capability(tmp_path: P
             "founder_principal_sid": SID,
         },
     )
-    with pytest.raises(PermissionError, match="capability conflicts"):
+    # A fresh, exact Founder authentication may retrieve the already durable
+    # denial after a lost response; it cannot change or widen the revocation.
+    assert coordinator.revoke(
+        {
+            "enrollment_id": begin["enrollment_id"],
+            "founder_capability": conflicting,
+        },
+        SID,
+    ) == result
+
+
+def test_revocation_transition_failure_stays_uncertain_and_cannot_reactivate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observer = _Observer()
+    coordinator = _coordinator(tmp_path, observer)
+    proposal = _proposal(tmp_path)
+    begin = coordinator.begin(
+        {"proposal": proposal, "founder_capability": _capability(proposal)}, SID
+    )
+    exact_proof = _proof(begin, proposal)
+    completed = coordinator.complete(
+        {"enrollment_id": begin["enrollment_id"], "proof": exact_proof},
+        SID,
+    )
+    binding = {
+        "action": "REVOKE_PROVIDER_HOST",
+        "enrollment_id": begin["enrollment_id"],
+        "receipt_digest": structured_digest(completed["receipt"]),
+    }
+    capability = make_test_founder_capability(
+        ENROLLMENT_SYSTEM_PROJECT,
+        2,
+        "revoke-interrupted",
+        charter_id=ENROLLMENT_SYSTEM_CHARTER,
+        claim_overrides={
+            "charter_revision": 1,
+            "authorization_kind": "PROVIDER_HOST_ENROLLMENT",
+            "protected_action": "REVOKE_PROVIDER_HOST",
+            "action_digest": structured_digest(binding),
+            "founder_principal_sid": SID,
+        },
+    )
+    original = coordinator.store.transition_provider_host_enrollment
+    calls = 0
+
+    def fail_final_transition(*args: object, **kwargs: object) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated persistence interruption")
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        coordinator.store,
+        "transition_provider_host_enrollment",
+        fail_final_transition,
+    )
+    with pytest.raises(OSError, match="persistence interruption"):
         coordinator.revoke(
             {
                 "enrollment_id": begin["enrollment_id"],
-                "founder_capability": conflicting,
+                "founder_capability": capability,
             },
             SID,
         )
+    stored = coordinator.store.get(
+        "provider_host_enrollments", begin["enrollment_id"]
+    )
+    assert stored is not None
+    assert stored["service_state"] == "UNCERTAIN"
+    assert stored["uncertainty_kind"] == "REVOCATION"
+    restarted_observer = _Observer()
+    restarted = ProviderHostEnrollmentCoordinator(
+        store=coordinator.store,
+        service_key_id="keeper-authority:test",
+        authority_protocol_version=7,
+        authority_schema_version=6,
+        founder_verifier=TestFounderCapabilityVerifier(),
+        authority_signer=AUTHORITY,
+        authority_public_identity=_public(AUTHORITY),
+        proposal_observer=restarted_observer,
+        activate=restarted_observer.activate,
+        deactivate=restarted_observer.deactivate,
+        host_verifier_factory=lambda value: HOST,
+    )
+    restarted.activate_current()
+    assert restarted_observer.activations == []
+    with pytest.raises(PermissionError, match="cannot be reconciled"):
+        restarted.reconcile(
+            {
+                "enrollment_id": begin["enrollment_id"],
+                "proof": exact_proof,
+            },
+            SID,
+        )
+
+
+def test_lost_revocation_response_accepts_fresh_exact_founder_reconciliation(
+    tmp_path: Path,
+) -> None:
+    observer = _Observer()
+    coordinator = _coordinator(tmp_path, observer)
+    (tmp_path / "host").mkdir()
+    bootstrap = _installed_bootstrap(tmp_path / "host")
+    client = ProviderHostEnrollmentClient(
+        authority=_AuthorityAdapter(coordinator),
+        authenticator=TestFounderAuthenticator(principal_sid=SID),
+        bootstrap=bootstrap,
+    )
+    enrolled = client.enroll(generation=1)
+    receipt_digest = str(enrolled["receipt_digest"])
+    first_binding = {
+        "action": "REVOKE_PROVIDER_HOST",
+        "enrollment_id": enrolled["enrollment_id"],
+        "receipt_digest": receipt_digest,
+    }
+    first = _capability(
+        first_binding,
+        action="REVOKE_PROVIDER_HOST",
+        generation=2,
+        suffix="lost-revocation-response",
+    )
+    coordinator.revoke(
+        {"enrollment_id": enrolled["enrollment_id"], "founder_capability": first},
+        SID,
+    )
+    assert bootstrap.status()["state"] == "ENROLLED_OFFLINE"
+    recovered = client.revoke(
+        enrollment_id=str(enrolled["enrollment_id"]),
+        receipt_digest=receipt_digest,
+        generation=2,
+    )
+    assert recovered["state"] == "REVOKED"
+    assert bootstrap.status()["state"] == "REVOKED"
 
 
 def test_bootstrap_installed_unenrolled_then_exact_receipt_commit(

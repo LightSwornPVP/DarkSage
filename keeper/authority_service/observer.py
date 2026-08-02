@@ -136,7 +136,7 @@ class ServiceProviderObserver:
             else (
                 "REGISTERED"
                 if isinstance(registration_id, str) and registration_id
-                else "UNAVAILABLE"
+                else "NO_QUALIFIED_PROVIDERS"
             )
         )
         action: str | None = None
@@ -490,7 +490,9 @@ class ServiceProviderObserver:
     ) -> QualificationObservation:
         return self._qualify_codex_through_host(registration, challenge)
 
-    def qualification_identifier(self, registration: dict[str, Any]) -> str:
+    def qualification_identifier(
+        self, registration: dict[str, Any], planned_identifier: str
+    ) -> str:
         gateway = self.provider_host_gateway
         if gateway is None:
             raise PermissionError(
@@ -498,9 +500,14 @@ class ServiceProviderObserver:
             )
         status = gateway.status()
         provider = status.get("provider_binding")
+        if status.get("state") != "READY":
+            raise PermissionError(
+                "KeeperProviderHost is not ready for qualification"
+            )
+        if provider is None:
+            return planned_identifier
         if (
-            status.get("state") != "READY"
-            or not isinstance(provider, dict)
+            not isinstance(provider, dict)
             or provider.get("registration_id")
             != registration.get("trusted_registration_id")
         ):
@@ -517,7 +524,11 @@ class ServiceProviderObserver:
             raise PermissionError(
                 "Codex qualification requires KeeperProviderHost"
             )
-        qualification_id = self.qualification_identifier(registration)
+        qualification_id = str(registration.get("_qualification_id", ""))
+        if not qualification_id:
+            raise PermissionError(
+                "KeeperProviderHost planned qualification ID is absent"
+            )
         binding = registration.get("windows_authentication_binding")
         if not isinstance(binding, dict):
             raise PermissionError(
