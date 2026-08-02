@@ -545,7 +545,9 @@ def test_unbound_enrolled_host_can_qualify_and_bind_exact_provider(
     stored_qualification = core.store.get("qualifications", qualification_id)
     assert stored_registration is not None
     assert stored_registration["service_state"] == "QUALIFIED"
-    assert stored_registration["provider_binding_state"] == "QUALIFIED"
+    stored_contract = dict(stored_registration)
+    stored_contract.pop("service_state")
+    assert validate_provider_registration_contract(stored_contract)[0] is True
     assert stored_qualification is not None
     assert stored_qualification["service_state"] == "QUALIFIED"
 
@@ -571,7 +573,10 @@ def test_lost_provider_bind_response_reconciles_exact_durable_binding(
     uncertain = core.store.get("registrations", registration_id)
     assert uncertain is not None
     assert uncertain["service_state"] == "UNCERTAIN"
-    assert uncertain["provider_binding_state"] == "UNCERTAIN"
+    assert uncertain["registration_lifecycle"] == "QUALIFIED"
+    uncertain_contract = dict(uncertain)
+    uncertain_contract.pop("service_state")
+    assert validate_provider_registration_contract(uncertain_contract)[0] is True
     assert observer.bound is not None
     qualification_id = str(uncertain["qualification_evidence_id"])
     qualification = core.store.get("qualifications", qualification_id)
@@ -590,6 +595,9 @@ def test_lost_provider_bind_response_reconciles_exact_durable_binding(
     assert reconciled_qualification is not None
     assert reconciled_registration["service_state"] == "QUALIFIED"
     assert reconciled_qualification["service_state"] == "QUALIFIED"
+    reconciled_contract = dict(reconciled_registration)
+    reconciled_contract.pop("service_state")
+    assert validate_provider_registration_contract(reconciled_contract)[0] is True
     with pytest.raises(PermissionError, match="not eligible"):
         client.reconcile_provider_qualification(registration_id)
 

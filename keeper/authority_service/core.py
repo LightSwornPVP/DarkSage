@@ -925,12 +925,10 @@ class AuthorityServiceCore:
             and subscription_qualification
             and hasattr(self.observer, "bind_qualified_provider")
         ):
-            uncertain_registration = {
-                **updated,
-                "registration_lifecycle": "UNCERTAIN",
-                "provider_binding_state": "UNCERTAIN",
-                "provider_binding_failure": "PENDING_EXACT_BIND",
-            }
+            # The database lifecycle is the execution fence. Keep the exact
+            # immutable registration payload schema-valid so recovery cannot
+            # smuggle operational metadata into provider authority.
+            uncertain_registration = dict(updated)
             self.store.stage_provider_qualification_binding(
                 identifier,
                 qualification_id,
@@ -940,10 +938,6 @@ class AuthorityServiceCore:
             try:
                 self.observer.bind_qualified_provider(updated, evidence)
             except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as error:
-                uncertain_registration = {
-                    **uncertain_registration,
-                    "provider_binding_failure": type(error).__name__,
-                }
                 self.store.transition(
                     "registrations",
                     identifier,
@@ -963,7 +957,6 @@ class AuthorityServiceCore:
                 ) from error
             completed_registration = {
                 **updated,
-                "provider_binding_state": "QUALIFIED",
             }
             self.store.complete_provider_qualification_binding(
                 identifier,
@@ -1010,8 +1003,7 @@ class AuthorityServiceCore:
             registration is None
             or registration.pop("service_state", None) != "UNCERTAIN"
             or registration.get("registration_schema_version") != 4
-            or registration.get("registration_lifecycle") != "UNCERTAIN"
-            or registration.get("provider_binding_state") != "UNCERTAIN"
+            or registration.get("registration_lifecycle") != "QUALIFIED"
         ):
             raise PermissionError(
                 "Provider qualification is not eligible for reconciliation"
@@ -1042,13 +1034,8 @@ class AuthorityServiceCore:
             raise PermissionError(
                 "Provider qualification reconciliation binding differs"
             )
-        completed_registration = {
-            **registration,
-            "registration_lifecycle": "QUALIFIED",
-            "provider_binding_state": "QUALIFIED",
-            "provider_binding_reconciled_at": _now(),
-        }
-        completed_registration.pop("provider_binding_failure", None)
+        completed_registration = dict(registration)
+        reconciled_at = _now()
         self.observer.bind_qualified_provider(completed_registration, evidence)
         self.store.complete_provider_qualification_binding(
             identifier,
@@ -1060,6 +1047,7 @@ class AuthorityServiceCore:
             "registration": completed_registration,
             "qualification": evidence,
             "reconciled": True,
+            "reconciled_at": reconciled_at,
         }
 
     def _reserve_attempt(
