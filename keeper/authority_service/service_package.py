@@ -174,17 +174,55 @@ def write_external_manifest(
     target = destination.resolve(strict=False)
     if target.exists():
         raise PermissionError("Authority package manifest destination already exists")
+    source_commit, source_tree = _verify_packaged_git_source(
+        verified, source_root.resolve(strict=True)
+    )
     value = {
         "archive_manifest": verified.manifest,
+        "packaged_entries_match_source_commit": True,
         "package_path": str(verified.path),
         "package_sha256": verified.package_sha256,
         "package_size": verified.package_size,
-        "source_commit": _git_value(source_root, "HEAD"),
-        "source_tree": _git_value(source_root, "HEAD^{tree}"),
+        "source_commit": source_commit,
+        "source_tree": source_tree,
     }
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(_canonical_json(value))
     return target
+
+
+def _verify_packaged_git_source(
+    verified: VerifiedServicePackage, source_root: Path
+) -> tuple[str, str]:
+    commit = _git_value(source_root, "HEAD")
+    tree = _git_value(source_root, "HEAD^{tree}")
+    for entry in verified.manifest["entries"]:
+        name = str(entry["path"])
+        if name == "__main__.py":
+            continue
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={source_root.as_posix()}",
+                "-C",
+                str(source_root),
+                "show",
+                f"{commit}:{name}",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+        if (
+            completed.returncode != 0
+            or _digest_bytes(completed.stdout) != entry["sha256"]
+        ):
+            raise PermissionError(
+                f"Authority package entry differs from recorded source commit: {name}"
+            )
+    return commit, tree
 
 
 def _service_module_closure(source_root: Path) -> dict[str, Path]:

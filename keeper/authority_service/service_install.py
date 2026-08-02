@@ -30,6 +30,7 @@ from keeper.authority_service.provider_identity import (
 )
 from keeper.authority_service.service_main import SERVICE_NAME
 from keeper.authority_service.service_package import (
+    VerifiedRollbackPackage,
     build_service_package,
     verify_rollback_package,
     verify_service_package,
@@ -426,6 +427,102 @@ def upgrade_package(package_source: Path, expected_package_sha256: str) -> dict[
     }
 
 
+def rollback_package(package_source: Path, expected_package_sha256: str) -> dict[str, Any]:
+    _require_admin()
+    rollback = verify_rollback_package(package_source, expected_package_sha256)
+    manifest = _load_completed_manifest()
+    query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
+    if "RUNNING" in query.stdout or "START_PENDING" in query.stdout:
+        raise PermissionError(
+            "KeeperAuthority must be stopped before package rollback"
+        )
+    recorded = manifest.get("upgrades")
+    if not isinstance(recorded, list) or not recorded:
+        raise PermissionError("Authority package rollback is not recorded")
+    latest = recorded[-1]
+    if (
+        not isinstance(latest, dict)
+        or latest.get("backup_path") != str(rollback.path)
+        or str(latest.get("previous_package_sha256", "")).upper()
+        != rollback.package_sha256
+    ):
+        raise PermissionError("Authority package rollback identity differs")
+    if not _recorded_file_matches(manifest, rollback.path):
+        raise PermissionError("Authority package rollback is not manifest-recorded")
+    package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
+    if not package.is_file():
+        raise PermissionError("installed Authority Service package is unavailable")
+    current_digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    upgraded_digest = str(latest.get("package_sha256", "")).upper()
+    claim = manifest.get("package_rollback_claim")
+    expected_claim = {
+        "replaced_package_sha256": upgraded_digest,
+        "restored_package_sha256": rollback.package_sha256,
+        "source_backup_path": str(rollback.path),
+    }
+    if claim is None:
+        if (
+            current_digest != upgraded_digest
+            or not _recorded_file_matches(manifest, package)
+        ):
+            raise PermissionError(
+                "installed Authority package is not the recorded upgrade"
+            )
+        claim = dict(expected_claim)
+        claim["claimed_at"] = _now()
+        manifest["package_rollback_claim"] = claim
+        _persist_manifest(manifest)
+    elif (
+        not isinstance(claim, dict)
+        or any(claim.get(key) != value for key, value in expected_claim.items())
+        or not isinstance(claim.get("claimed_at"), str)
+    ):
+        raise PermissionError("Authority package rollback claim differs")
+    if current_digest == rollback.package_sha256:
+        return _complete_package_rollback(manifest, package, rollback, claim)
+    if current_digest != upgraded_digest:
+        raise PermissionError("Authority package rollback state is uncertain")
+    temporary = package.with_suffix(".pyz.rollback")
+    try:
+        if temporary.exists():
+            verify_rollback_package(temporary, rollback.package_sha256)
+        else:
+            shutil.copy2(rollback.path, temporary)
+        staged = verify_rollback_package(temporary, rollback.package_sha256)
+        os.replace(temporary, package)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    if hashlib.sha256(package.read_bytes()).hexdigest().upper() != staged.package_sha256:
+        raise PermissionError("restored Authority package digest differs")
+    return _complete_package_rollback(manifest, package, rollback, claim)
+
+
+def _complete_package_rollback(
+    manifest: dict[str, Any],
+    package: Path,
+    rollback: VerifiedRollbackPackage,
+    claim: dict[str, Any],
+) -> dict[str, Any]:
+    _record_file(manifest, package)
+    event = {
+        "rolled_back_at": _now(),
+        "rollback_claimed_at": claim["claimed_at"],
+        "replaced_package_sha256": claim["replaced_package_sha256"],
+        "restored_package_sha256": rollback.package_sha256,
+        "source_backup_path": str(rollback.path),
+    }
+    manifest.setdefault("rollbacks", []).append(event)
+    manifest.pop("package_rollback_claim", None)
+    _persist_manifest(manifest)
+    return {
+        "package": str(package),
+        "package_sha256": rollback.package_sha256,
+        "replaced_package_sha256": claim["replaced_package_sha256"],
+        "source_backup": str(rollback.path),
+    }
+
+
 def _founder_verifier_configuration() -> dict[str, object]:
     return ProductionFounderCapabilityIssuer(
         current_process_sid()
@@ -682,6 +779,9 @@ def parser() -> argparse.ArgumentParser:
     upgrade = commands.add_parser("upgrade-package")
     upgrade.add_argument("--package", type=Path, required=True)
     upgrade.add_argument("--expected-sha256", required=True)
+    rollback_package_command = commands.add_parser("rollback-package")
+    rollback_package_command.add_argument("--package", type=Path, required=True)
+    rollback_package_command.add_argument("--expected-sha256", required=True)
     verify_package = commands.add_parser("verify-package")
     verify_package.add_argument("--package", type=Path, required=True)
     verify_package.add_argument("--expected-sha256", required=True)
@@ -714,6 +814,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         elif options.command == "upgrade-package":
             value = upgrade_package(options.package, options.expected_sha256)
+        elif options.command == "rollback-package":
+            value = rollback_package(options.package, options.expected_sha256)
         elif options.command == "verify-package":
             verified = verify_service_package(options.package, options.expected_sha256)
             value = {

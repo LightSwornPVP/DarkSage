@@ -149,17 +149,48 @@ def test_package_verification_rejects_hash_tamper_and_extra_entry(tmp_path: Path
 
 
 def test_external_manifest_binds_package_and_git_source(tmp_path: Path) -> None:
-    package = _build(tmp_path)
+    source = tmp_path / "source"
+    subprocess.run(
+        [
+            "git", "clone", "--quiet", "--no-hardlinks", str(_repository()),
+            str(source),
+        ],
+        check=True,
+    )
+    package = tmp_path / "keeper-authority.pyz"
+    build_service_package(source, package)
     verified = verify_service_package(package)
     manifest_path = write_external_manifest(
-        verified, tmp_path / "entry-manifest.json", source_root=_repository()
+        verified, tmp_path / "entry-manifest.json", source_root=source
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["package_sha256"] == verified.package_sha256
     assert manifest["package_size"] == package.stat().st_size
     assert manifest["archive_manifest"] == verified.manifest
+    assert manifest["packaged_entries_match_source_commit"] is True
     assert len(manifest["source_commit"]) == 40
     assert len(manifest["source_tree"]) == 40
+
+
+def test_external_manifest_rejects_package_built_from_dirty_runtime_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    subprocess.run(
+        [
+            "git", "clone", "--quiet", "--no-hardlinks", str(_repository()),
+            str(source),
+        ],
+        check=True,
+    )
+    runtime = source / "keeper" / "authority_service" / "protocol.py"
+    runtime.write_text(runtime.read_text(encoding="utf-8") + "\nDIRTY = True\n", encoding="utf-8")
+    package = tmp_path / "dirty.pyz"
+    verified = build_service_package(source, package)
+    with pytest.raises(PermissionError, match="recorded source commit"):
+        write_external_manifest(
+            verified, tmp_path / "dirty-manifest.json", source_root=source
+        )
 
 
 def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
@@ -215,6 +246,97 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert persisted["upgrades"][-1]["package_sha256"] == candidate_digest
     assert persisted["upgrades"][-1]["source_tree_sha256"] == verify_service_package(candidate).manifest["source_tree_sha256"]
+
+    real_replace = service_install.os.replace
+
+    def replace_then_interrupt(source: Path, destination: Path) -> None:
+        real_replace(source, destination)
+        if Path(source).suffix == ".rollback":
+            raise RuntimeError("simulated interruption after rollback replacement")
+
+    monkeypatch.setattr(service_install.os, "replace", replace_then_interrupt)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        service_install.rollback_package(backup, str(result["backup_sha256"]))
+    assert package.read_bytes() == old_package
+    interrupted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert interrupted["package_rollback_claim"]["restored_package_sha256"] == str(
+        result["backup_sha256"]
+    )
+    monkeypatch.setattr(service_install.os, "replace", real_replace)
+    rollback_result = service_install.rollback_package(
+        backup, str(result["backup_sha256"])
+    )
+    assert package.read_bytes() == old_package
+    assert rollback_result["package_sha256"] == str(result["backup_sha256"])
+    rolled_back = json.loads(manifest_path.read_text(encoding="utf-8"))
+    event = rolled_back["rollbacks"][-1]
+    assert event == {
+        "rolled_back_at": event["rolled_back_at"],
+        "rollback_claimed_at": event["rollback_claimed_at"],
+        "replaced_package_sha256": candidate_digest,
+        "restored_package_sha256": str(result["backup_sha256"]),
+        "source_backup_path": str(backup),
+    }
+    assert "package_rollback_claim" not in rolled_back
+
+
+def test_rollback_requires_latest_recorded_backup_and_stopped_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = _build(tmp_path, "candidate.pyz")
+    candidate_digest = hashlib.sha256(candidate.read_bytes()).hexdigest().upper()
+    service_root = tmp_path / "service"
+    package = service_root / "bin" / "keeper-authority.pyz"
+    backup = service_root / "backups" / "old.pyz"
+    manifest_path = service_root / "audit" / "machine-artifacts.json"
+    package.parent.mkdir(parents=True)
+    backup.parent.mkdir(parents=True)
+    package.write_bytes(candidate.read_bytes())
+    with zipfile.ZipFile(backup, "w") as archive:
+        archive.writestr("__main__.py", "print('old service')\n")
+    backup_digest = hashlib.sha256(backup.read_bytes()).hexdigest().upper()
+    manifest = {
+        "schema_version": 1,
+        "service_name": SERVICE_NAME,
+        "installation_completed_at": "2026-01-01T00:00:00+00:00",
+        "artifacts": [],
+        "commands": [],
+        "upgrades": [{
+            "package_sha256": candidate_digest,
+            "previous_package_sha256": backup_digest,
+            "backup_path": str(backup.resolve()),
+        }],
+    }
+    service_install._record_file(manifest, package)
+    service_install._record_file(manifest, backup)
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(service_install, "SERVICE_ROOT", service_root)
+    monkeypatch.setattr(service_install, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "STATE: RUNNING\n"
+        ),
+    )
+    with pytest.raises(PermissionError, match="stopped"):
+        service_install.rollback_package(backup, backup_digest)
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "STATE: STOPPED\n"
+        ),
+    )
+    unrecorded = tmp_path / "unrecorded.pyz"
+    unrecorded.write_bytes(backup.read_bytes())
+    with pytest.raises(PermissionError, match="identity differs"):
+        service_install.rollback_package(unrecorded, backup_digest)
+    package.write_bytes(b"changed-current-package")
+    with pytest.raises(PermissionError, match="installed Authority"):
+        service_install.rollback_package(backup, backup_digest)
 
 
 def test_upgrade_rejects_wrong_hash_before_touching_installed_package(

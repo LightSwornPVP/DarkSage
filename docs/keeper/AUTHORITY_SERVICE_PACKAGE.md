@@ -17,6 +17,8 @@ The build emits:
 - `keeper-authority.pyz` — the deterministic service package;
 - `keeper-authority-package-manifest.json` — the external package hash, size,
   Git commit/tree identity, embedded archive manifest, and complete entry list.
+  Manifest creation compares every packaged source entry byte-for-byte with that
+  exact Git commit and rejects dirty or uncommitted runtime content.
 
 The archive contains only the Python dependency closure reachable from
 `keeper.authority_service.service_main`, plus an embedded
@@ -58,3 +60,21 @@ must already be stopped through the separately authorized lifecycle.
 Rollback restores the exact captured installed byte stream. Release handoffs
 must authorize only the service-package digest produced by this construction
 path; the legacy general Keeper zipapp is never an Authority upgrade input.
+
+With KeeperAuthority stopped through a separately authorized lifecycle, restore
+the exact manifest-recorded rollback generation with:
+
+```powershell
+python -m keeper.authority_service.service_install rollback-package `
+  --package <MANIFEST_RECORDED_BACKUP_PATH> `
+  --expected-sha256 <AUTHORIZED_ROLLBACK_SHA256>
+```
+
+Rollback rejects an unrecorded backup, a backup not belonging to the latest
+upgrade, a changed current package, a running service, a wrong digest, and an
+existing staging file. It stages and re-verifies the exact rollback bytes,
+atomically restores them, and records the restored and replaced identities.
+Before replacement it persists an exact rollback claim. Reinvoking the same
+authorized rollback after interruption either completes the same verified
+staging operation or records an already-restored package; any other on-disk
+identity fails closed as uncertain.
