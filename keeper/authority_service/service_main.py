@@ -6,7 +6,7 @@ import json
 import threading
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from keeper.authority_service.client import DEFAULT_PIPE_NAME
 from keeper.authority_service.core import AuthorityServiceCore
@@ -16,10 +16,16 @@ from keeper.executive.founder_capability import (
 from keeper.authority_service.ipc_server import NamedPipeAuthorityServer
 from keeper.authority_service.observer import ServiceProviderObserver
 from keeper.authority_service.provider_host_gateway import ProviderHostGateway
+from keeper.authority_service.provider_host_enrollment import (
+    ProviderHostEnrollmentCoordinator,
+)
+from keeper.authority_service.protocol import PROTOCOL_VERSION
+from keeper.authority_service.store import SERVICE_SCHEMA_VERSION
 from keeper.provider_host.signing import (
     RsaPublicIdentity,
     WindowsCngEnvelopeIdentity,
 )
+from keeper.provider_host.enrollment import validate_enrollment_receipt
 from keeper.authority_service.provenance import AuthorityProvenanceReporter
 
 
@@ -228,6 +234,91 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
                 raise PermissionError(
                     "Provider Host protected enrollment differs from durable state"
                 )
+    elif verifier is not None:
+        authority_id = "keeper-authority-provider-host:" + core.keys.current_key_id
+        authority_signer = WindowsCngEnvelopeIdentity(
+            identity=authority_id,
+            key_name="DarkSage.KeeperAuthority.ProviderHost.v1",
+            machine_key=True,
+        )
+
+        def activate_provider_host(record: Mapping[str, Any]) -> None:
+            proposal_record = _mapping(record.get("proposal"), "stored Host proposal")
+            proposal = _mapping(proposal_record.get("payload"), "stored Host proposal payload")
+            receipt_record = _mapping(record.get("receipt"), "stored Host receipt")
+            receipt_unsigned = _mapping(
+                receipt_record.get("payload"), "stored Host receipt payload"
+            )
+            receipt = validate_enrollment_receipt(
+                receipt_record,
+                authority_signer,
+                expected_enrollment_id=str(receipt_unsigned.get("enrollment_id", "")),
+            )
+            if (
+                receipt.get("service_key_id") != core.keys.current_key_id
+                or receipt.get("authority_protocol_version") != PROTOCOL_VERSION
+                or receipt.get("authority_schema_version") != SERVICE_SCHEMA_VERSION
+            ):
+                raise PermissionError("Provider Host enrollment service identity differs")
+            runtime = _mapping(
+                receipt.get("runtime_configuration"), "Host runtime configuration"
+            )
+            installation = _mapping(
+                proposal.get("installation"), "Host installation binding"
+            )
+            binding = _mapping(proposal.get("user_binding"), "Host user binding")
+            host_public = _mapping(
+                proposal.get("host_public_identity"), "Host public identity"
+            )
+            gateway = ProviderHostGateway(
+                pipe_name=str(runtime["pipe_name"]),
+                authority_id=authority_id,
+                host_id=str(proposal["host_id"]),
+                authority_signer=authority_signer,
+                host_verifier=RsaPublicIdentity.from_configuration(
+                    host_public
+                ).verifier(),
+                expected_host_sid=str(binding["user_sid"]),
+                expected_host_session_id=int(binding["session_id"]),
+                expected_host_executable=Path(str(installation["executable_path"])),
+                expected_host_executable_sha256=str(
+                    installation["executable_sha256"]
+                ),
+                expected_host_profile_path=Path(str(binding["profile_path"])),
+                sequence_store=core.root / "provider-host-gateway-sequences.db",
+                enrollment_is_active=lambda: (
+                    (
+                        current := core.store.get(
+                            "provider_host_enrollments",
+                            str(receipt["enrollment_id"]),
+                        )
+                    )
+                    is not None
+                    and current.get("service_state") == "ACTIVE"
+                ),
+            )
+            observer.provider_host_gateway = gateway
+
+        def deactivate_provider_host(record: Mapping[str, Any]) -> None:
+            gateway = observer.provider_host_gateway
+            if gateway is not None:
+                gateway.deactivate()
+            observer.provider_host_gateway = None
+
+        core.configure_provider_host_enrollment(
+            ProviderHostEnrollmentCoordinator(
+                store=core.store,
+                service_key_id=core.keys.current_key_id,
+                authority_protocol_version=PROTOCOL_VERSION,
+                authority_schema_version=SERVICE_SCHEMA_VERSION,
+                founder_verifier=verifier,
+                authority_signer=authority_signer,
+                authority_public_identity=authority_signer.public_configuration(),
+                proposal_observer=observer,
+                activate=activate_provider_host,
+                deactivate=deactivate_provider_host,
+            )
+        )
     return NamedPipeAuthorityServer(
         core,
         str(config["authorized_client_sid"]),
@@ -317,6 +408,12 @@ def _valid_provider_host_configuration(value: object) -> bool:
     )
 
 
+def _mapping(value: object, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PermissionError(f"Provider Host {label} is invalid")
+    return dict(value)
+
+
 def _unblock_pipe_accept() -> None:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.restype = wintypes.HANDLE
@@ -350,6 +447,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
 
         return registration_main(values[1:])
+    if values and values[0] == "codex-reconcile-qualification":
+        from keeper.authority_service.codex_registration import (
+            reconciliation_main,
+        )
+
+        return reconciliation_main(values[1:])
     options = parser().parse_args(values)
     host = AuthorityWindowsService(options.config)
     if options.mode == "service":

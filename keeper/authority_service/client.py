@@ -66,6 +66,52 @@ class AuthorityServiceClient:
             )
         return validate_provenance_report(result["report"], request)
 
+    def provider_host_enrollment_status(self) -> dict[str, Any]:
+        return self.request(Operation.PROVIDER_HOST_ENROLLMENT_STATUS, {})
+
+    def begin_provider_host_enrollment(
+        self,
+        *,
+        founder_capability: dict[str, object],
+        proposal: dict[str, object],
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.BEGIN_PROVIDER_HOST_ENROLLMENT,
+            {
+                "founder_capability": founder_capability,
+                "proposal": proposal,
+            },
+        )
+
+    def complete_provider_host_enrollment(
+        self, enrollment_id: str, proof: dict[str, object]
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.COMPLETE_PROVIDER_HOST_ENROLLMENT,
+            {"enrollment_id": enrollment_id, "proof": proof},
+        )
+
+    def reconcile_provider_host_enrollment(
+        self, enrollment_id: str, proof: dict[str, object] | None
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.RECONCILE_PROVIDER_HOST_ENROLLMENT,
+            {"enrollment_id": enrollment_id, "proof": proof},
+        )
+
+    def revoke_provider_host_enrollment(
+        self,
+        enrollment_id: str,
+        founder_capability: dict[str, object],
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.REVOKE_PROVIDER_HOST_ENROLLMENT,
+            {
+                "enrollment_id": enrollment_id,
+                "founder_capability": founder_capability,
+            },
+        )
+
     def register_provider(
         self,
         provider_id: str,
@@ -126,6 +172,14 @@ class AuthorityServiceClient:
     def qualify_provider(self, registration_id: str) -> dict[str, Any]:
         return self.request(
             Operation.BEGIN_QUALIFICATION,
+            {"registration_id": registration_id},
+        )
+
+    def reconcile_provider_qualification(
+        self, registration_id: str
+    ) -> dict[str, Any]:
+        return self.request(
+            Operation.RECONCILE_PROVIDER_QUALIFICATION,
             {"registration_id": registration_id},
         )
 

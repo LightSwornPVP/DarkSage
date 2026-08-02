@@ -35,6 +35,7 @@ try {
         try {
             & $Python -m nuitka `
                 --standalone `
+                --reproducible=yes `
                 --assume-yes-for-downloads `
                 --output-dir=$BuildRoot `
                 --output-filename=KeeperProviderHost.exe `

@@ -122,7 +122,12 @@ def make_test_founder_capability(
         "project_id": claim_values["project_id"],
         "charter_id": claim_values["charter_id"],
         "charter_revision": claim_values["charter_revision"],
-        "approval_action": "APPROVE_CHARTER",
+        "approval_action": (
+            "APPROVE_ACTION"
+            if claim_values["authorization_kind"]
+            == "PROVIDER_HOST_ENROLLMENT"
+            else "APPROVE_CHARTER"
+        ),
         "bound_digest": claim_values["action_digest"],
         "source_user_interaction_id": f"interaction:{project_id}:{suffix}",
         "proof_version": 2,

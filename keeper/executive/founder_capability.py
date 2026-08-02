@@ -208,12 +208,17 @@ class FounderCapabilityClaims:
                            "revocation_epoch"}
         ):
             raise ValueError("Founder capability claims require non-empty text")
+        allowed_actions = {
+            ("PROJECT_LAUNCH", "DELEGATE_CHARTER"),
+            ("PROVIDER_HOST_ENROLLMENT", "ENROLL_PROVIDER_HOST"),
+            ("PROVIDER_HOST_ENROLLMENT", "REVOKE_PROVIDER_HOST"),
+        }
         if (
             self.charter_revision < 1
             or self.authorization_generation < 1
             or self.revocation_epoch != self.authorization_generation - 1
-            or self.authorization_kind != "PROJECT_LAUNCH"
-            or self.protected_action != "DELEGATE_CHARTER"
+            or (self.authorization_kind, self.protected_action)
+            not in allowed_actions
             or self.usage != "ONE_TIME_GENERATION"
             or self.application_identity != APPLICATION_IDENTITY
             or not self.founder_principal_sid.startswith("S-1-")
@@ -351,9 +356,18 @@ def _validate_issuance_confirmation(
         raise PermissionError(
             "Founder capability confirmation lifetime is invalid"
         ) from error
+    expected_action = (
+        "APPROVE_CHARTER"
+        if (
+            claims.authorization_kind,
+            claims.protected_action,
+        )
+        == ("PROJECT_LAUNCH", "DELEGATE_CHARTER")
+        else "APPROVE_ACTION"
+    )
     if (
         confirmation.get("authentication_method") != expected_method
-        or confirmation.get("approval_action") != "APPROVE_CHARTER"
+        or confirmation.get("approval_action") != expected_action
         or confirmation.get("proof_version") != 2
         or confirmation.get("principal_sid") != claims.founder_principal_sid
         or confirmation.get("session_id")

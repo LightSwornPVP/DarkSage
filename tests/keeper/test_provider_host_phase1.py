@@ -488,10 +488,13 @@ def test_provider_host_setup_is_exact_durable_and_host_executed(
         authority_verifier=AUTHORITY,
         host_signer=HOST,
         store=store,
-        provider_binding=provider,
+        provider_binding=None,
         environment_attestation_key=b"environment-test-key",
     )
     runtime.start()
+    assert runtime.status()["provider_state"] == "NO_QUALIFIED_PROVIDERS"
+    with pytest.raises(PermissionError, match="no qualified provider"):
+        _ = runtime.provider_bin
     attestation = runtime.prepare_environment(
         preparation_nonce="setup-prepare", provider_bin=executable.parent
     )
@@ -571,6 +574,9 @@ def test_provider_host_setup_is_exact_durable_and_host_executed(
         runtime.execute_setup(
             AUTHORITY.sign("keeper-provider-host-provider-setup", setup), runner
         )
+    bound = runtime.bind_provider(provider.as_dict())
+    assert bound["state"] == "QUALIFIED"
+    assert runtime.status()["provider_state"] == "QUALIFIED"
 
 
 def test_authority_gateway_builds_exact_host_setup_contract(tmp_path: Path) -> None:
@@ -654,6 +660,41 @@ def test_authority_gateway_builds_exact_host_setup_contract(tmp_path: Path) -> N
         validate_setup_envelope(changed)
 
 
+def test_authority_gateway_fences_rpc_when_enrollment_is_not_durably_active(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    executable = tmp_path / "KeeperProviderHost.exe"
+    executable.write_bytes(b"MZhost")
+    active = True
+    gateway = ProviderHostGateway(
+        pipe_name=r"\\.\pipe\KeeperProviderHost-never-opened",
+        authority_id="authority-test",
+        host_id="host-test",
+        authority_signer=AUTHORITY,
+        host_verifier=HOST,
+        expected_host_sid="S-1-5-21-1000",
+        expected_host_session_id=1,
+        expected_host_executable=executable,
+        expected_host_executable_sha256=hashlib.sha256(
+            executable.read_bytes()
+        ).hexdigest(),
+        expected_host_profile_path=profile,
+        sequence_store=tmp_path / "gateway-sequences.db",
+        timeout_seconds=0.01,
+        enrollment_is_active=lambda: active,
+        production=False,
+    )
+    active = False
+    with pytest.raises(PermissionError, match="enrollment is not active"):
+        gateway.status()
+    active = True
+    gateway.deactivate()
+    with pytest.raises(PermissionError, match="enrollment is not active"):
+        gateway.status()
+
+
 def test_provider_host_security_descriptors_deny_restricted_code_first() -> None:
     sid = "S-1-5-21-1000"
     expected = f"D:P(D;;GA;;;S-1-5-12)(A;;GA;;;SY)(A;;GA;;;{sid})"
@@ -696,21 +737,18 @@ def test_authority_gateway_rejects_shared_or_unmeasured_host_binary(
     shared.write_bytes(b"MZpython")
     dedicated = tmp_path / "KeeperProviderHost.exe"
     dedicated.write_bytes(b"MZhost")
-    common = {
-        "pipe_name": r"\\.\pipe\KeeperProviderHost-test",
-        "authority_id": "authority-test",
-        "host_id": "host-test",
-        "authority_signer": AUTHORITY,
-        "host_verifier": HOST,
-        "expected_host_sid": "S-1-5-21-1000",
-        "expected_host_session_id": 1,
-        "expected_host_profile_path": profile,
-        "sequence_store": tmp_path / "sequences.db",
-        "production": False,
-    }
     with pytest.raises(PermissionError, match="dedicated measured"):
         ProviderHostGateway(
-            **common,
+            pipe_name=r"\\.\pipe\KeeperProviderHost-test",
+            authority_id="authority-test",
+            host_id="host-test",
+            authority_signer=AUTHORITY,
+            host_verifier=HOST,
+            expected_host_sid="S-1-5-21-1000",
+            expected_host_session_id=1,
+            expected_host_profile_path=profile,
+            sequence_store=tmp_path / "sequences.db",
+            production=False,
             expected_host_executable=shared,
             expected_host_executable_sha256=hashlib.sha256(
                 shared.read_bytes()
@@ -718,7 +756,16 @@ def test_authority_gateway_rejects_shared_or_unmeasured_host_binary(
         )
     with pytest.raises(PermissionError, match="dedicated measured"):
         ProviderHostGateway(
-            **common,
+            pipe_name=r"\\.\pipe\KeeperProviderHost-test",
+            authority_id="authority-test",
+            host_id="host-test",
+            authority_signer=AUTHORITY,
+            host_verifier=HOST,
+            expected_host_sid="S-1-5-21-1000",
+            expected_host_session_id=1,
+            expected_host_profile_path=profile,
+            sequence_store=tmp_path / "sequences.db",
+            production=False,
             expected_host_executable=dedicated,
             expected_host_executable_sha256="0" * 64,
         )
@@ -1095,6 +1142,19 @@ def test_provider_host_status_is_redacted_truthful_and_fail_closed() -> None:
     }
     assert "executable_path" not in status
     assert "account_id" not in status
+
+    observer.provider_host_gateway = _StatusGateway(
+        {
+            "state": "READY",
+            "host_protocol": "keeper-provider-host/1",
+            "provider_binding": None,
+        }
+    )  # type: ignore[assignment]
+    unbound = observer.provider_host_status()
+    assert unbound["provider_state"] == "NO_QUALIFIED_PROVIDERS"
+    assert unbound["founder_action_required"] == (
+        "COMPLETE_PROVIDER_REGISTRATION_AND_QUALIFICATION"
+    )
 
     observer.provider_host_gateway = _StatusGateway(
         PermissionError("identity mismatch")

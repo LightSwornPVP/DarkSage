@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import hashlib
 import os
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,7 @@ class ProviderHostGateway:
         sequence_store: Path,
         timeout_seconds: float = 15.0,
         now: Callable[[], datetime] | None = None,
+        enrollment_is_active: Callable[[], bool] | None = None,
         production: bool = True,
     ) -> None:
         if production:
@@ -93,7 +95,15 @@ class ProviderHostGateway:
         )
         self.timeout_seconds = timeout_seconds
         self.now = now or (lambda: datetime.now(UTC))
+        self._enrollment_is_active = enrollment_is_active or (lambda: True)
+        self._lifecycle_lock = threading.RLock()
+        self._enabled = True
         self._sequences = _GatewaySequenceStore(sequence_store)
+
+    def deactivate(self) -> None:
+        """Fence all future Host RPCs after a durable enrollment denial."""
+        with self._lifecycle_lock:
+            self._enabled = False
 
     def enrollment_record(self) -> dict[str, Any]:
         """Return the exact protected-config-backed host enrollment identity."""
@@ -112,10 +122,16 @@ class ProviderHostGateway:
             "state": "ACTIVE",
         }
 
-    def prepare_environment(self, preparation_nonce: str) -> dict[str, Any]:
+    def prepare_environment(
+        self, preparation_nonce: str, provider_executable: Path
+    ) -> dict[str, Any]:
+        provider_bin = provider_executable.resolve(strict=True).parent
         result = self._rpc(
             "prepare_environment",
-            {"preparation_nonce": preparation_nonce},
+            {
+                "preparation_nonce": preparation_nonce,
+                "provider_bin": str(provider_bin),
+            },
         )
         if not isinstance(result, dict):
             raise PermissionError("Provider Host environment response is invalid")
@@ -129,6 +145,21 @@ class ProviderHostGateway:
         ):
             raise PermissionError("Provider Host environment response differs")
         return record
+
+    def bind_provider(self, provider_binding: Mapping[str, Any]) -> dict[str, Any]:
+        result = self._rpc(
+            "bind_provider", {"provider_binding": dict(provider_binding)}
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("state") != "QUALIFIED"
+            or result.get("registration_id")
+            != provider_binding.get("registration_id")
+            or result.get("qualification_id")
+            != provider_binding.get("qualification_id")
+        ):
+            raise PermissionError("Provider Host provider binding response differs")
+        return dict(result)
 
     def execute(
         self,
@@ -551,6 +582,18 @@ class ProviderHostGateway:
         return dict(result)
 
     def _rpc(
+        self,
+        operation: str,
+        body: Mapping[str, Any],
+        *,
+        on_started: Callable[[dict[str, object]], None] | None = None,
+    ) -> object:
+        with self._lifecycle_lock:
+            if not self._enabled or not self._enrollment_is_active():
+                raise PermissionError("Provider Host enrollment is not active")
+            return self._rpc_active(operation, body, on_started=on_started)
+
+    def _rpc_active(
         self,
         operation: str,
         body: Mapping[str, Any],

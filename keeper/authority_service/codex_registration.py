@@ -37,6 +37,10 @@ class RegistrationClient(Protocol):
 
     def qualify_provider(self, registration_id: str) -> dict[str, Any]: ...
 
+    def reconcile_provider_qualification(
+        self, registration_id: str
+    ) -> dict[str, Any]: ...
+
 
 def file_sha256(path: Path) -> str:
     with path.open("rb") as source:
@@ -214,6 +218,35 @@ def claim_registration_attempt(output_directory: Path) -> Path:
     return claim
 
 
+def claim_qualification_reconciliation(
+    output_directory: Path, registration_id: str
+) -> Path:
+    destination = output_directory.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    claim = destination / "qualification-reconciliation.claim.json"
+    try:
+        with claim.open("x", encoding="utf-8", newline="\n") as output:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "operation": "codex-reconcile-qualification-once",
+                    "registration_id": registration_id,
+                    "state": "CLAIMED",
+                },
+                output,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+    except FileExistsError as error:
+        raise FileExistsError(
+            "Codex qualification reconciliation output directory is already claimed"
+        ) from error
+    return claim
+
+
 def register_and_qualify_once(
     client: RegistrationClient,
     executable: Path,
@@ -250,6 +283,52 @@ def register_and_qualify_once(
     }
 
 
+def reconcile_qualification_once(
+    client: RegistrationClient,
+    registration_id: str,
+    output_directory: Path,
+) -> dict[str, str]:
+    exact_registration_id = registration_id.strip()
+    if not exact_registration_id or exact_registration_id != registration_id:
+        raise ValueError("registration ID must be an exact non-empty value")
+    claim_qualification_reconciliation(output_directory, exact_registration_id)
+    response = client.reconcile_provider_qualification(exact_registration_id)
+    response_path = output_directory / "qualification-reconciliation-response.json"
+    persist_public_response(response_path, response)
+
+    registration = response.get("registration")
+    qualification = response.get("qualification")
+    returned_registration_id = (
+        registration.get("trusted_registration_id")
+        if isinstance(registration, dict)
+        else None
+    )
+    qualification_id = (
+        qualification.get("id") if isinstance(qualification, dict) else None
+    )
+    qualification_registration_id = (
+        qualification.get("registration_id")
+        if isinstance(qualification, dict)
+        else None
+    )
+    if (
+        response.get("reconciled") is not True
+        or returned_registration_id != exact_registration_id
+        or not isinstance(qualification_id, str)
+        or not qualification_id
+        or qualification_registration_id != exact_registration_id
+    ):
+        raise RuntimeError(
+            "qualification reconciliation response was persisted but its exact "
+            "binding is invalid"
+        )
+    return {
+        "registration_id": exact_registration_id,
+        "qualification_id": qualification_id,
+        "reconciliation_response": str(response_path.resolve()),
+    }
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="keeper-authority codex-register-once"
@@ -281,6 +360,38 @@ def main(arguments: Sequence[str] | None = None) -> int:
             expected_version=options.expected_version,
             keeper_launch_budget=options.keeper_launch_budget,
         ),
+    )
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def reconciliation_main(arguments: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="keeper-authority codex-reconcile-qualification"
+    )
+    parser.add_argument("--registration-id", required=True)
+    parser.add_argument("--output-directory", type=Path, required=True)
+    parser.add_argument("--apply", action="store_true")
+    options = parser.parse_args(arguments)
+    registration_id = str(options.registration_id)
+    if not registration_id or registration_id.strip() != registration_id:
+        parser.error("--registration-id must be an exact non-empty value")
+    if not options.apply:
+        print(
+            json.dumps(
+                {
+                    "apply_required": True,
+                    "operation": "codex-reconcile-qualification-once",
+                    "registration_id": registration_id,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    result = reconcile_qualification_once(
+        ProductionAuthorityServiceClient(),
+        registration_id,
+        options.output_directory.resolve(),
     )
     print(json.dumps(result, sort_keys=True))
     return 0

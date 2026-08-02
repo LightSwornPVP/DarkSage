@@ -117,12 +117,23 @@ class NamedPipeAuthorityServer:
                     observer is not None
                     and (
                         request.operation is Operation.RESERVE_ATTEMPT
+                        or request.operation
+                        in {
+                            Operation.BEGIN_PROVIDER_HOST_ENROLLMENT,
+                            Operation.COMPLETE_PROVIDER_HOST_ENROLLMENT,
+                            Operation.RECONCILE_PROVIDER_HOST_ENROLLMENT,
+                            Operation.REVOKE_PROVIDER_HOST_ENROLLMENT,
+                        }
                         or (
                             request.operation is Operation.REGISTER_PROVIDER
                             and "model_allowlist" in request.payload
                         )
                         or (
-                            request.operation is Operation.BEGIN_QUALIFICATION
+                            request.operation
+                            in {
+                                Operation.BEGIN_QUALIFICATION,
+                                Operation.RECONCILE_PROVIDER_QUALIFICATION,
+                            }
                             and self._subscription_qualification(
                                 request.payload
                             )
@@ -138,6 +149,7 @@ class NamedPipeAuthorityServer:
                     in {
                         Operation.REGISTER_PROVIDER,
                         Operation.BEGIN_QUALIFICATION,
+                        Operation.RECONCILE_PROVIDER_QUALIFICATION,
                         Operation.EXECUTE_PROVIDER,
                         Operation.RECORD_PROVIDER_START,
                     }

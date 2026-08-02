@@ -383,7 +383,7 @@ class ProviderHostInstaller:
         content = (
             "@echo off\r\n"
             f'"{artifact.resolve(strict=True)}" run '
-            f'--config "{(self.state / "provider-host.json").resolve()}"\r\n'
+            f'--config "{(self.state / "provider-host-enrollment.json").resolve()}"\r\n'
         ).encode("utf-8")
         _atomic_replace_bytes(self.startup_path, content)
         self._secure(self.startup_path)

@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 from keeper.evidence_input import structured_digest, validate_provider_input
 from keeper.authority_service.key_ring import ServiceKeyRing
@@ -18,7 +18,10 @@ from keeper.authority_service.protocol import (
     Request,
 )
 from keeper.authority_service.provenance import AUDIT_REPORT_PURPOSE
-from keeper.authority_service.store import AuthorityStore
+from keeper.authority_service.provider_host_enrollment import (
+    ProviderHostEnrollmentCoordinator,
+)
+from keeper.authority_service.store import AuthorityStore, SERVICE_SCHEMA_VERSION
 from keeper.executive.founder_capability import (
     ProductionFounderCapabilityVerifier,
     TestFounderCapabilityVerifier,
@@ -36,7 +39,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.7.0"
+SERVICE_VERSION = "1.7.1"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
@@ -193,6 +196,15 @@ class AuthorityServiceCore:
         }:
             raise TypeError("Founder capability verifier type is not trusted")
         self.founder_capability_verifier = founder_capability_verifier
+        self.provider_host_enrollment: ProviderHostEnrollmentCoordinator | None = None
+
+    def configure_provider_host_enrollment(
+        self, coordinator: ProviderHostEnrollmentCoordinator
+    ) -> None:
+        if self.provider_host_enrollment is not None:
+            raise RuntimeError("Provider Host enrollment is already configured")
+        self.provider_host_enrollment = coordinator
+        coordinator.activate_current()
 
     def dispatch(self, request: Request, client_sid: str) -> dict[str, Any]:
         if not client_sid:
@@ -216,8 +228,26 @@ class AuthorityServiceCore:
         handlers = {
             Operation.DIAGNOSTICS: self._diagnostics,
             Operation.AUDIT_PROVENANCE: self._audit_provenance,
+            Operation.PROVIDER_HOST_ENROLLMENT_STATUS: (
+                self._provider_host_enrollment_status
+            ),
+            Operation.BEGIN_PROVIDER_HOST_ENROLLMENT: (
+                self._begin_provider_host_enrollment
+            ),
+            Operation.COMPLETE_PROVIDER_HOST_ENROLLMENT: (
+                self._complete_provider_host_enrollment
+            ),
+            Operation.RECONCILE_PROVIDER_HOST_ENROLLMENT: (
+                self._reconcile_provider_host_enrollment
+            ),
+            Operation.REVOKE_PROVIDER_HOST_ENROLLMENT: (
+                self._revoke_provider_host_enrollment
+            ),
             Operation.REGISTER_PROVIDER: self._register_provider,
             Operation.BEGIN_QUALIFICATION: self._qualify_provider,
+            Operation.RECONCILE_PROVIDER_QUALIFICATION: (
+                self._reconcile_provider_qualification
+            ),
             Operation.FINALIZE_QUALIFICATION: self._internal_only,
             Operation.RESERVE_ATTEMPT: self._reserve_attempt,
             Operation.AUTHORIZE_PROJECT_LAUNCH: self._authorize_project_launch,
@@ -323,20 +353,73 @@ class AuthorityServiceCore:
             self.observer, "allowed_evidence_root", None
         )
         provider_host = getattr(self.observer, "provider_host_status", None)
-        provider_host_status = (
-            provider_host()
-            if callable(provider_host)
-            else {
+        enrollment = self.provider_host_enrollment
+        enrollment_status = enrollment.status() if enrollment is not None else None
+        live_status = provider_host() if callable(provider_host) else None
+        if enrollment_status is not None:
+            provider_host_status = dict(enrollment_status)
+            if (
+                enrollment_status.get("state") == "ENROLLED_OFFLINE"
+                and isinstance(live_status, dict)
+                and live_status.get("online") is True
+            ):
+                provider_host_status.update(live_status)
+                provider_host_status["enrollment_id"] = enrollment_status.get(
+                    "enrollment_id"
+                )
+                provider_host_status["enrollment_generation"] = (
+                    enrollment_status.get("enrollment_generation")
+                )
+        elif isinstance(live_status, dict):
+            provider_host_status = live_status
+        else:
+            provider_host_status = {
                 "installed": False,
                 "online": False,
                 "state": "NOT_CONFIGURED",
                 "protocol_compatible": False,
                 "provider_state": "UNAVAILABLE",
             }
+        reconciliation_registration_ids = sorted(
+            str(record["trusted_registration_id"])
+            for record in self.store.list_records("registrations")
+            if record.get("service_state") == "UNCERTAIN"
+            and record.get("registration_schema_version") == 4
+            and record.get("registration_lifecycle") == "QUALIFIED"
+            and isinstance(record.get("trusted_registration_id"), str)
+            and record.get("trusted_registration_id")
+            and isinstance(record.get("qualification_evidence_id"), str)
+            and record.get("qualification_evidence_id")
+            and (
+                qualification := self.store.get(
+                    "qualifications", str(record["qualification_evidence_id"])
+                )
+            )
+            is not None
+            and qualification.get("service_state") == "UNCERTAIN"
+            and isinstance(qualification.get("evidence"), dict)
+            and qualification["evidence"].get("registration_id")
+            == record.get("trusted_registration_id")
         )
+        provider_host_status = dict(provider_host_status)
+        provider_host_status["qualification_reconciliation_required"] = bool(
+            reconciliation_registration_ids
+        )
+        provider_host_status["qualification_reconciliation_count"] = len(
+            reconciliation_registration_ids
+        )
+        provider_host_status["qualification_reconciliation_registration_ids"] = (
+            reconciliation_registration_ids
+        )
+        if reconciliation_registration_ids:
+            provider_host_status["provider_state"] = "QUALIFICATION_UNCERTAIN"
+            provider_host_status["founder_action_required"] = (
+                "RECONCILE_PROVIDER_QUALIFICATION"
+            )
         return {
             "service_version": SERVICE_VERSION,
             "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SERVICE_SCHEMA_VERSION,
             "service_root": str(self.root),
             "service_key_id": self.keys.current_key_id,
             "service_key_version": self.keys.current_version,
@@ -357,6 +440,49 @@ class AuthorityServiceCore:
             ),
             "provider_host": provider_host_status,
         }
+
+    def _provider_host_enrollment_status(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        _exact(payload, set())
+        coordinator = self._provider_host_enrollment_coordinator()
+        return coordinator.status()
+
+    def _begin_provider_host_enrollment(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        return self._provider_host_enrollment_coordinator().begin(
+            payload, client_sid
+        )
+
+    def _complete_provider_host_enrollment(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        return self._provider_host_enrollment_coordinator().complete(
+            payload, client_sid
+        )
+
+    def _reconcile_provider_host_enrollment(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        return self._provider_host_enrollment_coordinator().reconcile(
+            payload, client_sid
+        )
+
+    def _revoke_provider_host_enrollment(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        return self._provider_host_enrollment_coordinator().revoke(
+            payload, client_sid
+        )
+
+    def _provider_host_enrollment_coordinator(
+        self,
+    ) -> ProviderHostEnrollmentCoordinator:
+        coordinator = self.provider_host_enrollment
+        if coordinator is None:
+            raise PermissionError("Provider Host enrollment is not configured")
+        return coordinator
 
     def _authorize_project_launch(
         self, payload: dict[str, Any], client_sid: str
@@ -637,7 +763,9 @@ class AuthorityServiceCore:
             and hasattr(self.observer, "qualification_identifier")
         ):
             qualification_id = str(
-                self.observer.qualification_identifier(registration)
+                self.observer.qualification_identifier(
+                    registration, qualification_id
+                )
             )
             if (
                 not qualification_id.startswith("provider-qualification:")
@@ -673,7 +801,12 @@ class AuthorityServiceCore:
             registration_id=identifier,
             challenge=challenge,
         )
-        observation = self.observer.qualify(registration, challenge)
+        observed_registration = (
+            {**registration, "_qualification_id": qualification_id}
+            if registration.get("registration_schema_version") == 4
+            else registration
+        )
+        observation = self.observer.qualify(observed_registration, challenge)
         normalized = (
             observation.raw_version_output.splitlines()[0].strip()[:200]
             if observation.raw_version_output
@@ -801,13 +934,7 @@ class AuthorityServiceCore:
             if evidence["qualification_result"] == "qualified"
             else "QUALIFICATION_FAILED"
         )
-        self.store.transition(
-            "qualifications",
-            qualification_id,
-            "EXECUTION_STARTED",
-            state,
-            {"start": start, "evidence": evidence},
-        )
+        qualification_record = {"start": start, "evidence": evidence}
         if state == "QUALIFIED":
             updated = apply_protected_qualification(
                 registration,
@@ -829,17 +956,134 @@ class AuthorityServiceCore:
             updated["configuration_digest"] = canonical_provider_registration_digest(
                 updated
             )
-        self.store.transition(
-            "registrations",
-            identifier,
-            "REGISTERED_UNQUALIFIED",
-            state,
-            updated,
-        )
+        if (
+            state == "QUALIFIED"
+            and subscription_qualification
+            and hasattr(self.observer, "bind_qualified_provider")
+        ):
+            # The database lifecycle is the execution fence. Keep the exact
+            # immutable registration payload schema-valid so recovery cannot
+            # smuggle operational metadata into provider authority.
+            uncertain_registration = dict(updated)
+            self.store.stage_provider_qualification_binding(
+                identifier,
+                qualification_id,
+                uncertain_registration,
+                qualification_record,
+            )
+            try:
+                self.observer.bind_qualified_provider(updated, evidence)
+            except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as error:
+                self.store.transition(
+                    "registrations",
+                    identifier,
+                    "UNCERTAIN",
+                    "UNCERTAIN",
+                    uncertain_registration,
+                )
+                self.store.transition(
+                    "qualifications",
+                    qualification_id,
+                    "UNCERTAIN",
+                    "UNCERTAIN",
+                    {"start": start, "evidence": evidence},
+                )
+                raise RuntimeError(
+                    "Provider Host qualification binding is uncertain"
+                ) from error
+            completed_registration = {
+                **updated,
+            }
+            self.store.complete_provider_qualification_binding(
+                identifier,
+                qualification_id,
+                completed_registration,
+                qualification_record,
+            )
+            updated = completed_registration
+        else:
+            self.store.transition(
+                "qualifications",
+                qualification_id,
+                "EXECUTION_STARTED",
+                state,
+                qualification_record,
+            )
+            self.store.transition(
+                "registrations",
+                identifier,
+                "REGISTERED_UNQUALIFIED",
+                state,
+                updated,
+            )
         return {
             "registration": updated,
             "qualification": evidence,
             "qualification_start": start,
+        }
+
+    def _reconcile_provider_qualification(
+        self, payload: dict[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        if set(payload) != {"registration_id"}:
+            raise PermissionError(
+                "Provider qualification reconciliation fields are invalid"
+            )
+        if self.observer is None or not hasattr(
+            self.observer, "bind_qualified_provider"
+        ):
+            raise RuntimeError("authority provider observer is unavailable")
+        identifier = _text(payload["registration_id"], "registration ID")
+        registration = self.store.get("registrations", identifier)
+        if (
+            registration is None
+            or registration.pop("service_state", None) != "UNCERTAIN"
+            or registration.get("registration_schema_version") != 4
+            or registration.get("registration_lifecycle") != "QUALIFIED"
+        ):
+            raise PermissionError(
+                "Provider qualification is not eligible for reconciliation"
+            )
+        qualification_id = registration.get("qualification_evidence_id")
+        if not isinstance(qualification_id, str) or not qualification_id:
+            raise PermissionError(
+                "Provider qualification evidence identity is unavailable"
+            )
+        qualification = self.store.get("qualifications", qualification_id)
+        if (
+            qualification is None
+            or qualification.pop("service_state", None) != "UNCERTAIN"
+            or not isinstance(qualification.get("start"), dict)
+            or not isinstance(qualification.get("evidence"), dict)
+        ):
+            raise PermissionError(
+                "Provider qualification evidence is not reconcilable"
+            )
+        evidence = cast(dict[str, Any], qualification["evidence"])
+        if (
+            evidence.get("id") != qualification_id
+            or evidence.get("registration_id") != identifier
+            or evidence.get("qualification_result") != "qualified"
+            or registration.get("qualification_evidence_digest")
+            != evidence.get("evidence_digest")
+        ):
+            raise PermissionError(
+                "Provider qualification reconciliation binding differs"
+            )
+        completed_registration = dict(registration)
+        reconciled_at = _now()
+        self.observer.bind_qualified_provider(completed_registration, evidence)
+        self.store.complete_provider_qualification_binding(
+            identifier,
+            qualification_id,
+            completed_registration,
+            qualification,
+        )
+        return {
+            "registration": completed_registration,
+            "qualification": evidence,
+            "reconciled": True,
+            "reconciled_at": reconciled_at,
         }
 
     def _reserve_attempt(

@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from ctypes import wintypes
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, cast
 
 if TYPE_CHECKING:
     from keeper.authority_service.provider_host_gateway import ProviderHostGateway
@@ -47,7 +47,10 @@ from keeper.authority_service.windows_identity import (
     NamedPipeClientProcessBinding,
     process_image,
 )
-from keeper.authority_service.windows_signature import authenticode_identity
+from keeper.authority_service.windows_signature import (
+    authenticode_enrollment_binding,
+    authenticode_identity,
+)
 from keeper.policies import filtered_environment
 from keeper.providers.adapters import (
     authority_provider_output_schema,
@@ -62,6 +65,8 @@ from keeper.providers.codex_contract import (
     validate_codex_authenticode_binding,
     validate_executable_file_identity,
 )
+from keeper.provider_host.enrollment import stable_host_identity
+from keeper.provider_host.install import ProviderHostInstaller
 
 
 class ServiceProviderObserver:
@@ -131,7 +136,7 @@ class ServiceProviderObserver:
             else (
                 "REGISTERED"
                 if isinstance(registration_id, str) and registration_id
-                else "UNAVAILABLE"
+                else "NO_QUALIFIED_PROVIDERS"
             )
         )
         action: str | None = None
@@ -153,6 +158,219 @@ class ServiceProviderObserver:
             "usage_state": "AUTHORITY_MANAGED",
             "founder_action_required": action,
         }
+
+    def validate_provider_host_enrollment_proposal(
+        self, proposal: Mapping[str, Any], client_sid: str
+    ) -> dict[str, Any]:
+        """Independently remeasure a Host proposal under its authenticated user."""
+        if client_sid.casefold() != self.authorized_client_sid.casefold():
+            raise PermissionError("Provider Host enrollment client SID differs")
+        process = self._client_process_binding()
+        process_identity = process.revalidate(client_sid)
+        _, profile, observed_sid, observed_session = self._validated_client_profile(
+            self._client_token(),
+            process.profile_token,
+            expected_sid=client_sid,
+        )
+        binding = proposal.get("user_binding")
+        installation = proposal.get("installation")
+        if not isinstance(binding, dict) or not isinstance(installation, dict):
+            raise PermissionError("Provider Host enrollment binding is incomplete")
+        expected_root = (
+            Path(profile)
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "DarkSage"
+            / "KeeperProviderHost"
+        ).resolve(strict=True)
+        startup_root = (
+            Path(profile)
+            / "AppData"
+            / "Roaming"
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+        ).resolve(strict=True)
+        installed = ProviderHostInstaller(
+            expected_root, startup_root, owner_sid=observed_sid
+        ).status()
+        current = installed.get("current")
+        if (
+            installed.get("transaction_pending") is not False
+            or not isinstance(current, dict)
+        ):
+            raise PermissionError("Provider Host installation is not stable")
+        executable = Path(str(installation.get("executable_path", "")))
+        install_root = Path(str(installation.get("install_root", "")))
+        if not executable.is_absolute() or not install_root.is_absolute():
+            raise PermissionError("Provider Host enrollment path is not absolute")
+        lexical_executable = Path(os.path.abspath(executable))
+        lexical_root = Path(os.path.abspath(install_root))
+        _reject_path_aliases(lexical_executable)
+        _reject_path_aliases(lexical_root)
+        canonical = lexical_executable.resolve(strict=True)
+        canonical_root = lexical_root.resolve(strict=True)
+        expected_host_id, expected_key_name = stable_host_identity(
+            observed_sid, str(current.get("package_sha256", ""))
+        )
+        pipe_suffix = hashlib.sha256(
+            (expected_host_id + ":" + observed_sid).encode("utf-8")
+        ).hexdigest()[:24]
+        expected_state = (expected_root / "state").resolve(strict=True)
+        expected_output = (expected_root / "output").resolve(strict=True)
+        _reject_path_aliases(expected_state)
+        _reject_path_aliases(expected_output)
+        if (
+            os.path.normcase(str(canonical))
+            != os.path.normcase(str(current.get("artifact_path", "")))
+            or installation.get("executable_sha256")
+            != current.get("artifact_sha256")
+            or installation.get("manifest_sha256")
+            != current.get("package_sha256")
+            or installation.get("package_version") != current.get("version")
+        ):
+            raise PermissionError("Provider Host enrollment installed package differs")
+        if (
+            os.path.normcase(str(canonical_root))
+            != os.path.normcase(str(expected_root))
+            or os.path.normcase(str(canonical))
+            != os.path.normcase(str(lexical_executable))
+            or canonical_root not in canonical.parents
+            or canonical.name.casefold() != "keeperproviderhost.exe"
+            or canonical.read_bytes()[:2] != b"MZ"
+            or proposal.get("host_id") != expected_host_id
+            or proposal.get("host_key_name") != expected_key_name
+            or proposal.get("pipe_name")
+            != rf"\\.\pipe\KeeperProviderHost-{pipe_suffix}"
+            or os.path.normcase(str(proposal.get("state_root", "")))
+            != os.path.normcase(str(expected_state))
+            or os.path.normcase(str(proposal.get("output_root", "")))
+            != os.path.normcase(str(expected_output))
+            or str(binding.get("user_sid", "")).casefold()
+            != observed_sid.casefold()
+            or binding.get("session_id") != observed_session
+            or os.path.normcase(str(binding.get("profile_path", "")))
+            != os.path.normcase(profile)
+            or process_identity.sid.casefold() != observed_sid.casefold()
+            or process_identity.session_id != observed_session
+        ):
+            raise PermissionError("Provider Host enrollment user or path binding differs")
+        descriptor = _open_locked_executable(canonical)
+        try:
+            opened = os.fstat(descriptor)
+            identity = _executable_file_identity(opened)
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = os.read(descriptor, 1_048_576)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+            with impersonate_token(self._client_token()):
+                signature = authenticode_enrollment_binding(canonical)
+            if (
+                digest.hexdigest() != installation.get("executable_sha256")
+                or size != installation.get("executable_size")
+                or identity != installation.get("executable_file_identity")
+                or signature != installation.get("authenticode_binding")
+                or _executable_file_identity(canonical.stat()) != identity
+            ):
+                raise PermissionError("Provider Host enrollment executable differs")
+        finally:
+            os.close(descriptor)
+        process.revalidate(client_sid)
+        return dict(proposal)
+
+    def provider_host_runtime_configuration(
+        self,
+        proposal: Mapping[str, Any],
+        *,
+        enrollment_id: str,
+        authority_id: str,
+        authority_public_identity: Mapping[str, object],
+    ) -> dict[str, Any]:
+        """Create the exact receipt-owned Host runtime configuration."""
+        binding = proposal.get("user_binding")
+        installation = proposal.get("installation")
+        public = proposal.get("host_public_identity")
+        if not all(isinstance(value, dict) for value in (binding, installation, public)):
+            raise PermissionError("Provider Host runtime binding is incomplete")
+        service_executable = Path(sys.executable).resolve(strict=True)
+        service_stat = service_executable.stat()
+        return {
+            "authority_id": authority_id,
+            "authority_peer": {
+                "executable_file_identity": _executable_file_identity(service_stat),
+                "executable_path": str(service_executable),
+                "executable_sha256": hashlib.sha256(
+                    service_executable.read_bytes()
+                ).hexdigest(),
+                "session_id": 0,
+                "user_sid": "S-1-5-18",
+            },
+            "authority_public_identity": dict(authority_public_identity),
+            "enrollment_id": enrollment_id,
+            "host_id": str(proposal["host_id"]),
+            "host_key_name": str(proposal["host_key_name"]),
+            "host_public_identity": dict(cast(dict[str, Any], public)),
+            "output_root": str(proposal["output_root"]),
+            "pipe_name": str(proposal["pipe_name"]),
+            "schema_version": 2,
+            "state_root": str(proposal["state_root"]),
+            "user_binding": dict(cast(dict[str, Any], binding)),
+        }
+
+    def bind_qualified_provider(
+        self,
+        registration: Mapping[str, Any],
+        qualification: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        gateway = self.provider_host_gateway
+        if gateway is None:
+            raise PermissionError(
+                "Qualified Codex binding requires KeeperProviderHost"
+            )
+        if (
+            registration.get("registration_schema_version") != 4
+            or registration.get("registration_lifecycle") != "QUALIFIED"
+            or qualification.get("qualification_result") != "qualified"
+        ):
+            raise PermissionError("Provider Host qualification is not complete")
+        account = registration.get("subscription_account_binding")
+        file_identity = registration.get("executable_file_identity")
+        authenticode = registration.get("authenticode_binding")
+        models = registration.get("model_allowlist")
+        efforts = registration.get("effort_levels")
+        if (
+            not isinstance(account, dict)
+            or not isinstance(file_identity, dict)
+            or not isinstance(authenticode, dict)
+            or not isinstance(models, list)
+            or not isinstance(efforts, list)
+        ):
+            raise PermissionError("Provider Host qualified binding is incomplete")
+        account_digest = str(account.get("account_identity_digest", ""))
+        binding = {
+            "account_id": "chatgpt-subscription:" + account_digest,
+            "authenticode_binding": dict(authenticode),
+            "efforts": list(efforts),
+            "executable_path": str(registration["canonical_executable_path"]),
+            "executable_sha256": str(registration["executable_sha256"]),
+            "executable_size": int(registration["executable_size"]),
+            "file_identity": dict(file_identity),
+            "models": list(models),
+            "provider_id": str(registration["logical_provider_id"]),
+            "publisher": str(authenticode["publisher_subject"]),
+            "qualification_id": str(registration["qualification_evidence_id"]),
+            "registration_id": str(registration["trusted_registration_id"]),
+            "session_id": str(qualification["provider_instance_id"]),
+            "version": str(registration["expected_version"]),
+        }
+        return gateway.bind_provider(binding)
 
     @contextmanager
     def bind_client(self, pipe: int) -> Iterator[None]:
@@ -272,7 +490,9 @@ class ServiceProviderObserver:
     ) -> QualificationObservation:
         return self._qualify_codex_through_host(registration, challenge)
 
-    def qualification_identifier(self, registration: dict[str, Any]) -> str:
+    def qualification_identifier(
+        self, registration: dict[str, Any], planned_identifier: str
+    ) -> str:
         gateway = self.provider_host_gateway
         if gateway is None:
             raise PermissionError(
@@ -280,9 +500,14 @@ class ServiceProviderObserver:
             )
         status = gateway.status()
         provider = status.get("provider_binding")
+        if status.get("state") != "READY":
+            raise PermissionError(
+                "KeeperProviderHost is not ready for qualification"
+            )
+        if provider is None:
+            return planned_identifier
         if (
-            status.get("state") != "READY"
-            or not isinstance(provider, dict)
+            not isinstance(provider, dict)
             or provider.get("registration_id")
             != registration.get("trusted_registration_id")
         ):
@@ -299,7 +524,11 @@ class ServiceProviderObserver:
             raise PermissionError(
                 "Codex qualification requires KeeperProviderHost"
             )
-        qualification_id = self.qualification_identifier(registration)
+        qualification_id = str(registration.get("_qualification_id", ""))
+        if not qualification_id:
+            raise PermissionError(
+                "KeeperProviderHost planned qualification ID is absent"
+            )
         binding = registration.get("windows_authentication_binding")
         if not isinstance(binding, dict):
             raise PermissionError(
@@ -318,7 +547,10 @@ class ServiceProviderObserver:
             ).hexdigest()
         )
         preparation_nonce = uuid.uuid4().hex
-        environment = gateway.prepare_environment(preparation_nonce)
+        environment = gateway.prepare_environment(
+            preparation_nonce,
+            Path(str(registration["canonical_executable_path"])),
+        )
         envelope = gateway.build_setup_envelope(
             operation="QUALIFY",
             registration=registration,
@@ -471,15 +703,24 @@ class ServiceProviderObserver:
         ):
             raise PermissionError("Codex host registration declaration is incomplete")
         client = self._client_process_binding().revalidate(client_sid)
+        _, client_profile, client_profile_sid, client_profile_session = (
+            self._validated_client_profile(
+                self._client_token(),
+                self._client_process_binding().profile_token,
+                expected_sid=client_sid,
+            )
+        )
         status = gateway.status()
         user_binding = status.get("user_binding")
         provider = status.get("provider_binding")
         if (
             status.get("state") != "READY"
             or not isinstance(user_binding, dict)
-            or not isinstance(provider, dict)
+            or provider is not None
         ):
-            raise PermissionError("KeeperProviderHost is not ready for registration")
+            raise PermissionError(
+                "KeeperProviderHost is not ready for a new registration"
+            )
         profile = Path(str(user_binding.get("profile_path", ""))).resolve(
             strict=True
         )
@@ -487,26 +728,21 @@ class ServiceProviderObserver:
             str(user_binding.get("user_sid", "")).casefold()
             != client.sid.casefold()
             or int(user_binding.get("session_id", -1)) != client.session_id
-            or str(provider.get("provider_id")) != "codex"
-            or str(provider.get("executable_path")).casefold()
-            != str(executable).casefold()
-            or provider.get("executable_sha256")
-            != expected_executable_sha256
-            or provider.get("executable_size") != expected_executable_size
-            or provider.get("version") != expected_version
-            or provider.get("models") != model_allowlist
-            or provider.get("efforts") != effort_levels
+            or profile != Path(client_profile)
+            or client_profile_sid.casefold() != client.sid.casefold()
+            or client_profile_session != client.session_id
         ):
-            raise PermissionError("KeeperProviderHost registration binding differs")
-        registration_id = str(provider.get("registration_id", ""))
-        account_id = str(provider.get("account_id", ""))
-        account_prefix = "chatgpt-subscription:"
-        if (
-            not registration_id.startswith("keeper-provider:codex:v1:")
-            or not account_id.startswith(account_prefix)
-        ):
-            raise PermissionError("KeeperProviderHost planned registration is invalid")
-        account_digest = account_id.removeprefix(account_prefix)
+            raise PermissionError("KeeperProviderHost enrolled user binding differs")
+        with impersonate_token(self._client_token()):
+            canonical, measurement, descriptor = (
+                _open_validated_reviewed_codex_executable(
+                    executable,
+                    expected_executable_sha256,
+                    expected_executable_size,
+                )
+            )
+        os.close(descriptor)
+        registration_id = f"keeper-provider:codex:v1:{uuid.uuid4().hex}"
         binding = {
             "principal_sid": client.sid,
             "windows_session_id": client.session_id,
@@ -515,15 +751,6 @@ class ServiceProviderObserver:
                 str(profile).casefold().encode("utf-8")
             ).hexdigest(),
             "source": "authenticated-named-pipe-client-process",
-        }
-        measurement = {
-            "canonical_path": str(provider["executable_path"]),
-            "sha256": str(provider["executable_sha256"]),
-            "size": int(provider["executable_size"]),
-            "file_identity": dict(cast(dict[str, Any], provider["file_identity"])),
-            "authenticode_binding": dict(
-                cast(dict[str, Any], provider["authenticode_binding"])
-            ),
         }
         provisional = {
             "authenticode_binding": measurement["authenticode_binding"],
@@ -534,7 +761,7 @@ class ServiceProviderObserver:
             "expected_version": expected_version,
             "model_allowlist": model_allowlist,
             "subscription_account_binding": {
-                "account_identity_digest": account_digest,
+                "account_identity_digest": "DISCOVER",
                 "authentication_method": "chatgpt-subscription",
                 "plan_type": "plus",
             },
@@ -552,7 +779,9 @@ class ServiceProviderObserver:
             / hashlib.sha256(setup_id.encode("utf-8")).hexdigest()
         )
         preparation_nonce = uuid.uuid4().hex
-        environment = gateway.prepare_environment(preparation_nonce)
+        environment = gateway.prepare_environment(
+            preparation_nonce, canonical
+        )
         envelope = gateway.build_setup_envelope(
             operation="REGISTER_PROBE",
             registration=provisional,
@@ -578,6 +807,16 @@ class ServiceProviderObserver:
             "source": "authority-verified-provider-host-probe",
             "observed_at": _now(),
         }
+        account_digest = str(
+            observed_account["account_identity_digest"]
+        )
+        if len(account_digest) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in account_digest
+        ):
+            raise PermissionError(
+                "KeeperProviderHost account identity digest is invalid"
+            )
         model_binding = {
             "models": public_probe.get("model_capabilities"),
             "source": "authority-verified-provider-host-probe",
@@ -585,7 +824,7 @@ class ServiceProviderObserver:
         }
         registration = create_provider_registration(
             provider_id,
-            executable,
+            canonical,
             authorized_by=client_sid,
             executive_capabilities=executive_capabilities,
             project_types=project_types,
@@ -783,7 +1022,8 @@ class ServiceProviderObserver:
                 )
             preparation_nonce = uuid.uuid4().hex
             environment_record = gateway.prepare_environment(
-                preparation_nonce
+                preparation_nonce,
+                Path(str(registration["canonical_executable_path"])),
             )
             envelope = gateway.build_launch_envelope(
                 registration=registration,
