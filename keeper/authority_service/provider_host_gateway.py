@@ -20,8 +20,12 @@ from keeper.provider_host.protocol import (
     HOST_PROTOCOL,
     HELLO_PURPOSE,
     LAUNCH_PURPOSE,
+    REQUEST_PURPOSE,
+    RESPONSE_PURPOSE,
     SETUP_PURPOSE,
     SETUP_RESULT_PURPOSE,
+    STARTED_ACK_PURPOSE,
+    STARTED_PURPOSE,
     EnvelopeSigner,
     EnvelopeVerifier,
     require_production_identity,
@@ -30,12 +34,6 @@ from keeper.provider_host.protocol import (
     validate_launch_envelope,
     validate_setup_envelope,
     validate_setup_result,
-)
-from keeper.provider_host.server import (
-    REQUEST_PURPOSE,
-    RESPONSE_PURPOSE,
-    STARTED_ACK_PURPOSE,
-    STARTED_PURPOSE,
 )
 
 

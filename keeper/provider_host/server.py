@@ -21,6 +21,10 @@ from keeper.provider_host.pipe import (
 )
 from keeper.provider_host.protocol import (
     HELLO_PURPOSE,
+    REQUEST_PURPOSE,
+    RESPONSE_PURPOSE,
+    STARTED_ACK_PURPOSE,
+    STARTED_PURPOSE,
     EnvelopeSigner,
     EnvelopeVerifier,
     canonical_json,
@@ -29,12 +33,6 @@ from keeper.provider_host.protocol import (
 )
 from keeper.provider_host.replay_store import ProviderHostStore
 from keeper.provider_host.runtime import KeeperProviderHost, Launcher, SetupRunner
-
-
-REQUEST_PURPOSE = "keeper-provider-host-request"
-RESPONSE_PURPOSE = "keeper-provider-host-response"
-STARTED_PURPOSE = "keeper-provider-host-started"
-STARTED_ACK_PURPOSE = "keeper-provider-host-started-ack"
 
 
 class ProviderHostServer:
