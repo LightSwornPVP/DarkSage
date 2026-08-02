@@ -236,7 +236,9 @@ def _service_module_closure(source_root: Path) -> dict[str, Path]:
         visited.add(module)
         path = _module_path(source_root, module)
         if path is None:
-            continue
+            raise PermissionError(
+                f"Authority service dependency is missing from source: {module}"
+            )
         archive_name = path.relative_to(source_root).as_posix()
         if _forbidden_archive_name(archive_name):
             raise PermissionError(f"Authority service dependency is outside the service closure: {module}")

@@ -133,6 +133,14 @@ def test_required_runtime_source_change_changes_package(tmp_path: Path) -> None:
     assert first.read_bytes() != second.read_bytes()
 
 
+def test_missing_imported_runtime_dependency_rejects_package(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(_repository() / "keeper", source / "keeper")
+    (source / "keeper" / "evidence_input.py").unlink()
+    with pytest.raises(PermissionError, match="dependency is missing"):
+        build_service_package(source, tmp_path / "missing.pyz")
+
+
 def test_package_verification_rejects_hash_tamper_and_extra_entry(tmp_path: Path) -> None:
     package = _build(tmp_path)
     digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
@@ -337,6 +345,46 @@ def test_rollback_requires_latest_recorded_backup_and_stopped_service(
     package.write_bytes(b"changed-current-package")
     with pytest.raises(PermissionError, match="installed Authority"):
         service_install.rollback_package(backup, backup_digest)
+
+
+@pytest.mark.parametrize(
+    ("return_code", "output"),
+    [
+        (0, "STATE : 3 STOP_PENDING\n"),
+        (0, "STATE : 7 PAUSED\n"),
+        (1060, ""),
+        (0, "STATE : 4 RUNNING\n"),
+    ],
+)
+def test_package_lifecycle_requires_exact_confirmed_stopped_state(
+    monkeypatch: pytest.MonkeyPatch, return_code: int, output: str
+) -> None:
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], return_code, output
+        ),
+    )
+    with pytest.raises(PermissionError, match="confirmed stopped"):
+        service_install._require_service_stopped("upgrade")
+    with pytest.raises(PermissionError, match="confirmed stopped"):
+        service_install._require_service_stopped("rollback")
+
+
+@pytest.mark.parametrize(
+    "output", ["STATE: STOPPED\n", "        STATE : 1  STOPPED\r\n"]
+)
+def test_package_lifecycle_accepts_only_supported_stopped_forms(
+    monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, output),
+    )
+    service_install._require_service_stopped("upgrade")
+    service_install._require_service_stopped("rollback")
 
 
 def test_upgrade_rejects_wrong_hash_before_touching_installed_package(

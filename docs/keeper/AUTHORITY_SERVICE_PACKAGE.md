@@ -71,8 +71,9 @@ python -m keeper.authority_service.service_install rollback-package `
 ```
 
 Rollback rejects an unrecorded backup, a backup not belonging to the latest
-upgrade, a changed current package, a running service, a wrong digest, and an
-existing staging file. It stages and re-verifies the exact rollback bytes,
+upgrade, a changed current package, any service state not confirmed exactly as
+stopped, a wrong digest, and a mismatched staging file. It stages and
+re-verifies the exact rollback bytes,
 atomically restores them, and records the restored and replaced identities.
 Before replacement it persists an exact rollback claim. Reinvoking the same
 authorized rollback after interruption either completes the same verified

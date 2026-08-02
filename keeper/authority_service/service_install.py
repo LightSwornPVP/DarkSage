@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -364,11 +365,7 @@ def upgrade_package(package_source: Path, expected_package_sha256: str) -> dict[
     if candidate.path.is_relative_to(SERVICE_ROOT.resolve()):
         raise PermissionError("Authority upgrade candidate must be outside protected service state")
     manifest = _load_completed_manifest()
-    query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
-    if "RUNNING" in query.stdout or "START_PENDING" in query.stdout:
-        raise PermissionError(
-            "KeeperAuthority must be stopped before package upgrade"
-        )
+    _require_service_stopped("upgrade")
     package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
     if not package.is_file() or not _recorded_file_matches(manifest, package):
         raise PermissionError(
@@ -431,11 +428,7 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
     _require_admin()
     rollback = verify_rollback_package(package_source, expected_package_sha256)
     manifest = _load_completed_manifest()
-    query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
-    if "RUNNING" in query.stdout or "START_PENDING" in query.stdout:
-        raise PermissionError(
-            "KeeperAuthority must be stopped before package rollback"
-        )
+    _require_service_stopped("rollback")
     recorded = manifest.get("upgrades")
     if not isinstance(recorded, list) or not recorded:
         raise PermissionError("Authority package rollback is not recorded")
@@ -521,6 +514,17 @@ def _complete_package_rollback(
         "replaced_package_sha256": claim["replaced_package_sha256"],
         "source_backup": str(rollback.path),
     }
+
+
+def _require_service_stopped(operation: str) -> None:
+    query = _run(["sc.exe", "query", SERVICE_NAME], check=False)
+    stopped = re.search(
+        r"(?m)^\s*STATE\s*:\s*(?:\d+\s+)?STOPPED\s*$", query.stdout
+    )
+    if query.returncode != 0 or stopped is None:
+        raise PermissionError(
+            f"KeeperAuthority must be confirmed stopped before package {operation}"
+        )
 
 
 def _founder_verifier_configuration() -> dict[str, object]:
