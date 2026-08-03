@@ -65,6 +65,13 @@ claim-recorded backup remains eligible for supported rollback. It then records t
 exact package and source-tree identities. The service
 must already be stopped through the separately authorized lifecycle.
 
+The compatible Founder-verifier configuration transition is independently
+claim-bound before its atomic file replacement. A lost return after either the
+config replacement or manifest completion is reconciled by the same exact upgrade.
+Rollback from an interrupted package upgrade first finalizes that exact config
+claim, preserving both the backward-compatible schema-3 bytes and their lifecycle
+provenance before restoring the prior package.
+
 Rollback restores the exact captured installed byte stream. Release handoffs
 must authorize only the service-package digest produced by this construction
 path; the legacy general Keeper zipapp is never an Authority upgrade input.

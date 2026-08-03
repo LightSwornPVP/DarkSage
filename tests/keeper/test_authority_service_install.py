@@ -21,6 +21,7 @@ from keeper.authority_service.service_package import (
     verify_service_package,
     write_external_manifest,
 )
+from keeper.recovery import atomic_write_json
 
 
 def _repository() -> Path:
@@ -39,6 +40,18 @@ def _capture_recovery_preimage(service_root: Path, destination: Path) -> Path:
     (data / "authority.db").write_bytes(b"synthetic-authority-state")
     event = service_install.verified_recovery_backup(destination)
     return Path(str(event["manifest"]))
+
+
+def _production_verifier_fixture() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "issuer_id": "keeper-founder:S-1-5-21-1000",
+        "principal_sid": "S-1-5-21-1000",
+        "key_id": "keeper-founder-rsa:synthetic",
+        "algorithm": "RS256-CNG-HIGH-PROTECTION",
+        "modulus": "AQ==",
+        "exponent": "AQAB",
+    }
 
 
 def test_authority_service_package_is_self_contained_and_reachable(
@@ -552,6 +565,168 @@ def test_upgrade_rejects_wrong_hash_before_touching_installed_package(
         service_install.upgrade_package(
             candidate, "0" * 64, "0" * 64, tmp_path / "absent.json"
         )
+
+
+def test_founder_configuration_migration_reconciles_write_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_root = tmp_path / "service"
+    config = service_root / "config" / "service.json"
+    config.parent.mkdir(parents=True)
+    (service_root / "backups").mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "service_name": SERVICE_NAME,
+                "service_root": str(service_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = service_root / "audit" / "machine-artifacts.json"
+    manifest_path.parent.mkdir()
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "service_name": SERVICE_NAME,
+        "installation_completed_at": "2026-01-01T00:00:00+00:00",
+        "artifacts": [],
+        "commands": [],
+        "package_upgrade_claim": {
+            "schema_version": 1,
+            "package_sha256": "A" * 64,
+            "claimed_at": "2026-01-01T00:00:00+00:00",
+        },
+    }
+    service_install._record_file(manifest, config)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(service_install, "SERVICE_ROOT", service_root)
+    monkeypatch.setattr(service_install, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(
+        service_install,
+        "_founder_verifier_configuration",
+        _production_verifier_fixture,
+    )
+    real_atomic_write = atomic_write_json
+    interrupted = False
+
+    def write_then_interrupt(path: Path, value: object) -> None:
+        nonlocal interrupted
+        real_atomic_write(path, value)
+        if path == config and not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated configuration write interruption")
+
+    monkeypatch.setattr(service_install, "atomic_write_json", write_then_interrupt)
+    with pytest.raises(RuntimeError, match="configuration write interruption"):
+        service_install._migrate_founder_capability_configuration(manifest)
+    assert json.loads(config.read_text(encoding="utf-8"))["schema_version"] == 3
+    interrupted_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" in interrupted_manifest
+    assert not service_install._recorded_file_matches(interrupted_manifest, config)
+
+    mismatched_manifest = json.loads(json.dumps(interrupted_manifest))
+    mismatched_manifest["package_upgrade_claim"]["package_sha256"] = "B" * 64
+    with pytest.raises(PermissionError, match="package claim differs"):
+        service_install._migrate_founder_capability_configuration(
+            mismatched_manifest
+        )
+
+    monkeypatch.setattr(service_install, "atomic_write_json", real_atomic_write)
+    verifier = service_install._migrate_founder_capability_configuration(
+        interrupted_manifest
+    )
+    assert verifier == _production_verifier_fixture()
+    completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" not in completed
+    assert service_install._recorded_file_matches(completed, config)
+    assert len(completed["configuration_migrations"]) == 1
+
+    repeated = service_install._migrate_founder_capability_configuration(completed)
+    assert repeated == verifier
+    assert len(
+        json.loads(manifest_path.read_text(encoding="utf-8"))[
+            "configuration_migrations"
+        ]
+    ) == 1
+
+
+def test_rollback_reconciles_interrupted_configuration_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_root = tmp_path / "service"
+    package = service_root / "bin" / "keeper-authority.pyz"
+    backup_path = service_root / "backups" / "keeper-authority-old.pyz"
+    config = service_root / "config" / "service.json"
+    package.parent.mkdir(parents=True)
+    backup_path.parent.mkdir()
+    config.parent.mkdir()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("__main__.py", "print('candidate')\n")
+    with zipfile.ZipFile(backup_path, "w") as archive:
+        archive.writestr("__main__.py", "print('old')\n")
+    config.write_text(
+        json.dumps({"schema_version": 2, "service_name": SERVICE_NAME}),
+        encoding="utf-8",
+    )
+    candidate_digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    old_digest = hashlib.sha256(backup_path.read_bytes()).hexdigest().upper()
+    manifest_path = service_root / "audit" / "machine-artifacts.json"
+    manifest_path.parent.mkdir()
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "service_name": SERVICE_NAME,
+        "installation_completed_at": "2026-01-01T00:00:00+00:00",
+        "artifacts": [],
+        "commands": [],
+        "package_upgrade_claim": {
+            "schema_version": 1,
+            "claimed_at": "2026-01-01T00:00:00+00:00",
+            "previous_package_sha256": old_digest,
+            "package_sha256": candidate_digest,
+            "backup_path": str(backup_path.resolve()),
+        },
+    }
+    for path in (package, backup_path, config):
+        service_install._record_file(manifest, path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(service_install, "SERVICE_ROOT", service_root)
+    monkeypatch.setattr(service_install, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "STATE: STOPPED\n"
+        ),
+    )
+    monkeypatch.setattr(
+        service_install,
+        "_founder_verifier_configuration",
+        _production_verifier_fixture,
+    )
+    real_atomic_write = atomic_write_json
+
+    def write_then_interrupt(path: Path, value: object) -> None:
+        real_atomic_write(path, value)
+        if path == config:
+            raise RuntimeError("simulated config interruption before rollback")
+
+    monkeypatch.setattr(service_install, "atomic_write_json", write_then_interrupt)
+    with pytest.raises(RuntimeError, match="before rollback"):
+        service_install._migrate_founder_capability_configuration(manifest)
+    interrupted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" in interrupted
+
+    monkeypatch.setattr(service_install, "atomic_write_json", real_atomic_write)
+    result = service_install.rollback_package(backup_path, old_digest)
+    assert result["package_sha256"] == old_digest
+    assert package.read_bytes() == backup_path.read_bytes()
+    completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" not in completed
+    assert "package_upgrade_claim" not in completed
+    assert service_install._recorded_file_matches(completed, config)
+    assert json.loads(config.read_text(encoding="utf-8"))["schema_version"] == 3
 
 
 def test_rollback_verification_accepts_exact_legacy_package_only(tmp_path: Path) -> None:

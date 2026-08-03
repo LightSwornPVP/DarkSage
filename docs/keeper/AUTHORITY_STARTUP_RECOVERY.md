@@ -55,6 +55,14 @@ same operation. The exact claim-recorded backup is also accepted by the supporte
 rollback command before an upgrade event exists. Any third digest fails closed as
 uncertain. Upgrade event creation and claim removal are one atomic manifest write.
 
+The schema-2 to schema-3 Founder-verifier configuration migration uses a second
+durable claim before replacing `service.json`. It binds the old and target config
+digests, exact backup, schema transition, and verifier identity. Retry accepts only
+the exact old or target bytes and atomically records completion while removing the
+claim. A rollback requested during this boundary first reconciles the compatible
+schema-3 configuration provenance before restoring package bytes, so neither the
+upgrade nor rollback path can strand a manifest/config mismatch.
+
 ## Post-start acceptance
 
 After the one separately authorized start, supported diagnostics must show all of
@@ -68,6 +76,7 @@ the following before Phase 2 continues:
   expected enrolled state, without any provider execution;
 - package and lifecycle provenance matching the authorized hashes.
 - no outstanding `package_upgrade_claim` or `package_rollback_claim`.
+- no outstanding `configuration_migration_claim`.
 
 `UNAVAILABLE` with `IDENTITY_INITIALIZATION_FAILED` is a safe diagnostic state,
 not permission to enroll, register, qualify, retry, or execute. Those operations

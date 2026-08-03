@@ -780,6 +780,8 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
     rollback = verify_rollback_package(package_source, expected_package_sha256)
     manifest = _load_completed_manifest()
     _require_service_stopped("rollback")
+    if manifest.get("configuration_migration_claim") is not None:
+        _migrate_founder_capability_configuration(manifest)
     recorded = manifest.get("upgrades")
     latest = recorded[-1] if isinstance(recorded, list) and recorded else None
     upgrade_claim = manifest.get("package_upgrade_claim")
@@ -903,13 +905,18 @@ def _migrate_founder_capability_configuration(
     manifest: dict[str, Any],
 ) -> dict[str, object]:
     config = SERVICE_ROOT / "config" / "service.json"
-    if not config.is_file() or not _recorded_file_matches(manifest, config):
+    if not config.is_file():
+        raise PermissionError("Authority Service configuration is unavailable")
+    claim = manifest.get("configuration_migration_claim")
+    current_content = config.read_bytes()
+    current_digest = hashlib.sha256(current_content).hexdigest().upper()
+    if claim is None and not _recorded_file_matches(manifest, config):
         raise PermissionError(
             "Authority Service configuration does not match its manifest"
         )
     try:
-        value = json.loads(config.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        value = json.loads(current_content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PermissionError(
             "Authority Service configuration is invalid"
         ) from error
@@ -917,38 +924,135 @@ def _migrate_founder_capability_configuration(
         raise PermissionError(
             "Authority Founder verifier configuration cannot be safely migrated"
         )
-    if value["schema_version"] == 3:
+    if claim is None and value["schema_version"] == 3:
         verifier = value.get("founder_capability_verifier")
         if not isinstance(verifier, dict):
             raise PermissionError("Authority Founder verifier is missing")
         ProductionFounderCapabilityVerifier(verifier)
         return verifier
-    old_digest = hashlib.sha256(config.read_bytes()).hexdigest()
-    backup_path = SERVICE_ROOT / "backups" / f"service-{old_digest}.json"
-    if backup_path.exists():
-        if not _recorded_file_matches(manifest, backup_path):
-            raise PermissionError(
-                "Authority Service configuration backup is untrusted"
-            )
-    else:
-        shutil.copy2(config, backup_path)
-        _record_file(manifest, backup_path)
-    verifier = _founder_verifier_configuration()
-    value["schema_version"] = 3
-    value["founder_capability_verifier"] = verifier
-    atomic_write_json(config, value)
-    _record_file(manifest, config)
-    manifest.setdefault("configuration_migrations", []).append(
-        {
-            "migrated_at": _now(),
+    if claim is None:
+        old_digest = current_digest
+        backup_path = SERVICE_ROOT / "backups" / f"service-{old_digest}.json"
+        if backup_path.exists():
+            if not _recorded_file_matches(manifest, backup_path):
+                raise PermissionError(
+                    "Authority Service configuration backup is untrusted"
+                )
+        else:
+            shutil.copy2(config, backup_path)
+            _record_file(manifest, backup_path)
+            _persist_manifest(manifest)
+        verifier = _founder_verifier_configuration()
+        migrated = dict(value)
+        migrated["schema_version"] = 3
+        migrated["founder_capability_verifier"] = verifier
+        target_digest = _atomic_json_sha256(migrated)
+        package_upgrade_claim = manifest.get("package_upgrade_claim")
+        package_upgrade_claim_sha256 = (
+            _canonical_sha256(package_upgrade_claim)
+            if isinstance(package_upgrade_claim, dict)
+            else None
+        )
+        claim = {
+            "schema_version": 1,
+            "claimed_at": _now(),
+            "config_path": str(config.resolve()),
             "from_schema": 2,
             "to_schema": 3,
-            "backup_path": str(backup_path),
-            "founder_issuer_key_id": verifier["key_id"],
+            "previous_config_sha256": old_digest,
+            "config_sha256": target_digest,
+            "backup_path": str(backup_path.resolve()),
+            "founder_capability_verifier": verifier,
+            "package_upgrade_claim_sha256": package_upgrade_claim_sha256,
         }
+        manifest["configuration_migration_claim"] = claim
+        _persist_manifest(manifest)
+    if not isinstance(claim, dict):
+        raise PermissionError("Authority configuration migration claim is invalid")
+    required = {
+        "schema_version": 1,
+        "config_path": str(config.resolve()),
+        "from_schema": 2,
+        "to_schema": 3,
+    }
+    if (
+        any(claim.get(key) != expected for key, expected in required.items())
+        or not isinstance(claim.get("claimed_at"), str)
+        or not isinstance(claim.get("previous_config_sha256"), str)
+        or not isinstance(claim.get("config_sha256"), str)
+        or not isinstance(claim.get("backup_path"), str)
+        or not isinstance(claim.get("founder_capability_verifier"), dict)
+    ):
+        raise PermissionError("Authority configuration migration claim differs")
+    package_upgrade_claim = manifest.get("package_upgrade_claim")
+    expected_package_claim_sha256 = (
+        _canonical_sha256(package_upgrade_claim)
+        if isinstance(package_upgrade_claim, dict)
+        else None
     )
+    if claim.get("package_upgrade_claim_sha256") != expected_package_claim_sha256:
+        raise PermissionError(
+            "Authority configuration migration package claim differs"
+        )
+    old_digest = str(claim["previous_config_sha256"]).upper()
+    target_digest = str(claim["config_sha256"]).upper()
+    backup_path = Path(str(claim["backup_path"])).resolve(strict=True)
+    expected_backup = (
+        SERVICE_ROOT / "backups" / f"service-{old_digest}.json"
+    ).resolve(strict=True)
+    if backup_path != expected_backup or not _recorded_file_matches(
+        manifest, backup_path
+    ):
+        raise PermissionError("Authority configuration backup identity differs")
+    if hashlib.sha256(backup_path.read_bytes()).hexdigest().upper() != old_digest:
+        raise PermissionError("Authority configuration backup digest differs")
+    verifier_value = claim["founder_capability_verifier"]
+    if not isinstance(verifier_value, dict):
+        raise PermissionError("Authority Founder verifier is missing")
+    ProductionFounderCapabilityVerifier(verifier_value)
+    verifier = dict(verifier_value)
+    if current_digest == old_digest:
+        if value.get("schema_version") != 2:
+            raise PermissionError("Authority configuration migration source differs")
+        migrated = dict(value)
+        migrated["schema_version"] = 3
+        migrated["founder_capability_verifier"] = verifier
+        if _atomic_json_sha256(migrated) != target_digest:
+            raise PermissionError("Authority configuration migration target differs")
+        atomic_write_json(config, migrated)
+        current_digest = hashlib.sha256(config.read_bytes()).hexdigest().upper()
+        value = migrated
+    if (
+        current_digest != target_digest
+        or value.get("schema_version") != 3
+        or value.get("founder_capability_verifier") != verifier
+    ):
+        raise PermissionError("Authority configuration migration state is uncertain")
+    _record_file(manifest, config)
+    event = {
+        "migrated_at": _now(),
+        "migration_claimed_at": claim["claimed_at"],
+        "from_schema": 2,
+        "to_schema": 3,
+        "previous_config_sha256": old_digest,
+        "config_sha256": target_digest,
+        "backup_path": str(backup_path),
+        "founder_issuer_key_id": verifier["key_id"],
+        "package_upgrade_claim_sha256": claim[
+            "package_upgrade_claim_sha256"
+        ],
+    }
+    manifest.setdefault("configuration_migrations", []).append(event)
+    manifest.pop("configuration_migration_claim", None)
     _persist_manifest(manifest)
     return verifier
+
+
+def _atomic_json_sha256(value: object) -> str:
+    content = (
+        json.dumps(value, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(content).hexdigest().upper()
 
 
 def provision_provider_identity() -> dict[str, Any]:
