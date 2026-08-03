@@ -17,6 +17,7 @@ from keeper.authority_service.restricted_process import (
     WindowsSessionQueryResult,
     WindowsSessionQueryStatus,
     _create_process_with_bounded_restricted_impersonation,
+    authenticated_client_environment,
     authenticated_client_windows_session_state,
     authenticated_named_pipe_client,
     authenticated_named_pipe_client_token,
@@ -344,6 +345,7 @@ class _FakeUserenv:
     def __init__(self, *, succeeds: bool) -> None:
         self.succeeds = succeeds
         self.destroyed: list[int] = []
+        self.token: int | None = None
         self.buffer = ctypes.create_unicode_buffer(
             "USERPROFILE=C:\\Users\\Founder\0PATH=C:\\bin\0\0"
         )
@@ -351,7 +353,8 @@ class _FakeUserenv:
     def CreateEnvironmentBlock(
         self, output: Any, token: int, inherit: bool
     ) -> bool:
-        del token, inherit
+        self.token = token
+        del inherit
         if not self.succeeds:
             return False
         ctypes.cast(output, ctypes.POINTER(wintypes.LPVOID)).contents.value = (
@@ -887,6 +890,47 @@ def test_loaded_profile_environment_is_created_and_destroyed(
     assert environment["USERPROFILE"] == r"C:\Users\Founder"
     assert environment["PATH"] == r"C:\bin"
     assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+
+
+def test_authenticated_client_environment_uses_exact_impersonation_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    userenv = _FakeUserenv(succeeds=True)
+    checked: list[int] = []
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module,
+        "require_impersonation_level",
+        lambda token: checked.append(token) or 2,
+    )
+
+    environment = authenticated_client_environment(42)
+
+    assert checked == [42]
+    assert userenv.token == 42
+    assert environment["USERPROFILE"] == r"C:\Users\Founder"
+    assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+
+
+def test_authenticated_client_environment_failure_reports_minimum_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    userenv = _FakeUserenv(succeeds=False)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(PermissionError) as caught:
+        authenticated_client_environment(42)
+
+    message = str(caught.value)
+    assert "token_type=authenticated-impersonation" in message
+    assert "required_access=TOKEN_QUERY" in message
+    assert "TOKEN_DUPLICATE" not in message
+    assert "win32_error=5" in message
+    assert userenv.destroyed == []
 
 
 def test_environment_error_five_reports_stage_and_does_not_destroy_null_block(

@@ -981,14 +981,45 @@ def authenticated_client_windows_session_state(
     return first
 
 
+def authenticated_client_environment(token: int) -> dict[str, str]:
+    """Build a user environment from the exact authenticated pipe token.
+
+    ``CreateEnvironmentBlock`` supports an impersonation token with
+    ``TOKEN_QUERY`` access.  Keeping the environment lookup on the captured
+    named-pipe token avoids converting the process token to a primary token
+    for a read-only profile lookup.  The service thread does not impersonate
+    the client while this API is called.
+    """
+    require_impersonation_level(token)
+    return _token_environment(
+        token,
+        token_type="authenticated-impersonation",
+        required_access="TOKEN_QUERY",
+    )
+
+
 def token_environment(token: int) -> dict[str, str]:
+    """Build a user environment from a profile primary token."""
+    return _token_environment(
+        token,
+        token_type="primary",
+        required_access="TOKEN_QUERY|TOKEN_DUPLICATE",
+    )
+
+
+def _token_environment(
+    token: int,
+    *,
+    token_type: str,
+    required_access: str,
+) -> dict[str, str]:
     block = wintypes.LPVOID()
     if not _userenv().CreateEnvironmentBlock(ctypes.byref(block), token, False):
         error = ctypes.get_last_error()
         raise PermissionError(
             "provider profile environment is unavailable "
-            f"(api=CreateEnvironmentBlock, token_type=primary, "
-            "required_access=TOKEN_QUERY|TOKEN_DUPLICATE, "
+            f"(api=CreateEnvironmentBlock, token_type={token_type}, "
+            f"required_access={required_access}, "
             f"win32_error={error}, symbolic={_win32_error_name(error)})"
         )
     try:

@@ -40,7 +40,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.7.4"
+SERVICE_VERSION = "1.7.5"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
