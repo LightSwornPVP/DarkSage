@@ -377,8 +377,8 @@ def _update_bootstrap_package(
     executable = package / "KeeperProviderHost.exe"
     library = package / "lib" / "runtime.dll"
     library.parent.mkdir()
-    executable.write_bytes(b"MZ-provider-host-bootstrap-1.7.5")
-    library.write_bytes(b"runtime-1.7.5")
+    executable.write_bytes(b"MZ-provider-host-bootstrap-1.7.6")
+    library.write_bytes(b"runtime-1.7.6")
     files = [
         {
             "path": path.relative_to(package).as_posix(),
@@ -393,7 +393,7 @@ def _update_bootstrap_package(
             {
                 "schema_version": 1,
                 "product": "KeeperProviderHost",
-                "version": "1.7.5",
+                "version": "1.7.6",
                 "files": files,
             }
         ),
@@ -402,7 +402,7 @@ def _update_bootstrap_package(
     manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     bootstrap.installer.update(
         executable,
-        version="1.7.5",
+        version="1.7.6",
         expected_package_sha256=manifest_digest,
         drain=lambda: None,
     )
@@ -1511,7 +1511,7 @@ def test_production_enrollment_cli_fails_closed_on_factory_error(
 def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
     _validate_authority_compatibility(
         {
-            "service_version": "1.7.5",
+            "service_version": "1.7.6",
             "protocol_version": 7,
             "schema_version": 6,
         }
@@ -1522,7 +1522,7 @@ def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
     ("field", "value"),
     [
         ("service_version", "1.7.4"),
-        ("service_version", "1.7.6"),
+        ("service_version", "1.7.7"),
         ("protocol_version", 6),
         ("protocol_version", 8),
         ("schema_version", 5),
@@ -1533,7 +1533,7 @@ def test_provider_host_rejects_authority_release_contract_mismatch(
     field: str, value: object
 ) -> None:
     diagnostics: dict[str, object] = {
-        "service_version": "1.7.5",
+        "service_version": "1.7.6",
         "protocol_version": 7,
         "schema_version": 6,
     }

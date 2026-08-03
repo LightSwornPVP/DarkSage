@@ -342,9 +342,18 @@ class _FakeAdvapi32:
 
 
 class _FakeUserenv:
-    def __init__(self, *, succeeds: bool) -> None:
+    def __init__(
+        self,
+        *,
+        succeeds: bool,
+        destroy_succeeds: bool = True,
+        events: list[str] | None = None,
+    ) -> None:
         self.succeeds = succeeds
+        self.destroy_succeeds = destroy_succeeds
+        self.events = events
         self.destroyed: list[int] = []
+        self.create_calls = 0
         self.token: int | None = None
         self.buffer = ctypes.create_unicode_buffer(
             "USERPROFILE=C:\\Users\\Founder\0PATH=C:\\bin\0\0"
@@ -354,8 +363,12 @@ class _FakeUserenv:
         self, output: Any, token: int, inherit: bool
     ) -> bool:
         self.token = token
+        self.create_calls += 1
+        if self.events is not None:
+            self.events.append("create-environment")
         del inherit
         if not self.succeeds:
+            ctypes.set_last_error(5)
             return False
         ctypes.cast(output, ctypes.POINTER(wintypes.LPVOID)).contents.value = (
             ctypes.addressof(self.buffer)
@@ -366,7 +379,11 @@ class _FakeUserenv:
         value = getattr(block, "value", block)
         assert isinstance(value, int)
         self.destroyed.append(value)
-        return True
+        if self.events is not None:
+            self.events.append("destroy-environment")
+        if not self.destroy_succeeds:
+            ctypes.set_last_error(5)
+        return self.destroy_succeeds
 
 
 class _FakeClientTokenAdvapi32:
@@ -895,35 +912,69 @@ def test_loaded_profile_environment_is_created_and_destroyed(
 def test_authenticated_client_environment_uses_exact_impersonation_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    userenv = _FakeUserenv(succeeds=True)
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
+    userenv = _FakeUserenv(succeeds=True, events=advapi32.events)
     checked: list[int] = []
+    parse_environment = restricted_process_module._environment_from_block
+
+    def parse_after_reversion(block: wintypes.LPVOID) -> dict[str, str]:
+        advapi32.events.append("parse-environment")
+        return parse_environment(block)
+
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
     monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module,
+        "_environment_from_block",
+        parse_after_reversion,
+    )
     monkeypatch.setattr(
         restricted_process_module,
         "require_impersonation_level",
         lambda token: checked.append(token) or 2,
     )
 
-    environment = authenticated_client_environment(42)
+    environment = authenticated_client_environment(84)
 
-    assert checked == [42]
-    assert userenv.token == 42
+    assert checked == [84]
+    assert userenv.token == 84
+    assert userenv.create_calls == 1
     assert environment["USERPROFILE"] == r"C:\Users\Founder"
     assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+    assert advapi32.events.count("impersonate") == 1
+    assert advapi32.events.count("revert") == 1
+    assert advapi32.events.index("impersonate") < advapi32.events.index(
+        "create-environment"
+    )
+    assert advapi32.events.index("create-environment") < advapi32.events.index(
+        "revert"
+    )
+    assert advapi32.events.index("revert") < advapi32.events.index(
+        "parse-environment"
+    )
+    assert advapi32.events.index("parse-environment") < advapi32.events.index(
+        "destroy-environment"
+    )
+    assert advapi32.events[-1] == "no-token"
 
 
 def test_authenticated_client_environment_failure_reports_minimum_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
     userenv = _FakeUserenv(succeeds=False)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
     monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
     monkeypatch.setattr(
         restricted_process_module, "require_impersonation_level", lambda token: 2
     )
-    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5)
 
     with pytest.raises(PermissionError) as caught:
-        authenticated_client_environment(42)
+        authenticated_client_environment(84)
 
     message = str(caught.value)
     assert "token_type=authenticated-impersonation" in message
@@ -931,6 +982,127 @@ def test_authenticated_client_environment_failure_reports_minimum_access(
     assert "TOKEN_DUPLICATE" not in message
     assert "win32_error=5" in message
     assert userenv.destroyed == []
+    assert advapi32.events.count("impersonate") == 1
+    assert advapi32.events.count("revert") == 1
+    assert advapi32.events[-1] == "no-token"
+
+
+def test_authenticated_client_environment_impersonation_failure_never_calls_userenv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(impersonate_result=False)
+    kernel32 = _FakeLaunchKernel32()
+    userenv = _FakeUserenv(succeeds=True)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(PermissionError, match="profile impersonation failed"):
+        authenticated_client_environment(84)
+
+    assert userenv.create_calls == 0
+    assert userenv.destroyed == []
+    assert advapi32.events.count("impersonate") == 1
+    assert advapi32.events.count("revert") == 0
+    assert advapi32.events[-1] == "no-token"
+
+
+def test_authenticated_client_environment_reversion_failure_discards_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(revert_result=False)
+    kernel32 = _FakeLaunchKernel32()
+    userenv = _FakeUserenv(succeeds=True)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(
+        ProviderLaunchIdentityUncertain,
+        match="reversion could not be verified",
+    ):
+        authenticated_client_environment(84)
+
+    assert userenv.create_calls == 1
+    assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+    assert advapi32.events.count("impersonate") == 1
+    assert advapi32.events.count("revert") == 1
+    assert advapi32.events[-1] == "no-token"
+
+
+def test_authenticated_client_environment_worker_verification_failure_discards_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(worker_verification_error=6)
+    kernel32 = _FakeLaunchKernel32()
+    userenv = _FakeUserenv(succeeds=True)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(
+        ProviderLaunchIdentityUncertain,
+        match="reversion could not be verified",
+    ):
+        authenticated_client_environment(84)
+
+    assert userenv.create_calls == 1
+    assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+    assert advapi32.events[-1] == "no-token"
+
+
+def test_authenticated_client_environment_service_identity_failure_is_fail_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(service_post_verification_error=6)
+    kernel32 = _FakeLaunchKernel32()
+    userenv = _FakeUserenv(succeeds=True)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(
+        ProviderServiceIdentityUncertain,
+        match="not clean after profile environment lookup",
+    ):
+        authenticated_client_environment(84)
+
+    assert userenv.create_calls == 1
+    assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+    assert "service-verification-failed" in advapi32.events
+
+
+def test_authenticated_client_environment_cleanup_failure_rejects_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
+    userenv = _FakeUserenv(succeeds=True, destroy_succeeds=False)
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(restricted_process_module, "_userenv", lambda: userenv)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(PermissionError, match="environment cleanup failed"):
+        authenticated_client_environment(84)
+
+    assert userenv.create_calls == 1
+    assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
+    assert advapi32.events[-1] == "no-token"
 
 
 def test_environment_error_five_reports_stage_and_does_not_destroy_null_block(
