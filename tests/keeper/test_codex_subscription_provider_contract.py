@@ -1741,6 +1741,11 @@ def _bind_fake_founder_identity(
         "authenticated_client_environment",
         lambda token: {"USERPROFILE": str(profile), "PATH": str(profile.parent)},
     )
+    monkeypatch.setattr(
+        observer_module,
+        "authenticated_client_profile_path",
+        lambda token, value: str(Path(value).resolve(strict=True)),
+    )
 
     @contextmanager
     def profile_primary(  # type: ignore[no-untyped-def]

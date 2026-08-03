@@ -26,12 +26,14 @@ from keeper.authority_service.core import (
     ProcessObservation,
     QualificationObservation,
 )
+from keeper.authority_service import restricted_process as restricted_process_runtime
 from keeper.authority_service.provider_identity import (
     restricted_provider_identity_token,
 )
 from keeper.authority_service.restricted_process import (
     WindowsSessionQueryStatus,
     authenticated_client_environment,
+    authenticated_client_profile_path,
     authenticated_client_windows_session_state,
     authenticated_profile_primary_token,
     authenticated_named_pipe_client,
@@ -176,53 +178,38 @@ class ServiceProviderObserver:
         installation = proposal.get("installation")
         if not isinstance(binding, dict) or not isinstance(installation, dict):
             raise PermissionError("Provider Host enrollment binding is incomplete")
-        expected_root = (
-            Path(profile)
-            / "AppData"
-            / "Local"
-            / "Programs"
-            / "DarkSage"
-            / "KeeperProviderHost"
-        ).resolve(strict=True)
-        startup_root = (
-            Path(profile)
-            / "AppData"
-            / "Roaming"
-            / "Microsoft"
-            / "Windows"
-            / "Start Menu"
-            / "Programs"
-            / "Startup"
-        ).resolve(strict=True)
-        installed = ProviderHostInstaller(
-            expected_root, startup_root, owner_sid=observed_sid
-        ).status()
-        current = installed.get("current")
-        if (
-            installed.get("transaction_pending") is not False
-            or not isinstance(current, dict)
-        ):
-            raise PermissionError("Provider Host installation is not stable")
+        binding = dict(binding)
+        installation = dict(installation)
         executable = Path(str(installation.get("executable_path", "")))
         install_root = Path(str(installation.get("install_root", "")))
         if not executable.is_absolute() or not install_root.is_absolute():
             raise PermissionError("Provider Host enrollment path is not absolute")
         lexical_executable = Path(os.path.abspath(executable))
         lexical_root = Path(os.path.abspath(install_root))
-        _reject_path_aliases(lexical_executable)
-        _reject_path_aliases(lexical_root)
-        canonical = lexical_executable.resolve(strict=True)
-        canonical_root = lexical_root.resolve(strict=True)
+        observation = _authenticated_client_provider_host_path_observation(
+            self._client_token(),
+            profile=profile,
+            installation=installation,
+            observed_sid=observed_sid,
+        )
+        installed = cast(dict[str, Any], observation["installed"])
+        current = installed.get("current")
+        if (
+            installed.get("transaction_pending") is not False
+            or not isinstance(current, dict)
+        ):
+            raise PermissionError("Provider Host installation is not stable")
+        expected_root = Path(str(observation["expected_root"]))
+        canonical = Path(str(observation["canonical_executable"]))
+        canonical_root = Path(str(observation["canonical_root"]))
         expected_host_id, expected_key_name = stable_host_identity(
             observed_sid, str(current.get("package_sha256", ""))
         )
         pipe_suffix = hashlib.sha256(
             (expected_host_id + ":" + observed_sid).encode("utf-8")
         ).hexdigest()[:24]
-        expected_state = (expected_root / "state").resolve(strict=True)
-        expected_output = (expected_root / "output").resolve(strict=True)
-        _reject_path_aliases(expected_state)
-        _reject_path_aliases(expected_output)
+        expected_state = Path(str(observation["expected_state"]))
+        expected_output = Path(str(observation["expected_output"]))
         if (
             os.path.normcase(str(canonical))
             != os.path.normcase(str(current.get("artifact_path", "")))
@@ -240,7 +227,7 @@ class ServiceProviderObserver:
             != os.path.normcase(str(lexical_executable))
             or canonical_root not in canonical.parents
             or canonical.name.casefold() != "keeperproviderhost.exe"
-            or canonical.read_bytes()[:2] != b"MZ"
+            or observation.get("executable_prefix") != b"MZ"
             or proposal.get("host_id") != expected_host_id
             or proposal.get("host_key_name") != expected_key_name
             or proposal.get("pipe_name")
@@ -258,30 +245,19 @@ class ServiceProviderObserver:
             or process_identity.session_id != observed_session
         ):
             raise PermissionError("Provider Host enrollment user or path binding differs")
-        descriptor = _open_locked_executable(canonical)
-        try:
-            opened = os.fstat(descriptor)
-            identity = _executable_file_identity(opened)
-            digest = hashlib.sha256()
-            size = 0
-            while True:
-                chunk = os.read(descriptor, 1_048_576)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                size += len(chunk)
-            with impersonate_token(self._client_token()):
-                signature = authenticode_enrollment_binding(canonical)
-            if (
-                digest.hexdigest() != installation.get("executable_sha256")
-                or size != installation.get("executable_size")
-                or identity != installation.get("executable_file_identity")
-                or signature != installation.get("authenticode_binding")
-                or _executable_file_identity(canonical.stat()) != identity
-            ):
-                raise PermissionError("Provider Host enrollment executable differs")
-        finally:
-            os.close(descriptor)
+        if (
+            observation.get("executable_sha256")
+            != installation.get("executable_sha256")
+            or observation.get("executable_size")
+            != installation.get("executable_size")
+            or observation.get("executable_file_identity")
+            != installation.get("executable_file_identity")
+            or observation.get("authenticode_binding")
+            != installation.get("authenticode_binding")
+            or observation.get("final_executable_file_identity")
+            != observation.get("executable_file_identity")
+        ):
+            raise PermissionError("Provider Host enrollment executable differs")
         process.revalidate(client_sid)
         return dict(proposal)
 
@@ -1426,7 +1402,7 @@ class ServiceProviderObserver:
         profile = environment.get("USERPROFILE")
         if not isinstance(profile, str) or not profile:
             raise PermissionError("Codex authenticated user profile is unavailable")
-        canonical_profile = str(Path(profile).resolve(strict=True))
+        canonical_profile = authenticated_client_profile_path(client_token, profile)
         profile_digest = hashlib.sha256(
             canonical_profile.casefold().encode("utf-8")
         ).hexdigest()
@@ -1683,6 +1659,232 @@ class ServiceProviderObserver:
                 f"provider {label} path is outside the client exchange"
             )
         return path
+
+
+def _authenticated_client_provider_host_path_observation(
+    token: int,
+    *,
+    profile: str,
+    installation: Mapping[str, Any],
+    observed_sid: str,
+) -> dict[str, Any]:
+    """Measure one user-owned Host installation on a disposable worker.
+
+    The fixed worker body performs only read-only canonical path, package,
+    executable, and Authenticode observations.  It cannot call Authority
+    storage, signing, enrollment, provider execution, or caller callbacks.
+    The result remains private to the worker until reversion and a positive
+    no-token verification both succeed.
+    """
+    require_impersonation_level(token)
+    advapi32 = restricted_process_runtime._advapi32()
+    kernel32 = restricted_process_runtime._kernel32()
+    try:
+        restricted_process_runtime._assert_thread_not_impersonating(
+            advapi32=advapi32,
+            kernel32=kernel32,
+        )
+    except BaseException as error:
+        raise restricted_process_runtime.ProviderServiceIdentityUncertain(
+            "Authority service thread identity is not clean before Provider Host "
+            "path validation"
+        ) from error
+    completed = threading.Event()
+    outcome: list[dict[str, Any] | BaseException] = []
+
+    def worker() -> None:
+        observation: dict[str, Any] | None = None
+        validation_error: BaseException | None = None
+        try:
+            restricted_process_runtime._assert_thread_not_impersonating(
+                advapi32=advapi32,
+                kernel32=kernel32,
+            )
+            ctypes.set_last_error(0)
+            if not advapi32.ImpersonateLoggedOnUser(token):
+                error = ctypes.get_last_error()
+                try:
+                    restricted_process_runtime._assert_thread_not_impersonating(
+                        advapi32=advapi32,
+                        kernel32=kernel32,
+                    )
+                except BaseException as verification_error:
+                    outcome.append(verification_error)
+                else:
+                    outcome.append(
+                        PermissionError(
+                            "Provider Host path validation impersonation failed "
+                            f"(win32_error={error})"
+                        )
+                    )
+                return
+            try:
+                observation = _read_provider_host_path_observation(
+                    profile=profile,
+                    installation=installation,
+                    observed_sid=observed_sid,
+                )
+            except BaseException as error:
+                validation_error = error
+            finally:
+                reverted = bool(advapi32.RevertToSelf())
+                revert_error = 0 if reverted else ctypes.get_last_error()
+            try:
+                restricted_process_runtime._assert_thread_not_impersonating(
+                    advapi32=advapi32,
+                    kernel32=kernel32,
+                )
+            except BaseException as verification_error:
+                outcome.append(
+                    restricted_process_runtime.ProviderLaunchIdentityUncertain(
+                        "Provider Host path validation identity reversion could not "
+                        "be verified"
+                    )
+                )
+                outcome.append(verification_error)
+                return
+            if not reverted:
+                outcome.append(
+                    restricted_process_runtime.ProviderLaunchIdentityUncertain(
+                        "Provider Host path validation identity could not be reverted "
+                        f"(win32_error={revert_error})"
+                    )
+                )
+                return
+            if validation_error is not None:
+                outcome.append(validation_error)
+                return
+            if observation is None:
+                outcome.append(
+                    PermissionError(
+                        "Provider Host path validation produced no observation"
+                    )
+                )
+                return
+            outcome.append(observation)
+        except BaseException as error:
+            outcome.append(error)
+        finally:
+            completed.set()
+
+    validation_thread = threading.Thread(
+        target=worker,
+        name="KeeperAuthenticatedClientProviderHostPaths",
+        daemon=True,
+    )
+    validation_thread.start()
+    completed.wait()
+    validation_thread.join()
+    try:
+        restricted_process_runtime._assert_thread_not_impersonating(
+            advapi32=advapi32,
+            kernel32=kernel32,
+        )
+    except BaseException as error:
+        raise restricted_process_runtime.ProviderServiceIdentityUncertain(
+            "Authority service thread identity is not clean after Provider Host "
+            "path validation"
+        ) from error
+    if not outcome:
+        raise PermissionError("Provider Host path validation produced no outcome")
+    first = outcome[0]
+    if isinstance(first, BaseException):
+        raise first
+    return first
+
+
+def _read_provider_host_path_observation(
+    *,
+    profile: str,
+    installation: Mapping[str, Any],
+    observed_sid: str,
+) -> dict[str, Any]:
+    """Fixed, read-only filesystem body for authenticated Host validation."""
+    expected_root_lexical = (
+        Path(profile)
+        / "AppData"
+        / "Local"
+        / "Programs"
+        / "DarkSage"
+        / "KeeperProviderHost"
+    )
+    startup_root_lexical = (
+        Path(profile)
+        / "AppData"
+        / "Roaming"
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup"
+    )
+    executable = Path(str(installation.get("executable_path", "")))
+    install_root = Path(str(installation.get("install_root", "")))
+    if not executable.is_absolute() or not install_root.is_absolute():
+        raise PermissionError("Provider Host enrollment path is not absolute")
+    lexical_executable = Path(os.path.abspath(executable))
+    lexical_root = Path(os.path.abspath(install_root))
+    for path in (
+        expected_root_lexical,
+        startup_root_lexical,
+        lexical_executable,
+        lexical_root,
+    ):
+        _reject_path_aliases(path)
+    expected_root = expected_root_lexical.resolve(strict=True)
+    startup_root = startup_root_lexical.resolve(strict=True)
+    canonical = lexical_executable.resolve(strict=True)
+    canonical_root = lexical_root.resolve(strict=True)
+    installed = ProviderHostInstaller(
+        expected_root,
+        startup_root,
+        owner_sid=observed_sid,
+    ).status()
+    expected_state_lexical = expected_root / "state"
+    expected_output_lexical = expected_root / "output"
+    _reject_path_aliases(expected_state_lexical)
+    _reject_path_aliases(expected_output_lexical)
+    expected_state = expected_state_lexical.resolve(strict=True)
+    expected_output = expected_output_lexical.resolve(strict=True)
+    descriptor = _open_locked_executable(canonical)
+    try:
+        opened = os.fstat(descriptor)
+        identity = _executable_file_identity(opened)
+        digest = hashlib.sha256()
+        size = 0
+        prefix = b""
+        while True:
+            chunk = os.read(descriptor, 1_048_576)
+            if not chunk:
+                break
+            if len(prefix) < 2:
+                prefix = (prefix + chunk)[:2]
+            digest.update(chunk)
+            size += len(chunk)
+        signature = authenticode_enrollment_binding(canonical)
+        final_opened_identity = _executable_file_identity(os.fstat(descriptor))
+        final_path_identity = _executable_file_identity(canonical.stat())
+        if final_opened_identity != identity or final_path_identity != identity:
+            raise PermissionError(
+                "Provider Host executable changed during path validation"
+            )
+        return {
+            "authenticode_binding": signature,
+            "canonical_executable": str(canonical),
+            "canonical_root": str(canonical_root),
+            "executable_file_identity": identity,
+            "executable_prefix": prefix,
+            "executable_sha256": digest.hexdigest(),
+            "executable_size": size,
+            "expected_output": str(expected_output),
+            "expected_root": str(expected_root),
+            "expected_state": str(expected_state),
+            "final_executable_file_identity": final_path_identity,
+            "installed": installed,
+            "startup_root": str(startup_root),
+        }
+    finally:
+        os.close(descriptor)
 
 
 def _now() -> str:
