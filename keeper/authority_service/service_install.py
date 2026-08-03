@@ -356,6 +356,64 @@ def diagnostics() -> dict[str, Any]:
     return result
 
 
+def verify_provider_host_authority_identity() -> dict[str, Any]:
+    """Read back the exact Provider Host Authority CNG identity without mutation."""
+    _require_admin()
+    manifest = _load_completed_manifest()
+    if manifest.get("provider_host_authority_identity_claim") is not None:
+        raise PermissionError(
+            "Provider Host Authority identity lifecycle is ambiguous"
+        )
+    service_sid = account_sid(rf"NT SERVICE\{SERVICE_NAME}")
+    access_sids = (
+        "S-1-5-18",
+        "S-1-5-32-544",
+        service_sid,
+    )
+    policy_sha256 = machine_key_security_policy_sha256(access_sids)
+    existing = manifest.get("provider_host_authority_identity")
+    required_keys = {
+        "schema_version",
+        "key_name",
+        "key_id",
+        "public_identity",
+        "access_sids",
+        "security_policy_sha256",
+    }
+    if (
+        not isinstance(existing, dict)
+        or set(existing) != required_keys
+        or existing.get("schema_version") != 1
+        or existing.get("key_name") != PROVIDER_HOST_AUTHORITY_KEY_NAME
+        or existing.get("access_sids") != list(access_sids)
+        or existing.get("security_policy_sha256") != policy_sha256
+    ):
+        raise PermissionError(
+            "Provider Host Authority identity differs from its lifecycle record"
+        )
+    signer = WindowsCngEnvelopeIdentity(
+        identity="keeper-authority-provider-host:provisioned",
+        key_name=PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        machine_key=True,
+        create_if_missing=False,
+        machine_access_sids=access_sids,
+    )
+    public = signer.public_configuration()
+    observed = {
+        "schema_version": 1,
+        "key_name": PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        "key_id": signer.key_id,
+        "public_identity": public,
+        "access_sids": list(access_sids),
+        "security_policy_sha256": policy_sha256,
+    }
+    if existing != observed:
+        raise PermissionError(
+            "Provider Host Authority identity differs from its lifecycle record"
+        )
+    return {"verified": True, **observed}
+
+
 def backup(destination: Path) -> Path:
     _require_admin()
     if destination.exists():
@@ -1548,6 +1606,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("restart")
     commands.add_parser("status")
     commands.add_parser("diagnostics")
+    commands.add_parser("verify-provider-host-authority-identity")
     backup_parser = commands.add_parser("backup")
     backup_parser.add_argument("destination", type=Path)
     verified_backup_parser = commands.add_parser("backup-recovery-preimage")
@@ -1611,6 +1670,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             value = status()
         elif options.command == "diagnostics":
             value = diagnostics()
+        elif options.command == "verify-provider-host-authority-identity":
+            value = verify_provider_host_authority_identity()
         elif options.command == "backup":
             value = {"backup": str(backup(options.destination.resolve()))}
         elif options.command == "backup-recovery-preimage":
