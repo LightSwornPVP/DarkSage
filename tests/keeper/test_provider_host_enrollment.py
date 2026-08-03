@@ -76,6 +76,9 @@ class _AuthorityAdapter:
     def __init__(self, coordinator: ProviderHostEnrollmentCoordinator) -> None:
         self.coordinator = coordinator
 
+    def provider_host_enrollment_status(self) -> dict[str, Any]:
+        return self.coordinator.status()
+
     def begin_provider_host_enrollment(
         self, *, founder_capability: dict[str, object], proposal: dict[str, object]
     ) -> dict[str, Any]:
@@ -354,6 +357,58 @@ def _installed_bootstrap(tmp_path: Path) -> ProviderHostBootstrap:
     )
 
 
+def _authority_not_installed_status() -> dict[str, Any]:
+    return {
+        "founder_action_required": "INSTALL_PROVIDER_HOST",
+        "installed": False,
+        "online": False,
+        "protocol": "keeper-provider-host/1",
+        "protocol_compatible": True,
+        "provider_state": "UNAVAILABLE",
+        "state": "NOT_INSTALLED",
+    }
+
+
+def _update_bootstrap_package(
+    bootstrap: ProviderHostBootstrap, tmp_path: Path
+) -> str:
+    package = tmp_path / "updated-package"
+    package.mkdir()
+    executable = package / "KeeperProviderHost.exe"
+    library = package / "lib" / "runtime.dll"
+    library.parent.mkdir()
+    executable.write_bytes(b"MZ-provider-host-bootstrap-1.7.5")
+    library.write_bytes(b"runtime-1.7.5")
+    files = [
+        {
+            "path": path.relative_to(package).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in (executable, library)
+    ]
+    manifest = package / "keeper-provider-host-package-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "product": "KeeperProviderHost",
+                "version": "1.7.5",
+                "files": files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    bootstrap.installer.update(
+        executable,
+        version="1.7.5",
+        expected_package_sha256=manifest_digest,
+        drain=lambda: None,
+    )
+    return manifest_digest
+
+
 def _capability(
     proposal: Mapping[str, Any],
     *,
@@ -476,6 +531,221 @@ def test_founder_cancellation_leaves_no_partial_enrollment(
     assert not bootstrap.pending_path.exists()
     assert bootstrap.status()["state"] == "INSTALLED_UNENROLLED"
     assert coordinator.store.list_records("provider_host_enrollments") == []
+
+
+def test_founder_authorized_proposal_cannot_be_silently_overwritten(
+    tmp_path: Path,
+) -> None:
+    bootstrap = _installed_bootstrap(tmp_path)
+    proposal = bootstrap.create_proposal(generation=1)
+    bootstrap.store_founder_capability(_capability(proposal))
+    before = bootstrap.pending_path.read_bytes()
+
+    with pytest.raises(PermissionError, match="checkpoint must be resolved"):
+        bootstrap.create_proposal(generation=1)
+
+    assert bootstrap.pending_path.read_bytes() == before
+    pending = json.loads(before)
+    assert pending["proposal_digest"] == structured_digest(proposal)
+    assert isinstance(pending["founder_capability"], dict)
+
+
+def test_stale_authorized_proposal_requires_exact_authority_absence_and_new_package(
+    tmp_path: Path,
+) -> None:
+    bootstrap = _installed_bootstrap(tmp_path)
+    proposal = bootstrap.create_proposal(generation=1)
+    bootstrap.store_founder_capability(_capability(proposal))
+    before = bootstrap.pending_path.read_bytes()
+    wrong_status = dict(_authority_not_installed_status())
+    wrong_status["state"] = "ENROLLMENT_PENDING"
+
+    with pytest.raises(PermissionError, match="does not prove"):
+        bootstrap.prepare_new_enrollment(wrong_status)
+    with pytest.raises(PermissionError, match="package binding differs"):
+        bootstrap.prepare_new_enrollment(_authority_not_installed_status())
+
+    assert bootstrap.pending_path.read_bytes() == before
+    assert list(
+        bootstrap.installer.state.glob(
+            "provider-host-enrollment-superseded-*.json"
+        )
+    ) == []
+
+
+def test_stale_authorized_proposal_is_durably_superseded_before_new_proposal(
+    tmp_path: Path,
+) -> None:
+    bootstrap = _installed_bootstrap(tmp_path)
+    proposal = bootstrap.create_proposal(generation=1)
+    bootstrap.store_founder_capability(_capability(proposal))
+    prior = json.loads(bootstrap.pending_path.read_text(encoding="utf-8"))
+    prior_digest = structured_digest(prior)
+    replacement_manifest = _update_bootstrap_package(bootstrap, tmp_path)
+
+    result = bootstrap.prepare_new_enrollment(_authority_not_installed_status())
+
+    assert result is not None
+    assert result["state"] == "SUPERSEDED"
+    assert result["proposal_digest"] == structured_digest(proposal)
+    assert result["prior_checkpoint_digest"] == prior_digest
+    assert not bootstrap.pending_path.exists()
+    archive = Path(str(result["archive_path"]))
+    archived = json.loads(archive.read_text(encoding="utf-8"))
+    assert archived["state"] == "SUPERSEDED"
+    assert archived["prior_checkpoint"] == prior
+    assert archived["prior_checkpoint_digest"] == prior_digest
+    assert archived["replacement_manifest_sha256"] == replacement_manifest
+    assert archived["authority_status"] == _authority_not_installed_status()
+
+    replacement = bootstrap.create_proposal(generation=1)
+    assert structured_digest(replacement) != structured_digest(proposal)
+    assert json.loads(archive.read_text(encoding="utf-8")) == archived
+
+
+def test_supersession_archive_survives_interruption_before_pending_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = _installed_bootstrap(tmp_path)
+    proposal = bootstrap.create_proposal(generation=1)
+    bootstrap.store_founder_capability(_capability(proposal))
+    _update_bootstrap_package(bootstrap, tmp_path)
+    original_unlink = Path.unlink
+    calls = 0
+
+    def interrupted_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal calls
+        if path == bootstrap.pending_path and calls == 0:
+            calls += 1
+            raise OSError("simulated interruption before pending unlink")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", interrupted_unlink)
+    with pytest.raises(OSError, match="simulated interruption"):
+        bootstrap.prepare_new_enrollment(_authority_not_installed_status())
+    assert bootstrap.pending_path.exists()
+    archives = list(
+        bootstrap.installer.state.glob(
+            "provider-host-enrollment-superseded-*.json"
+        )
+    )
+    assert len(archives) == 1
+
+    result = bootstrap.prepare_new_enrollment(_authority_not_installed_status())
+    assert result is not None
+    assert not bootstrap.pending_path.exists()
+    assert Path(str(result["archive_path"])) == archives[0]
+
+
+def test_interrupted_unauthorized_replacement_proposal_retries_supported_flow(
+    tmp_path: Path,
+) -> None:
+    observer = _Observer()
+    coordinator = _coordinator(tmp_path, observer)
+    bootstrap = _installed_bootstrap(tmp_path)
+    stale = bootstrap.create_proposal(generation=1)
+    bootstrap.store_founder_capability(_capability(stale))
+    replacement_manifest = _update_bootstrap_package(bootstrap, tmp_path)
+    bootstrap.prepare_new_enrollment(_authority_not_installed_status())
+
+    # Simulate termination after the replacement proposal was persisted but
+    # before the interactive Founder authenticator returned.
+    interrupted = bootstrap.create_proposal(generation=1)
+    interrupted_checkpoint = json.loads(
+        bootstrap.pending_path.read_text(encoding="utf-8")
+    )
+    assert interrupted_checkpoint["founder_capability"] is None
+
+    client = ProviderHostEnrollmentClient(
+        authority=_AuthorityAdapter(coordinator),
+        authenticator=TestFounderAuthenticator(principal_sid=SID),
+        bootstrap=bootstrap,
+    )
+    result = client.enroll(generation=1)
+
+    assert result["state"] == "ACTIVE"
+    assert observer.activations == [result["enrollment_id"]]
+    archives = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in bootstrap.installer.state.glob(
+            "provider-host-enrollment-superseded-*.json"
+        )
+    ]
+    interrupted_archive = next(
+        record
+        for record in archives
+        if record["reason"] == "UNAUTHORIZED_PROPOSAL_INTERRUPTED"
+    )
+    assert interrupted_archive["prior_checkpoint"] == interrupted_checkpoint
+    assert interrupted_archive["prior_checkpoint_digest"] == structured_digest(
+        interrupted_checkpoint
+    )
+    assert interrupted_archive["prior_manifest_sha256"] == replacement_manifest
+    assert interrupted_archive["replacement_manifest_sha256"] == replacement_manifest
+    assert interrupted_archive["authority_status"] == _authority_not_installed_status()
+    assert interrupted_archive["prior_checkpoint"]["proposal_digest"] == (
+        structured_digest(interrupted)
+    )
+
+
+def test_supported_supersession_serializes_resume_and_preserves_durable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observer = _Observer()
+    coordinator = _coordinator(tmp_path, observer)
+    bootstrap = _installed_bootstrap(tmp_path)
+    stale = bootstrap.create_proposal(generation=1)
+    bootstrap.store_founder_capability(_capability(stale))
+    _update_bootstrap_package(bootstrap, tmp_path)
+    enrolling = ProviderHostEnrollmentClient(
+        authority=_AuthorityAdapter(coordinator),
+        authenticator=TestFounderAuthenticator(principal_sid=SID),
+        bootstrap=bootstrap,
+    )
+    resuming = ProviderHostEnrollmentClient(
+        authority=_AuthorityAdapter(coordinator),
+        authenticator=TestFounderAuthenticator(principal_sid=SID),
+        bootstrap=bootstrap,
+    )
+    reached_unlink = threading.Event()
+    allow_unlink = threading.Event()
+    resume_started = threading.Event()
+    resume_finished = threading.Event()
+    original_unlink = Path.unlink
+    blocked_once = False
+
+    def blocking_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal blocked_once
+        if path == bootstrap.pending_path and not blocked_once:
+            blocked_once = True
+            reached_unlink.set()
+            assert allow_unlink.wait(timeout=5)
+        original_unlink(path, *args, **kwargs)
+
+    def resume() -> dict[str, Any]:
+        resume_started.set()
+        try:
+            return resuming.resume_authorization()
+        finally:
+            resume_finished.set()
+
+    monkeypatch.setattr(Path, "unlink", blocking_unlink)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        replacement = pool.submit(enrolling.enroll, generation=1)
+        assert reached_unlink.wait(timeout=5)
+        competing_resume = pool.submit(resume)
+        assert resume_started.wait(timeout=5)
+        assert not resume_finished.wait(timeout=0.1)
+        assert coordinator.status()["state"] == "NOT_INSTALLED"
+        allow_unlink.set()
+        enrolled = replacement.result(timeout=10)
+        with pytest.raises(PermissionError, match="checkpoint is invalid"):
+            competing_resume.result(timeout=10)
+
+    assert enrolled["state"] == "ACTIVE"
+    assert observer.activations == [enrolled["enrollment_id"]]
+    assert coordinator.status()["state"] == "ENROLLED_OFFLINE"
+    assert bootstrap.status()["state"] == "ENROLLED_OFFLINE"
 
 
 def test_enrollment_rejects_missing_founder_tamper_replay_and_wrong_sid(tmp_path: Path) -> None:
@@ -922,7 +1192,7 @@ def test_production_observer_remeasures_exact_user_host_before_enrollment(
     )
     monkeypatch.setattr(
         observer_module,
-        "token_environment",
+        "authenticated_client_environment",
         lambda token: {"USERPROFILE": str(profile), "PATH": str(tmp_path)},
     )
 
@@ -1241,7 +1511,7 @@ def test_production_enrollment_cli_fails_closed_on_factory_error(
 def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
     _validate_authority_compatibility(
         {
-            "service_version": "1.7.4",
+            "service_version": "1.7.5",
             "protocol_version": 7,
             "schema_version": 6,
         }
@@ -1251,8 +1521,8 @@ def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("service_version", "1.7.3"),
-        ("service_version", "1.7.5"),
+        ("service_version", "1.7.4"),
+        ("service_version", "1.7.6"),
         ("protocol_version", 6),
         ("protocol_version", 8),
         ("schema_version", 5),
@@ -1263,7 +1533,7 @@ def test_provider_host_rejects_authority_release_contract_mismatch(
     field: str, value: object
 ) -> None:
     diagnostics: dict[str, object] = {
-        "service_version": "1.7.4",
+        "service_version": "1.7.5",
         "protocol_version": 7,
         "schema_version": 6,
     }

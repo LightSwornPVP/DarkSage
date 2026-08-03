@@ -31,6 +31,7 @@ from keeper.authority_service.provider_identity import (
 )
 from keeper.authority_service.restricted_process import (
     WindowsSessionQueryStatus,
+    authenticated_client_environment,
     authenticated_client_windows_session_state,
     authenticated_profile_primary_token,
     authenticated_named_pipe_client,
@@ -38,7 +39,6 @@ from keeper.authority_service.restricted_process import (
     impersonate_token,
     run_restricted_process,
     require_impersonation_level,
-    token_environment,
     token_session_id,
     token_user_sid_string,
     windows_session_is_active,
@@ -1418,7 +1418,11 @@ class ServiceProviderObserver:
                 "Codex authenticated Windows session query failed "
                 f"(win32_error={session_state.win32_error})"
             )
-        environment = token_environment(profile_token)
+        # CreateEnvironmentBlock explicitly supports an impersonation token
+        # with TOKEN_QUERY access.  Use the exact authenticated pipe token;
+        # the primary duplicate remains limited to profile-restricted process
+        # derivation and is not used for this read-only profile lookup.
+        environment = authenticated_client_environment(client_token)
         profile = environment.get("USERPROFILE")
         if not isinstance(profile, str) or not profile:
             raise PermissionError("Codex authenticated user profile is unavailable")

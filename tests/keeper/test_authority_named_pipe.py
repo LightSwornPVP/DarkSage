@@ -19,6 +19,7 @@ from keeper.authority_service.windows_identity import (
     current_process_sid,
 )
 from keeper.authority_service.restricted_process import (
+    authenticated_client_environment,
     authenticated_named_pipe_client,
     authenticated_profile_primary_token,
     restricted_current_process_token,
@@ -33,11 +34,15 @@ class _CapturingPipeBindingObserver:
         self.identity: NamedPipeClientProcessIdentity | None = None
         self.profile_sid: str | None = None
         self.profile_session: int | None = None
+        self.profile_path: str | None = None
 
     @contextmanager
     def bind_client(self, pipe: int) -> Iterator[None]:
-        with authenticated_named_pipe_client(pipe) as (_, binding):
+        with authenticated_named_pipe_client(pipe) as (client_token, binding):
             self.identity = binding.revalidate(current_process_sid())
+            self.profile_path = authenticated_client_environment(client_token).get(
+                "USERPROFILE"
+            )
             with authenticated_profile_primary_token(
                 binding.profile_token
             ) as profile_token:
@@ -75,7 +80,7 @@ def test_named_pipe_authenticates_client_and_serves_framed_request(
                     "Codex sandbox intentionally presents a restricted token"
                 )
             raise
-        assert result["service_version"] == "1.7.4"
+        assert result["service_version"] == "1.7.5"
         assert result["schema_version"] == 6
         assert result["client_sid"] == current_process_sid()
     finally:
@@ -135,6 +140,10 @@ def test_named_pipe_binds_actual_client_pid_session_and_process_token(
         assert observer.profile_sid is not None
         assert observer.profile_sid.casefold() == current_process_sid().casefold()
         assert observer.profile_session == observer.identity.session_id
+        assert observer.profile_path
+        assert Path(observer.profile_path).resolve(strict=True) == Path(
+            os.environ["USERPROFILE"]
+        ).resolve(strict=True)
     finally:
         server.stop()
         thread.join(timeout=5)

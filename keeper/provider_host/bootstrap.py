@@ -4,10 +4,23 @@ import hashlib
 import json
 import os
 import secrets
+import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Mapping, cast
+from typing import (
+    Any,
+    Callable,
+    Concatenate,
+    Iterator,
+    Mapping,
+    ParamSpec,
+    TypeVar,
+    cast,
+)
 
+from keeper.app.database_lock import DatabaseFileLock, DatabaseMaintenanceBusyError
 from keeper.provider_host.enrollment import (
     ENROLLMENT_PROOF_PURPOSE,
     ENROLLMENT_PROPOSAL_PURPOSE,
@@ -32,6 +45,26 @@ from keeper.recovery import atomic_write_json
 _PENDING_SCHEMA = 1
 _RUNTIME_SCHEMA = 2
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_LOCK_TIMEOUT_SECONDS = 30.0
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+class ProviderHostCheckpointBusyError(RuntimeError):
+    """A supported enrollment checkpoint transition is already in progress."""
+
+
+def _checkpoint_locked(
+    method: Callable[Concatenate["ProviderHostBootstrap", _P], _R],
+) -> Callable[Concatenate["ProviderHostBootstrap", _P], _R]:
+    @wraps(method)
+    def locked(
+        self: "ProviderHostBootstrap", *args: _P.args, **kwargs: _P.kwargs
+    ) -> _R:
+        with self.checkpoint_transaction():
+            return method(self, *args, **kwargs)
+
+    return cast(Callable[Concatenate["ProviderHostBootstrap", _P], _R], locked)
 
 
 class ProviderHostBootstrap:
@@ -69,15 +102,59 @@ class ProviderHostBootstrap:
         )
         self.now = now or (lambda: datetime.now(UTC))
         self.pending_path = installer.state / "provider-host-enrollment-pending.json"
+        self.superseded_prefix = "provider-host-enrollment-superseded-"
         self.receipt_path = installer.state / "provider-host-enrollment.json"
         self.revocation_path = installer.state / "provider-host-enrollment-revoked.json"
         self.config_path = self.receipt_path
+        self._checkpoint_lock_state = threading.local()
 
+    @contextmanager
+    def checkpoint_transaction(self) -> Iterator[None]:
+        """Serialize one complete supported enrollment flow across processes.
+
+        The operating-system byte-range lock is released automatically if the
+        client process exits. Nested bootstrap transitions in the same flow are
+        reentrant only on the owning thread.
+        """
+        depth = int(getattr(self._checkpoint_lock_state, "depth", 0))
+        if depth:
+            self._checkpoint_lock_state.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._checkpoint_lock_state.depth = depth
+            return
+        try:
+            with DatabaseFileLock(
+                self.pending_path,
+                "exclusive",
+                timeout_seconds=_LOCK_TIMEOUT_SECONDS,
+            ):
+                self._checkpoint_lock_state.depth = 1
+                try:
+                    yield
+                finally:
+                    self._checkpoint_lock_state.depth = 0
+        except DatabaseMaintenanceBusyError as exc:
+            raise ProviderHostCheckpointBusyError(
+                "Provider Host enrollment checkpoint is busy"
+            ) from exc
+
+    @_checkpoint_locked
     def create_proposal(self, *, generation: int) -> dict[str, Any]:
         if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
             raise ValueError("Provider Host enrollment generation is invalid")
         if self.receipt_path.is_file() and not self.revocation_path.is_file():
             raise PermissionError("Provider Host enrollment is already active")
+        if self.pending_path.exists():
+            pending = self._pending()
+            if (
+                pending.get("state") != "COMMITTED"
+                or not self.revocation_path.exists()
+            ):
+                raise PermissionError(
+                    "Provider Host enrollment checkpoint must be resolved before a new proposal"
+                )
         current = self._installed_selection()
         executable = Path(str(current["artifact_path"]))
         installation = self._measure_installation(executable, current)
@@ -134,6 +211,228 @@ class ProviderHostBootstrap:
         )
         return proposal
 
+    @_checkpoint_locked
+    def prepare_new_enrollment(
+        self, authority_status: Mapping[str, object]
+    ) -> dict[str, Any] | None:
+        """Durably supersede only a rejected proposal for an older Host package.
+
+        The Authority status is obtained through the supported protocol before
+        this method is called.  Any Authority enrollment record, local grant,
+        proof, receipt, same-package proposal, or ambiguous checkpoint blocks a
+        new enrollment.  The complete prior checkpoint is archived before its
+        active-path name is removed.
+        """
+        no_enrollment_status = {
+            "founder_action_required": "INSTALL_PROVIDER_HOST",
+            "installed": False,
+            "online": False,
+            "protocol": "keeper-provider-host/1",
+            "protocol_compatible": True,
+            "provider_state": "UNAVAILABLE",
+            "state": "NOT_INSTALLED",
+        }
+        if not self.pending_path.exists():
+            return None
+        pending = self._pending()
+        if pending.get("state") == "COMMITTED" and self.revocation_path.exists():
+            return None
+        if pending.get("state") != "PROPOSED":
+            raise PermissionError(
+                "Provider Host enrollment checkpoint cannot be superseded"
+            )
+        current = self._installed_selection()
+        status = dict(authority_status)
+        founder_capability = pending.get("founder_capability")
+        inert_unauthorized = (
+            founder_capability is None
+            and pending.get("grant") is None
+            and pending.get("grant_digest") is None
+            and pending.get("proof") is None
+            and pending.get("proof_digest") is None
+        )
+        founder_authorized = (
+            isinstance(founder_capability, dict)
+            and pending.get("grant") is None
+            and pending.get("grant_digest") is None
+            and pending.get("proof") is None
+            and pending.get("proof_digest") is None
+        )
+        if not inert_unauthorized and not founder_authorized:
+            raise PermissionError(
+                "Provider Host enrollment checkpoint cannot be superseded"
+            )
+        if status == no_enrollment_status:
+            if self.receipt_path.exists() or self.revocation_path.exists():
+                raise PermissionError(
+                    "Provider Host enrollment receipt state is unresolved"
+                )
+            if inert_unauthorized:
+                reason = "UNAUTHORIZED_PROPOSAL_INTERRUPTED"
+                require_changed_package = False
+            else:
+                reason = "PACKAGE_CHANGED_AFTER_AUTHORITY_REJECTION"
+                require_changed_package = True
+        else:
+            if not self.receipt_path.exists() or not self.revocation_path.exists():
+                raise PermissionError(
+                    "Authority does not prove the prior Host enrollment was rejected"
+                )
+            revocation_record = _object(
+                json.loads(self.revocation_path.read_text(encoding="utf-8")),
+                "stored enrollment revocation",
+            )
+            revocation_payload = _object(
+                revocation_record.get("payload"), "stored enrollment revocation payload"
+            )
+            if (
+                status.get("state") != "REVOKED"
+                or status.get("installed") is not True
+                or status.get("online") is not False
+                or status.get("protocol") != "keeper-provider-host/1"
+                or status.get("protocol_compatible") is not True
+                or status.get("provider_state") != "UNAVAILABLE"
+                or status.get("founder_action_required")
+                != "CREATE_NEW_PROVIDER_HOST_ENROLLMENT"
+                or status.get("enrollment_id")
+                != revocation_payload.get("enrollment_id")
+                or status.get("enrollment_generation")
+                != revocation_payload.get("enrollment_generation")
+                or set(status)
+                != {
+                    "enrollment_generation",
+                    "enrollment_id",
+                    "founder_action_required",
+                    "installed",
+                    "online",
+                    "protocol",
+                    "protocol_compatible",
+                    "provider_state",
+                    "state",
+                }
+            ):
+                raise PermissionError(
+                    "Authority does not prove the prior Host enrollment was rejected"
+                )
+            if inert_unauthorized:
+                reason = "UNAUTHORIZED_REENROLLMENT_PROPOSAL_INTERRUPTED"
+            else:
+                reason = "NEW_GENERATION_REJECTED_WHILE_PRIOR_ENROLLMENT_REVOKED"
+            require_changed_package = False
+        proposal = _object(pending.get("proposal"), "stored proposal")
+        proposal_digest = structured_digest(proposal)
+        if pending.get("proposal_digest") != proposal_digest:
+            raise PermissionError("Provider Host proposal digest differs")
+        payload = _object(proposal.get("payload"), "stored proposal payload")
+        installation = _object(
+            payload.get("installation"), "stored proposal installation"
+        )
+        user_binding = _object(
+            payload.get("user_binding"), "stored proposal user binding"
+        )
+        old_manifest = installation.get("manifest_sha256")
+        if (
+            user_binding != self.user_binding.as_dict()
+            or payload.get("authority_protocol_version")
+            != self.authority_protocol_version
+            or payload.get("authority_schema_version")
+            != self.authority_schema_version
+            or payload.get("service_key_id") != self.service_key_id
+            or installation.get("install_root")
+            != str(self.installer.root.resolve(strict=True))
+            or not isinstance(old_manifest, str)
+            or len(old_manifest) != 64
+            or any(character not in "0123456789abcdef" for character in old_manifest)
+            or (
+                require_changed_package
+                and old_manifest == current.get("package_sha256")
+            )
+        ):
+            raise PermissionError(
+                "Provider Host stale enrollment package binding differs"
+            )
+        public = _object(
+            payload.get("host_public_identity"), "stored Host public identity"
+        )
+        if (
+            payload.get("host_id") != public.get("identity")
+            or not isinstance(public.get("key_id"), str)
+            or not public.get("key_id")
+        ):
+            raise PermissionError("Provider Host stale enrollment identity differs")
+        if getattr(self.signer, "production", False):
+            expected_host_id, expected_key_name = stable_host_identity(
+                self.user_binding.user_sid, old_manifest
+            )
+            if (
+                payload.get("host_id") != expected_host_id
+                or payload.get("host_key_name") != expected_key_name
+            ):
+                raise PermissionError(
+                    "Provider Host stale enrollment package identity differs"
+                )
+        prior_digest = structured_digest(pending)
+        archive = self.installer.state / (
+            self.superseded_prefix + proposal_digest + ".json"
+        )
+        record = {
+            "schema_version": 1,
+            "state": "SUPERSEDED",
+            "reason": reason,
+            "superseded_at": self.now().astimezone(UTC).isoformat(),
+            "authority_status": dict(authority_status),
+            "prior_checkpoint": pending,
+            "prior_checkpoint_digest": prior_digest,
+            "prior_manifest_sha256": old_manifest,
+            "replacement_manifest_sha256": str(current["package_sha256"]),
+        }
+        if archive.exists():
+            existing = _object(
+                json.loads(archive.read_text(encoding="utf-8")),
+                "superseded enrollment record",
+            )
+            if (
+                existing.get("schema_version") != 1
+                or existing.get("state") != "SUPERSEDED"
+                or existing.get("reason") != reason
+                or existing.get("prior_checkpoint_digest") != prior_digest
+                or existing.get("prior_checkpoint") != pending
+                or existing.get("authority_status") != dict(authority_status)
+                or existing.get("prior_manifest_sha256") != old_manifest
+                or existing.get("replacement_manifest_sha256")
+                != current.get("package_sha256")
+            ):
+                raise PermissionError(
+                    "Provider Host superseded enrollment record differs"
+                )
+            record = existing
+        else:
+            atomic_write_json(archive, record)
+            verified = _object(
+                json.loads(archive.read_text(encoding="utf-8")),
+                "superseded enrollment record",
+            )
+            if verified != record:
+                raise PermissionError(
+                    "Provider Host superseded enrollment record did not persist"
+                )
+        current_pending = self._pending("PROPOSED")
+        if (
+            current_pending != pending
+            or structured_digest(current_pending) != prior_digest
+        ):
+            raise PermissionError(
+                "Provider Host enrollment checkpoint changed during supersession"
+            )
+        self.pending_path.unlink()
+        return {
+            "state": "SUPERSEDED",
+            "proposal_digest": proposal_digest,
+            "prior_checkpoint_digest": prior_digest,
+            "archive_path": str(archive),
+        }
+
+    @_checkpoint_locked
     def store_founder_capability(
         self, capability: Mapping[str, object]
     ) -> None:
@@ -146,6 +445,7 @@ class ProviderHostBootstrap:
             {**pending, "founder_capability": dict(capability)},
         )
 
+    @_checkpoint_locked
     def abandon_unauthorized_proposal(self, proposal_digest: str) -> None:
         """Remove only an inert proposal for which Founder auth did not succeed."""
         pending = self._pending("PROPOSED")
@@ -160,6 +460,7 @@ class ProviderHostBootstrap:
             )
         self.pending_path.unlink()
 
+    @_checkpoint_locked
     def authorization_material(
         self,
     ) -> tuple[dict[str, object], dict[str, object]]:
@@ -170,6 +471,7 @@ class ProviderHostBootstrap:
         )
         return proposal, capability
 
+    @_checkpoint_locked
     def prove_grant(self, grant_record: Mapping[str, Any]) -> dict[str, Any]:
         pending = self._pending("PROPOSED")
         unsigned = _object(grant_record.get("payload"), "enrollment grant payload")
@@ -220,6 +522,7 @@ class ProviderHostBootstrap:
         )
         return proof
 
+    @_checkpoint_locked
     def commit_receipt(self, receipt_record: Mapping[str, Any]) -> dict[str, Any]:
         pending = self._pending("PROVED")
         grant_record = _object(pending["grant"], "pending grant")
@@ -285,6 +588,7 @@ class ProviderHostBootstrap:
             "config_path": str(self.config_path),
         }
 
+    @_checkpoint_locked
     def commit_revocation(
         self, revocation_record: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -325,6 +629,7 @@ class ProviderHostBootstrap:
             "revoked_at": str(revocation["revoked_at"]),
         }
 
+    @_checkpoint_locked
     def status(self) -> dict[str, Any]:
         installed = self.installer.status()
         if not installed["installed"]:
@@ -360,6 +665,7 @@ class ProviderHostBootstrap:
             "receipt_digest": pending.get("receipt_digest"),
         }
 
+    @_checkpoint_locked
     def reconciliation_material(self) -> tuple[str, dict[str, object]]:
         pending = self._pending("PROVED")
         grant = _object(pending.get("grant"), "stored grant")

@@ -1738,7 +1738,7 @@ def _bind_fake_founder_identity(
     )
     monkeypatch.setattr(
         observer_module,
-        "token_environment",
+        "authenticated_client_environment",
         lambda token: {"USERPROFILE": str(profile), "PATH": str(profile.parent)},
     )
 
@@ -1972,11 +1972,11 @@ def test_registration_environment_failure_prevents_probe_and_returns_sanitized_s
         yield 84
 
     def environment_failure(token: int) -> dict[str, str]:
-        assert token == 84
+        assert token == 42
         raise PermissionError(
             "provider profile environment is unavailable "
-            "(api=CreateEnvironmentBlock, token_type=primary, "
-            "required_access=TOKEN_QUERY|TOKEN_DUPLICATE, "
+            "(api=CreateEnvironmentBlock, token_type=authenticated-impersonation, "
+            "required_access=TOKEN_QUERY, "
             "win32_error=5, symbolic=ERROR_ACCESS_DENIED)"
         )
 
@@ -1995,7 +1995,9 @@ def test_registration_environment_failure_prevents_probe_and_returns_sanitized_s
             WindowsSessionQueryStatus.ACTIVE, state=0
         ),
     )
-    monkeypatch.setattr(observer_module, "token_environment", environment_failure)
+    monkeypatch.setattr(
+        observer_module, "authenticated_client_environment", environment_failure
+    )
 
     with pytest.raises(PermissionError) as caught:
         service.register_provider(
@@ -2072,7 +2074,7 @@ def test_registration_binds_profile_then_rejects_unreviewed_executable_before_pr
     )
     monkeypatch.setattr(
         observer_module,
-        "token_environment",
+        "authenticated_client_environment",
         lambda token: {"USERPROFILE": str(profile), "PATH": str(tmp_path)},
     )
 
@@ -2170,7 +2172,7 @@ def test_registration_binds_profile_then_rejects_unapproved_signature_before_pro
     )
     monkeypatch.setattr(
         observer_module,
-        "token_environment",
+        "authenticated_client_environment",
         lambda token: {"USERPROFILE": str(profile), "PATH": str(tmp_path)},
     )
 

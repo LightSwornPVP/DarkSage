@@ -24,6 +24,8 @@ _SYSTEM_CHARTER = "keeper-system:provider-host-enrollment"
 
 
 class EnrollmentAuthorityClient(Protocol):
+    def provider_host_enrollment_status(self) -> dict[str, Any]: ...
+
     def begin_provider_host_enrollment(
         self,
         *,
@@ -61,24 +63,29 @@ class ProviderHostEnrollmentClient:
         self.now = now or (lambda: datetime.now(UTC))
 
     def enroll(self, *, generation: int) -> dict[str, Any]:
-        proposal = self.bootstrap.create_proposal(generation=generation)
-        proposal_digest = structured_digest(proposal)
-        try:
-            capability = self._founder_capability(
-                action="ENROLL_PROVIDER_HOST",
-                action_digest=proposal_digest,
-                generation=generation,
+        with self.bootstrap.checkpoint_transaction():
+            self.bootstrap.prepare_new_enrollment(
+                self.authority.provider_host_enrollment_status()
             )
-        except (OSError, PermissionError, RuntimeError, TypeError, ValueError):
-            self.bootstrap.abandon_unauthorized_proposal(proposal_digest)
-            raise
-        capability_record = asdict(capability)
-        self.bootstrap.store_founder_capability(capability_record)
-        return self._begin_and_complete(proposal, capability_record)
+            proposal = self.bootstrap.create_proposal(generation=generation)
+            proposal_digest = structured_digest(proposal)
+            try:
+                capability = self._founder_capability(
+                    action="ENROLL_PROVIDER_HOST",
+                    action_digest=proposal_digest,
+                    generation=generation,
+                )
+            except (OSError, PermissionError, RuntimeError, TypeError, ValueError):
+                self.bootstrap.abandon_unauthorized_proposal(proposal_digest)
+                raise
+            capability_record = asdict(capability)
+            self.bootstrap.store_founder_capability(capability_record)
+            return self._begin_and_complete(proposal, capability_record)
 
     def resume_authorization(self) -> dict[str, Any]:
-        proposal, capability = self.bootstrap.authorization_material()
-        return self._begin_and_complete(proposal, capability)
+        with self.bootstrap.checkpoint_transaction():
+            proposal, capability = self.bootstrap.authorization_material()
+            return self._begin_and_complete(proposal, capability)
 
     def _begin_and_complete(
         self,
@@ -98,18 +105,20 @@ class ProviderHostEnrollmentClient:
         )
 
     def reconcile(self) -> dict[str, Any]:
-        enrollment_id, proof = self.bootstrap.reconciliation_material()
-        completed = self.authority.reconcile_provider_host_enrollment(
-            enrollment_id, proof
-        )
-        return self.bootstrap.commit_receipt(
-            _dict(completed.get("receipt"), "receipt")
-        )
+        with self.bootstrap.checkpoint_transaction():
+            enrollment_id, proof = self.bootstrap.reconciliation_material()
+            completed = self.authority.reconcile_provider_host_enrollment(
+                enrollment_id, proof
+            )
+            return self.bootstrap.commit_receipt(
+                _dict(completed.get("receipt"), "receipt")
+            )
 
     def reconcile_expired(self, enrollment_id: str) -> dict[str, Any]:
-        return self.authority.reconcile_provider_host_enrollment(
-            enrollment_id, None
-        )
+        with self.bootstrap.checkpoint_transaction():
+            return self.authority.reconcile_provider_host_enrollment(
+                enrollment_id, None
+            )
 
     def revoke(
         self,
@@ -118,22 +127,23 @@ class ProviderHostEnrollmentClient:
         receipt_digest: str,
         generation: int,
     ) -> dict[str, Any]:
-        binding = {
-            "action": "REVOKE_PROVIDER_HOST",
-            "enrollment_id": enrollment_id,
-            "receipt_digest": receipt_digest,
-        }
-        capability = self._founder_capability(
-            action="REVOKE_PROVIDER_HOST",
-            action_digest=structured_digest(binding),
-            generation=generation,
-        )
-        result = self.authority.revoke_provider_host_enrollment(
-            enrollment_id, asdict(capability)
-        )
-        return self.bootstrap.commit_revocation(
-            _dict(result.get("revocation"), "revocation")
-        )
+        with self.bootstrap.checkpoint_transaction():
+            binding = {
+                "action": "REVOKE_PROVIDER_HOST",
+                "enrollment_id": enrollment_id,
+                "receipt_digest": receipt_digest,
+            }
+            capability = self._founder_capability(
+                action="REVOKE_PROVIDER_HOST",
+                action_digest=structured_digest(binding),
+                generation=generation,
+            )
+            result = self.authority.revoke_provider_host_enrollment(
+                enrollment_id, asdict(capability)
+            )
+            return self.bootstrap.commit_revocation(
+                _dict(result.get("revocation"), "revocation")
+            )
 
     def _founder_capability(
         self, *, action: str, action_digest: str, generation: int
