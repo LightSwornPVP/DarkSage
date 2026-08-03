@@ -6,7 +6,7 @@ import json
 import threading
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from keeper.authority_service.client import DEFAULT_PIPE_NAME
 from keeper.authority_service.core import AuthorityServiceCore
@@ -106,8 +106,14 @@ class AuthorityWindowsService:
             return
         try:
             self._set_status(_SERVICE_START_PENDING, wait_hint=15_000)
-            self.server = _build_server(self.config_path)
+            self.server, initialize_provider_host = _build_service_server(
+                self.config_path
+            )
             self._set_status(_SERVICE_RUNNING, accepts=_SERVICE_ACCEPT_STOP)
+            if initialize_provider_host is not None:
+                _start_provider_host_initialization(
+                    self.server.core, initialize_provider_host
+                )
             self.server.serve_forever()
             self._set_status(_SERVICE_STOPPED)
         except BaseException:
@@ -155,52 +161,26 @@ class AuthorityWindowsService:
 
 
 def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
+    server, initialize_provider_host = _build_service_server(config_path)
+    if initialize_provider_host is not None:
+        server.core.begin_provider_host_initialization()
+        initialize_provider_host()
+    return server
+
+
+def _build_service_server(
+    config_path: Path,
+) -> tuple[NamedPipeAuthorityServer, Callable[[], None] | None]:
     config = _load_config(config_path)
-    provider_host_gateway: ProviderHostGateway | None = None
     provider_host = config.get("provider_host")
-    if isinstance(provider_host, dict):
-        authority_signer = WindowsCngEnvelopeIdentity(
-            identity=str(provider_host["authority_id"]),
-            key_name=str(provider_host["authority_key_name"]),
-            machine_key=True,
-        )
-        if authority_signer.public_configuration() != provider_host.get(
-            "authority_public_identity"
-        ):
-            raise PermissionError(
-                "Authority Provider Host signing identity differs"
-            )
-        host_verifier = RsaPublicIdentity.from_configuration(
-            provider_host["host_public_identity"]
-        ).verifier()
-        provider_host_gateway = ProviderHostGateway(
-            pipe_name=str(provider_host["pipe_name"]),
-            authority_id=str(provider_host["authority_id"]),
-            host_id=str(provider_host["host_id"]),
-            authority_signer=authority_signer,
-            host_verifier=host_verifier,
-            expected_host_sid=str(provider_host["host_user_sid"]),
-            expected_host_session_id=int(provider_host["host_session_id"]),
-            expected_host_executable=Path(
-                str(provider_host["host_process_executable"])
-            ),
-            expected_host_executable_sha256=str(
-                provider_host["host_process_executable_sha256"]
-            ),
-            expected_host_profile_path=Path(
-                str(provider_host["host_profile_path"])
-            ),
-            sequence_store=Path(
-                str(provider_host["sequence_store"])
-            ),
-        )
+    legacy_provider_host = provider_host if isinstance(provider_host, dict) else None
     observer = ServiceProviderObserver(
         Path(config["provider_root"]),
         Path(config["allowed_evidence_root"]),
         str(config["provider_account_name"]),
         Path(config["provider_credential_path"]),
         str(config["authorized_client_sid"]),
-        provider_host_gateway,
+        None,
     )
     verifier_config = config.get("founder_capability_verifier")
     verifier = (
@@ -217,113 +197,212 @@ def _build_server(config_path: Path) -> NamedPipeAuthorityServer:
         ),
         founder_capability_verifier=verifier,
     )
-    if provider_host_gateway is not None:
-        enrollment = provider_host_gateway.enrollment_record()
-        enrollment_id = str(enrollment["enrollment_id"])
-        existing = core.store.get("provider_host_enrollments", enrollment_id)
-        if existing is None:
-            core.store.insert(
-                "provider_host_enrollments",
-                enrollment_id,
-                "ACTIVE",
-                enrollment,
+    initialize_provider_host: Callable[[], None] | None = None
+    if legacy_provider_host is not None:
+        def initialize_legacy_provider_host() -> None:
+            authority_signer = WindowsCngEnvelopeIdentity(
+                identity=str(legacy_provider_host["authority_id"]),
+                key_name=str(legacy_provider_host["authority_key_name"]),
+                machine_key=True,
+                create_if_missing=False,
             )
-        else:
-            existing.pop("service_state", None)
-            if existing != enrollment:
-                raise PermissionError(
-                    "Provider Host protected enrollment differs from durable state"
-                )
-    elif verifier is not None:
-        authority_id = "keeper-authority-provider-host:" + core.keys.current_key_id
-        authority_signer = WindowsCngEnvelopeIdentity(
-            identity=authority_id,
-            key_name="DarkSage.KeeperAuthority.ProviderHost.v1",
-            machine_key=True,
-        )
-
-        def activate_provider_host(record: Mapping[str, Any]) -> None:
-            proposal_record = _mapping(record.get("proposal"), "stored Host proposal")
-            proposal = _mapping(proposal_record.get("payload"), "stored Host proposal payload")
-            receipt_record = _mapping(record.get("receipt"), "stored Host receipt")
-            receipt_unsigned = _mapping(
-                receipt_record.get("payload"), "stored Host receipt payload"
-            )
-            receipt = validate_enrollment_receipt(
-                receipt_record,
-                authority_signer,
-                expected_enrollment_id=str(receipt_unsigned.get("enrollment_id", "")),
-            )
-            if (
-                receipt.get("service_key_id") != core.keys.current_key_id
-                or receipt.get("authority_protocol_version") != PROTOCOL_VERSION
-                or receipt.get("authority_schema_version") != SERVICE_SCHEMA_VERSION
+            if authority_signer.public_configuration() != legacy_provider_host.get(
+                "authority_public_identity"
             ):
-                raise PermissionError("Provider Host enrollment service identity differs")
-            runtime = _mapping(
-                receipt.get("runtime_configuration"), "Host runtime configuration"
-            )
-            installation = _mapping(
-                proposal.get("installation"), "Host installation binding"
-            )
-            binding = _mapping(proposal.get("user_binding"), "Host user binding")
-            host_public = _mapping(
-                proposal.get("host_public_identity"), "Host public identity"
-            )
+                raise PermissionError(
+                    "Authority Provider Host signing identity differs"
+                )
             gateway = ProviderHostGateway(
-                pipe_name=str(runtime["pipe_name"]),
-                authority_id=authority_id,
-                host_id=str(proposal["host_id"]),
+                pipe_name=str(legacy_provider_host["pipe_name"]),
+                authority_id=str(legacy_provider_host["authority_id"]),
+                host_id=str(legacy_provider_host["host_id"]),
                 authority_signer=authority_signer,
                 host_verifier=RsaPublicIdentity.from_configuration(
-                    host_public
+                    legacy_provider_host["host_public_identity"]
                 ).verifier(),
-                expected_host_sid=str(binding["user_sid"]),
-                expected_host_session_id=int(binding["session_id"]),
-                expected_host_executable=Path(str(installation["executable_path"])),
+                expected_host_sid=str(legacy_provider_host["host_user_sid"]),
+                expected_host_session_id=int(
+                    legacy_provider_host["host_session_id"]
+                ),
+                expected_host_executable=Path(
+                    str(legacy_provider_host["host_process_executable"])
+                ),
                 expected_host_executable_sha256=str(
-                    installation["executable_sha256"]
+                    legacy_provider_host["host_process_executable_sha256"]
                 ),
-                expected_host_profile_path=Path(str(binding["profile_path"])),
-                sequence_store=core.root / "provider-host-gateway-sequences.db",
-                enrollment_is_active=lambda: (
-                    (
-                        current := core.store.get(
-                            "provider_host_enrollments",
-                            str(receipt["enrollment_id"]),
-                        )
-                    )
-                    is not None
-                    and current.get("service_state") == "ACTIVE"
+                expected_host_profile_path=Path(
+                    str(legacy_provider_host["host_profile_path"])
                 ),
+                sequence_store=Path(str(legacy_provider_host["sequence_store"])),
             )
+            enrollment = gateway.enrollment_record()
+            enrollment_id = str(enrollment["enrollment_id"])
+            existing = core.store.get("provider_host_enrollments", enrollment_id)
+            if existing is None:
+                core.store.insert(
+                    "provider_host_enrollments",
+                    enrollment_id,
+                    "ACTIVE",
+                    enrollment,
+                )
+            else:
+                existing.pop("service_state", None)
+                if existing != enrollment:
+                    raise PermissionError(
+                        "Provider Host protected enrollment differs from durable state"
+                    )
             observer.provider_host_gateway = gateway
 
-        def deactivate_provider_host(record: Mapping[str, Any]) -> None:
-            gateway = observer.provider_host_gateway
-            if gateway is not None:
-                gateway.deactivate()
-            observer.provider_host_gateway = None
-
-        core.configure_provider_host_enrollment(
-            ProviderHostEnrollmentCoordinator(
-                store=core.store,
-                service_key_id=core.keys.current_key_id,
-                authority_protocol_version=PROTOCOL_VERSION,
-                authority_schema_version=SERVICE_SCHEMA_VERSION,
-                founder_verifier=verifier,
-                authority_signer=authority_signer,
-                authority_public_identity=authority_signer.public_configuration(),
-                proposal_observer=observer,
-                activate=activate_provider_host,
-                deactivate=deactivate_provider_host,
+        initialize_provider_host = initialize_legacy_provider_host
+    elif verifier is not None:
+        def initialize_current_provider_host() -> None:
+            authority_id = (
+                "keeper-authority-provider-host:" + core.keys.current_key_id
             )
-        )
-    return NamedPipeAuthorityServer(
+            authority_signer = WindowsCngEnvelopeIdentity(
+                identity=authority_id,
+                key_name="DarkSage.KeeperAuthority.ProviderHost.v1",
+                machine_key=True,
+                create_if_missing=False,
+            )
+
+            def activate_provider_host(record: Mapping[str, Any]) -> None:
+                proposal_record = _mapping(
+                    record.get("proposal"), "stored Host proposal"
+                )
+                proposal = _mapping(
+                    proposal_record.get("payload"),
+                    "stored Host proposal payload",
+                )
+                receipt_record = _mapping(
+                    record.get("receipt"), "stored Host receipt"
+                )
+                receipt_unsigned = _mapping(
+                    receipt_record.get("payload"),
+                    "stored Host receipt payload",
+                )
+                receipt = validate_enrollment_receipt(
+                    receipt_record,
+                    authority_signer,
+                    expected_enrollment_id=str(
+                        receipt_unsigned.get("enrollment_id", "")
+                    ),
+                )
+                if (
+                    receipt.get("service_key_id") != core.keys.current_key_id
+                    or receipt.get("authority_protocol_version")
+                    != PROTOCOL_VERSION
+                    or receipt.get("authority_schema_version")
+                    != SERVICE_SCHEMA_VERSION
+                ):
+                    raise PermissionError(
+                        "Provider Host enrollment service identity differs"
+                    )
+                runtime = _mapping(
+                    receipt.get("runtime_configuration"),
+                    "Host runtime configuration",
+                )
+                installation = _mapping(
+                    proposal.get("installation"), "Host installation binding"
+                )
+                binding = _mapping(
+                    proposal.get("user_binding"), "Host user binding"
+                )
+                host_public = _mapping(
+                    proposal.get("host_public_identity"),
+                    "Host public identity",
+                )
+                gateway = ProviderHostGateway(
+                    pipe_name=str(runtime["pipe_name"]),
+                    authority_id=authority_id,
+                    host_id=str(proposal["host_id"]),
+                    authority_signer=authority_signer,
+                    host_verifier=RsaPublicIdentity.from_configuration(
+                        host_public
+                    ).verifier(),
+                    expected_host_sid=str(binding["user_sid"]),
+                    expected_host_session_id=int(binding["session_id"]),
+                    expected_host_executable=Path(
+                        str(installation["executable_path"])
+                    ),
+                    expected_host_executable_sha256=str(
+                        installation["executable_sha256"]
+                    ),
+                    expected_host_profile_path=Path(
+                        str(binding["profile_path"])
+                    ),
+                    sequence_store=(
+                        core.root / "provider-host-gateway-sequences.db"
+                    ),
+                    enrollment_is_active=lambda: (
+                        (
+                            current := core.store.get(
+                                "provider_host_enrollments",
+                                str(receipt["enrollment_id"]),
+                            )
+                        )
+                        is not None
+                        and current.get("service_state") == "ACTIVE"
+                    ),
+                )
+                observer.provider_host_gateway = gateway
+
+            def deactivate_provider_host(record: Mapping[str, Any]) -> None:
+                gateway = observer.provider_host_gateway
+                if gateway is not None:
+                    gateway.deactivate()
+                observer.provider_host_gateway = None
+
+            core.configure_provider_host_enrollment(
+                ProviderHostEnrollmentCoordinator(
+                    store=core.store,
+                    service_key_id=core.keys.current_key_id,
+                    authority_protocol_version=PROTOCOL_VERSION,
+                    authority_schema_version=SERVICE_SCHEMA_VERSION,
+                    founder_verifier=verifier,
+                    authority_signer=authority_signer,
+                    authority_public_identity=(
+                        authority_signer.public_configuration()
+                    ),
+                    proposal_observer=observer,
+                    activate=activate_provider_host,
+                    deactivate=deactivate_provider_host,
+                )
+            )
+
+        initialize_provider_host = initialize_current_provider_host
+    server = NamedPipeAuthorityServer(
         core,
         str(config["authorized_client_sid"]),
         pipe_name=str(config.get("pipe_name", DEFAULT_PIPE_NAME)),
     )
+    return server, initialize_provider_host
+
+
+def _start_provider_host_initialization(
+    core: AuthorityServiceCore, initialize: Callable[[], None]
+) -> threading.Thread:
+    core.begin_provider_host_initialization()
+
+    def run() -> None:
+        try:
+            initialize()
+        except (OSError, PermissionError, RuntimeError, ValueError):
+            core.fail_provider_host_initialization(
+                "IDENTITY_INITIALIZATION_FAILED"
+            )
+        except BaseException:
+            core.fail_provider_host_initialization(
+                "UNEXPECTED_INITIALIZATION_FAILURE"
+            )
+
+    worker = threading.Thread(
+        target=run,
+        name="keeper-authority-provider-host-init",
+        daemon=True,
+    )
+    worker.start()
+    return worker
 
 
 def _load_config(path: Path) -> dict[str, Any]:

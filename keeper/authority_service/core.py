@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -39,7 +40,7 @@ from keeper.providers.adapters import (
 )
 
 
-SERVICE_VERSION = "1.7.1"
+SERVICE_VERSION = "1.7.2"
 RESTORE_FENCE_LIFETIME = timedelta(minutes=2)
 
 
@@ -196,15 +197,47 @@ class AuthorityServiceCore:
         }:
             raise TypeError("Founder capability verifier type is not trusted")
         self.founder_capability_verifier = founder_capability_verifier
+        self._provider_host_lock = threading.RLock()
         self.provider_host_enrollment: ProviderHostEnrollmentCoordinator | None = None
+        self._provider_host_bootstrap: dict[str, Any] = {
+            "state": "NOT_CONFIGURED",
+            "failure_reason": None,
+        }
+
+    def begin_provider_host_initialization(self) -> None:
+        with self._provider_host_lock:
+            if self.provider_host_enrollment is not None:
+                raise RuntimeError("Provider Host enrollment is already configured")
+            self._provider_host_bootstrap = {
+                "state": "INITIALIZING",
+                "failure_reason": None,
+            }
+
+    def fail_provider_host_initialization(self, reason: str) -> None:
+        if reason not in {
+            "IDENTITY_INITIALIZATION_FAILED",
+            "UNEXPECTED_INITIALIZATION_FAILURE",
+        }:
+            raise ValueError("Provider Host initialization failure is invalid")
+        with self._provider_host_lock:
+            if self.provider_host_enrollment is None:
+                self._provider_host_bootstrap = {
+                    "state": "UNAVAILABLE",
+                    "failure_reason": reason,
+                }
 
     def configure_provider_host_enrollment(
         self, coordinator: ProviderHostEnrollmentCoordinator
     ) -> None:
-        if self.provider_host_enrollment is not None:
-            raise RuntimeError("Provider Host enrollment is already configured")
-        self.provider_host_enrollment = coordinator
-        coordinator.activate_current()
+        with self._provider_host_lock:
+            if self.provider_host_enrollment is not None:
+                raise RuntimeError("Provider Host enrollment is already configured")
+            coordinator.activate_current()
+            self.provider_host_enrollment = coordinator
+            self._provider_host_bootstrap = {
+                "state": "READY",
+                "failure_reason": None,
+            }
 
     def dispatch(self, request: Request, client_sid: str) -> dict[str, Any]:
         if not client_sid:
@@ -353,7 +386,9 @@ class AuthorityServiceCore:
             self.observer, "allowed_evidence_root", None
         )
         provider_host = getattr(self.observer, "provider_host_status", None)
-        enrollment = self.provider_host_enrollment
+        with self._provider_host_lock:
+            enrollment = self.provider_host_enrollment
+            bootstrap = dict(self._provider_host_bootstrap)
         enrollment_status = enrollment.status() if enrollment is not None else None
         live_status = provider_host() if callable(provider_host) else None
         if enrollment_status is not None:
@@ -370,15 +405,30 @@ class AuthorityServiceCore:
                 provider_host_status["enrollment_generation"] = (
                     enrollment_status.get("enrollment_generation")
                 )
+        elif bootstrap["state"] in {"INITIALIZING", "UNAVAILABLE"}:
+            provider_host_status = (
+                dict(live_status) if isinstance(live_status, dict) else {}
+            )
+            provider_host_status.update(
+                {
+                    "installed": bool(provider_host_status.get("installed", False)),
+                    "online": False,
+                    "state": bootstrap["state"],
+                    "protocol_compatible": False,
+                    "provider_state": "UNAVAILABLE",
+                    "failure_reason": bootstrap["failure_reason"],
+                }
+            )
         elif isinstance(live_status, dict):
             provider_host_status = live_status
         else:
             provider_host_status = {
                 "installed": False,
                 "online": False,
-                "state": "NOT_CONFIGURED",
+                "state": bootstrap["state"],
                 "protocol_compatible": False,
                 "provider_state": "UNAVAILABLE",
+                "failure_reason": bootstrap["failure_reason"],
             }
         reconciliation_registration_ids = sorted(
             str(record["trusted_registration_id"])
@@ -479,7 +529,8 @@ class AuthorityServiceCore:
     def _provider_host_enrollment_coordinator(
         self,
     ) -> ProviderHostEnrollmentCoordinator:
-        coordinator = self.provider_host_enrollment
+        with self._provider_host_lock:
+            coordinator = self.provider_host_enrollment
         if coordinator is None:
             raise PermissionError("Provider Host enrollment is not configured")
         return coordinator

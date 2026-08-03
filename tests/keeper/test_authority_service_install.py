@@ -21,6 +21,7 @@ from keeper.authority_service.service_package import (
     verify_service_package,
     write_external_manifest,
 )
+from keeper.recovery import atomic_write_json
 
 
 def _repository() -> Path:
@@ -31,6 +32,26 @@ def _build(tmp_path: Path, name: str = "keeper-authority.pyz") -> Path:
     package = tmp_path / name
     AuthorityServiceInstaller(_repository())._build_package(package)
     return package
+
+
+def _capture_recovery_preimage(service_root: Path, destination: Path) -> Path:
+    data = service_root / "data"
+    data.mkdir(exist_ok=True)
+    (data / "authority.db").write_bytes(b"synthetic-authority-state")
+    event = service_install.verified_recovery_backup(destination)
+    return Path(str(event["manifest"]))
+
+
+def _production_verifier_fixture() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "issuer_id": "keeper-founder:S-1-5-21-1000",
+        "principal_sid": "S-1-5-21-1000",
+        "key_id": "keeper-founder-rsa:synthetic",
+        "algorithm": "RS256-CNG-HIGH-PROTECTION",
+        "modulus": "AQ==",
+        "exponent": "AQAB",
+    }
 
 
 def test_authority_service_package_is_self_contained_and_reachable(
@@ -85,7 +106,7 @@ def test_authority_service_package_has_exact_service_closure_and_metadata(
     package = _build(tmp_path)
     verified = verify_service_package(package)
 
-    assert verified.manifest["service_version"] == "1.7.1"
+    assert verified.manifest["service_version"] == "1.7.2"
     assert verified.manifest["protocol_version"] == 7
     assert verified.manifest["service_schema_version"] == 6
     assert verified.manifest["provider_host_protocol"] == "keeper-provider-host/1"
@@ -240,18 +261,146 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     )
     monkeypatch.setattr(
         service_install,
+        "_provision_provider_host_authority_identity",
+        lambda value: {
+            "schema_version": 1,
+            "key_id": "keeper-provider-host-rsa:test",
+        },
+    )
+    monkeypatch.setattr(
+        service_install,
         "build_service_package",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upgrade rebuilt package")),
     )
+    preimage_manifest = _capture_recovery_preimage(
+        service_root, tmp_path / "recovery-preimage"
+    )
 
     old_digest = hashlib.sha256(old_package).hexdigest().upper()
-    with pytest.raises(PermissionError, match="rollback package SHA-256"):
-        service_install.upgrade_package(candidate, candidate_digest, "0" * 64)
+    with pytest.raises(PermissionError, match="does not match its manifest"):
+        service_install.upgrade_package(
+            candidate, candidate_digest, "0" * 64, preimage_manifest
+        )
     assert package.read_bytes() == old_package
     assert not any((service_root / "backups").iterdir())
 
+    monkeypatch.setattr(
+        service_install,
+        "_provision_provider_host_authority_identity",
+        lambda value: (_ for _ in ()).throw(
+            PermissionError("synthetic Provider Host identity failure")
+        ),
+    )
+    with pytest.raises(PermissionError, match="synthetic Provider Host"):
+        service_install.upgrade_package(
+            candidate, candidate_digest, old_digest, preimage_manifest
+        )
+    assert package.read_bytes() == old_package
+
+    monkeypatch.setattr(
+        service_install,
+        "_provision_provider_host_authority_identity",
+        lambda value: {
+            "schema_version": 1,
+            "key_id": "keeper-provider-host-rsa:test",
+        },
+    )
+
+    real_persist = service_install._persist_manifest
+    interrupted_after_claim = False
+
+    def persist_then_interrupt_after_claim(value: dict[str, object]) -> None:
+        nonlocal interrupted_after_claim
+        real_persist(value)
+        if (
+            not interrupted_after_claim
+            and "package_upgrade_claim" in value
+            and not value.get("upgrades")
+        ):
+            interrupted_after_claim = True
+            raise RuntimeError("simulated interruption after upgrade claim")
+
+    monkeypatch.setattr(
+        service_install, "_persist_manifest", persist_then_interrupt_after_claim
+    )
+    with pytest.raises(RuntimeError, match="after upgrade claim"):
+        service_install.upgrade_package(
+            candidate, candidate_digest, old_digest, preimage_manifest
+        )
+    assert package.read_bytes() == old_package
+    claimed_before_replace = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    assert claimed_before_replace["package_upgrade_claim"][
+        "package_sha256"
+    ] == candidate_digest
+    monkeypatch.setattr(service_install, "_persist_manifest", real_persist)
+    manifest_before_mismatch = manifest_path.read_bytes()
+    with pytest.raises(PermissionError, match="upgrade claim differs"):
+        service_install.upgrade_package(
+            candidate, candidate_digest, "F" * 64, preimage_manifest
+        )
+    assert package.read_bytes() == old_package
+    assert manifest_path.read_bytes() == manifest_before_mismatch
+
+    real_replace = os.replace
+
+    def upgrade_replace_then_interrupt(source: Path, destination: Path) -> None:
+        real_replace(source, destination)
+        if Path(source).suffix == ".upgrade":
+            raise RuntimeError("simulated interruption after upgrade replacement")
+
+    monkeypatch.setattr(os, "replace", upgrade_replace_then_interrupt)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        service_install.upgrade_package(
+            candidate, candidate_digest, old_digest, preimage_manifest
+        )
+    assert package.read_bytes() == candidate.read_bytes()
+    interrupted_upgrade = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert interrupted_upgrade["package_upgrade_claim"][
+        "package_sha256"
+    ] == candidate_digest
+    assert interrupted_upgrade.get("upgrades") is None
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    interrupted_backup = Path(
+        str(interrupted_upgrade["package_upgrade_claim"]["backup_path"])
+    )
+    interrupted_rollback = service_install.rollback_package(
+        interrupted_backup, old_digest
+    )
+    assert interrupted_rollback["package_sha256"] == old_digest
+    assert package.read_bytes() == old_package
+    after_interrupted_rollback = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    assert "package_upgrade_claim" not in after_interrupted_rollback
+
+    interrupted_after_completion = False
+
+    def persist_then_interrupt_after_completion(value: dict[str, object]) -> None:
+        nonlocal interrupted_after_completion
+        real_persist(value)
+        if (
+            not interrupted_after_completion
+            and value.get("upgrades")
+            and "package_upgrade_claim" not in value
+        ):
+            interrupted_after_completion = True
+            raise RuntimeError("simulated interruption after upgrade completion")
+
+    monkeypatch.setattr(
+        service_install,
+        "_persist_manifest",
+        persist_then_interrupt_after_completion,
+    )
+    with pytest.raises(RuntimeError, match="after upgrade completion"):
+        service_install.upgrade_package(
+            candidate, candidate_digest, old_digest, preimage_manifest
+        )
+    monkeypatch.setattr(service_install, "_persist_manifest", real_persist)
     result = service_install.upgrade_package(
-        candidate, candidate_digest, old_digest
+        candidate, candidate_digest, old_digest, preimage_manifest
     )
 
     assert package.read_bytes() == candidate.read_bytes()
@@ -262,15 +411,27 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert persisted["upgrades"][-1]["package_sha256"] == candidate_digest
     assert persisted["upgrades"][-1]["source_tree_sha256"] == verify_service_package(candidate).manifest["source_tree_sha256"]
+    assert persisted["upgrades"][-1]["provider_host_authority_key_id"] == (
+        "keeper-provider-host-rsa:test"
+    )
+    assert persisted["upgrades"][-1]["recovery_preimage"][
+        "manifest"
+    ] == str(preimage_manifest.resolve())
+    assert "package_upgrade_claim" not in persisted
 
-    real_replace = service_install.os.replace
+    repeated = service_install.upgrade_package(
+        candidate, candidate_digest, old_digest, preimage_manifest
+    )
+    assert repeated["package_sha256"] == candidate_digest
+    repeated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(repeated_manifest["upgrades"]) == 1
 
     def replace_then_interrupt(source: Path, destination: Path) -> None:
         real_replace(source, destination)
         if Path(source).suffix == ".rollback":
             raise RuntimeError("simulated interruption after rollback replacement")
 
-    monkeypatch.setattr(service_install.os, "replace", replace_then_interrupt)
+    monkeypatch.setattr(os, "replace", replace_then_interrupt)
     with pytest.raises(RuntimeError, match="simulated interruption"):
         service_install.rollback_package(backup, str(result["backup_sha256"]))
     assert package.read_bytes() == old_package
@@ -278,7 +439,7 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
     assert interrupted["package_rollback_claim"]["restored_package_sha256"] == str(
         result["backup_sha256"]
     )
-    monkeypatch.setattr(service_install.os, "replace", real_replace)
+    monkeypatch.setattr(os, "replace", real_replace)
     rollback_result = service_install.rollback_package(
         backup, str(result["backup_sha256"])
     )
@@ -401,7 +562,204 @@ def test_upgrade_rejects_wrong_hash_before_touching_installed_package(
     candidate = _build(tmp_path, "candidate.pyz")
     monkeypatch.setattr(service_install, "_require_admin", lambda: None)
     with pytest.raises(PermissionError, match="authorization"):
-        service_install.upgrade_package(candidate, "0" * 64, "0" * 64)
+        service_install.upgrade_package(
+            candidate, "0" * 64, "0" * 64, tmp_path / "absent.json"
+        )
+
+
+def test_founder_configuration_migration_reconciles_write_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_root = tmp_path / "service"
+    config = service_root / "config" / "service.json"
+    config.parent.mkdir(parents=True)
+    (service_root / "backups").mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "service_name": SERVICE_NAME,
+                "service_root": str(service_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = service_root / "audit" / "machine-artifacts.json"
+    manifest_path.parent.mkdir()
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "service_name": SERVICE_NAME,
+        "installation_completed_at": "2026-01-01T00:00:00+00:00",
+        "artifacts": [],
+        "commands": [],
+        "package_upgrade_claim": {
+            "schema_version": 1,
+            "package_sha256": "A" * 64,
+            "claimed_at": "2026-01-01T00:00:00+00:00",
+        },
+    }
+    service_install._record_file(manifest, config)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(service_install, "SERVICE_ROOT", service_root)
+    monkeypatch.setattr(service_install, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(
+        service_install,
+        "_founder_verifier_configuration",
+        _production_verifier_fixture,
+    )
+    real_copy = shutil.copy2
+    interrupted_backup = False
+
+    def copy_then_interrupt(source: Path, destination: Path) -> Path:
+        nonlocal interrupted_backup
+        result = Path(real_copy(source, destination))
+        if not interrupted_backup and result.parent == service_root / "backups":
+            interrupted_backup = True
+            raise RuntimeError("simulated configuration backup interruption")
+        return result
+
+    monkeypatch.setattr(shutil, "copy2", copy_then_interrupt)
+    with pytest.raises(RuntimeError, match="backup interruption"):
+        service_install._migrate_founder_capability_configuration(manifest)
+    orphan_backup = next((service_root / "backups").iterdir())
+    assert orphan_backup.is_file()
+    assert not service_install._recorded_file_matches(manifest, orphan_backup)
+    assert "configuration_migration_claim" not in manifest
+    monkeypatch.setattr(shutil, "copy2", real_copy)
+
+    real_atomic_write = atomic_write_json
+    interrupted = False
+
+    def write_then_interrupt(path: Path, value: object) -> None:
+        nonlocal interrupted
+        real_atomic_write(path, value)
+        if path == config and not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated configuration write interruption")
+
+    monkeypatch.setattr(service_install, "atomic_write_json", write_then_interrupt)
+    with pytest.raises(RuntimeError, match="configuration write interruption"):
+        service_install._migrate_founder_capability_configuration(manifest)
+    assert json.loads(config.read_text(encoding="utf-8"))["schema_version"] == 3
+    interrupted_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" in interrupted_manifest
+    assert not service_install._recorded_file_matches(interrupted_manifest, config)
+
+    mismatched_manifest = json.loads(json.dumps(interrupted_manifest))
+    mismatched_manifest["package_upgrade_claim"]["package_sha256"] = "B" * 64
+    with pytest.raises(PermissionError, match="package claim differs"):
+        service_install._migrate_founder_capability_configuration(
+            mismatched_manifest
+        )
+
+    monkeypatch.setattr(service_install, "atomic_write_json", real_atomic_write)
+    verifier = service_install._migrate_founder_capability_configuration(
+        interrupted_manifest
+    )
+    assert verifier == _production_verifier_fixture()
+    completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" not in completed
+    assert service_install._recorded_file_matches(completed, config)
+    assert len(completed["configuration_migrations"]) == 1
+
+    repeated = service_install._migrate_founder_capability_configuration(completed)
+    assert repeated == verifier
+    assert len(
+        json.loads(manifest_path.read_text(encoding="utf-8"))[
+            "configuration_migrations"
+        ]
+    ) == 1
+
+
+def test_rollback_reconciles_interrupted_configuration_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_root = tmp_path / "service"
+    package = service_root / "bin" / "keeper-authority.pyz"
+    backup_path = service_root / "backups" / "keeper-authority-old.pyz"
+    config = service_root / "config" / "service.json"
+    package.parent.mkdir(parents=True)
+    backup_path.parent.mkdir()
+    config.parent.mkdir()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("__main__.py", "print('candidate')\n")
+    with zipfile.ZipFile(backup_path, "w") as archive:
+        archive.writestr("__main__.py", "print('old')\n")
+    config.write_text(
+        json.dumps({"schema_version": 2, "service_name": SERVICE_NAME}),
+        encoding="utf-8",
+    )
+    candidate_digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    old_digest = hashlib.sha256(backup_path.read_bytes()).hexdigest().upper()
+    manifest_path = service_root / "audit" / "machine-artifacts.json"
+    manifest_path.parent.mkdir()
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "service_name": SERVICE_NAME,
+        "installation_completed_at": "2026-01-01T00:00:00+00:00",
+        "artifacts": [],
+        "commands": [],
+        "package_upgrade_claim": {
+            "schema_version": 1,
+            "claimed_at": "2026-01-01T00:00:00+00:00",
+            "previous_package_sha256": old_digest,
+            "package_sha256": candidate_digest,
+            "backup_path": str(backup_path.resolve()),
+        },
+    }
+    for path in (package, backup_path, config):
+        service_install._record_file(manifest, path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(service_install, "SERVICE_ROOT", service_root)
+    monkeypatch.setattr(service_install, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(
+        service_install,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "STATE: STOPPED\n"
+        ),
+    )
+    monkeypatch.setattr(
+        service_install,
+        "_founder_verifier_configuration",
+        _production_verifier_fixture,
+    )
+    real_atomic_write = atomic_write_json
+
+    def write_then_interrupt(path: Path, value: object) -> None:
+        real_atomic_write(path, value)
+        if path == config:
+            raise RuntimeError("simulated config interruption before rollback")
+
+    monkeypatch.setattr(service_install, "atomic_write_json", write_then_interrupt)
+    with pytest.raises(RuntimeError, match="before rollback"):
+        service_install._migrate_founder_capability_configuration(manifest)
+    interrupted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" in interrupted
+
+    wrong_backup = tmp_path / "wrong-but-byte-identical-old.pyz"
+    wrong_backup.write_bytes(backup_path.read_bytes())
+    before_wrong_request = {
+        "manifest": manifest_path.read_bytes(),
+        "config": config.read_bytes(),
+        "package": package.read_bytes(),
+    }
+    with pytest.raises(PermissionError, match="rollback identity differs"):
+        service_install.rollback_package(wrong_backup, old_digest)
+    assert manifest_path.read_bytes() == before_wrong_request["manifest"]
+    assert config.read_bytes() == before_wrong_request["config"]
+    assert package.read_bytes() == before_wrong_request["package"]
+
+    monkeypatch.setattr(service_install, "atomic_write_json", real_atomic_write)
+    result = service_install.rollback_package(backup_path, old_digest)
+    assert result["package_sha256"] == old_digest
+    assert package.read_bytes() == backup_path.read_bytes()
+    completed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "configuration_migration_claim" not in completed
+    assert "package_upgrade_claim" not in completed
+    assert service_install._recorded_file_matches(completed, config)
+    assert json.loads(config.read_text(encoding="utf-8"))["schema_version"] == 3
 
 
 def test_rollback_verification_accepts_exact_legacy_package_only(tmp_path: Path) -> None:
