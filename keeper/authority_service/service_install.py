@@ -774,7 +774,7 @@ def _provision_provider_host_authority_identity(
     signer = WindowsCngEnvelopeIdentity(
         **identity_arguments,
         create_if_missing=existing is None,
-        machine_access_sids=access_sids if existing is None else (),
+        machine_access_sids=access_sids,
     )
     public = signer.public_configuration()
     record = {
@@ -787,12 +787,6 @@ def _provision_provider_host_authority_identity(
     if existing is not None and existing != record:
         raise PermissionError(
             "Provider Host Authority identity differs from its lifecycle record"
-        )
-    if existing is not None:
-        WindowsCngEnvelopeIdentity(
-            **identity_arguments,
-            create_if_missing=False,
-            machine_access_sids=access_sids,
         )
     manifest["provider_host_authority_identity"] = record
     _persist_manifest(manifest)
