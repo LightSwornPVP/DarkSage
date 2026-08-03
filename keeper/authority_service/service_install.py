@@ -383,7 +383,8 @@ def verified_recovery_backup(destination: Path) -> dict[str, Any]:
     if destination.exists() or evidence_path.exists():
         raise PermissionError("recovery preimage destination already exists")
     source_files = _recovery_tree_files(source)
-    shutil.copytree(source, destination)
+    _create_secure_recovery_destination(destination)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
     copied_files = _recovery_tree_files(destination)
     if copied_files != source_files:
         raise PermissionError("recovery preimage differs from protected state")
@@ -410,6 +411,29 @@ def verified_recovery_backup(destination: Path) -> dict[str, Any]:
     manifest.setdefault("recovery_preimages", []).append(event)
     _persist_manifest(manifest)
     return event
+
+
+def _create_secure_recovery_destination(destination: Path) -> None:
+    """Create an empty exact-ACL directory before any protected byte is copied."""
+    destination.mkdir(exist_ok=False)
+    try:
+        service_sid = account_sid(rf"NT SERVICE\{SERVICE_NAME}")
+        policy = exact_path_policy(
+            destination,
+            [
+                ("S-1-5-18", "full"),
+                ("S-1-5-32-544", "full"),
+                (service_sid, "full"),
+            ],
+            integrity="medium",
+        )
+        apply_path_security(destination, policy)
+    except BaseException:
+        try:
+            destination.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 def _recovery_tree_files(root: Path) -> list[dict[str, Any]]:

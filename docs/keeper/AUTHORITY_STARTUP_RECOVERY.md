@@ -34,10 +34,14 @@ python -m keeper.authority_service.service_install `
   backup-recovery-preimage C:\path\to\new-exclusive-preimage
 ```
 
-The command refuses an existing destination, rejects reparse points, hashes every
-copied file, compares the copy to the stopped protected source, writes a sibling
-manifest, and records the public manifest/tree identities in the lifecycle
-manifest. A retry must use a new destination; it never overwrites a preimage.
+The command refuses an existing destination, rejects reparse points, and creates
+the empty destination with a protected inheritable DACL allowing only Local
+System, Administrators, and the KeeperAuthority service SID before copying any
+protected byte. If that exact ACL cannot be applied and verified, the empty
+destination is removed and the operation fails closed. It then hashes every copied
+file, compares the copy to the stopped protected source, writes a sibling manifest,
+and records the public manifest/tree identities in the lifecycle manifest. A retry
+must use a new destination; it never overwrites a preimage.
 
 The authorized upgrade then uses `upgrade-package` with the exact candidate and
 current-package SHA-256 values plus the exact sibling preimage-manifest path. The
