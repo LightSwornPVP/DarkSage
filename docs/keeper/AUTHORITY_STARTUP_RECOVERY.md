@@ -1,6 +1,6 @@
-# KeeperAuthority 1.7.2 startup recovery
+# KeeperAuthority 1.7.3 startup recovery
 
-KeeperAuthority 1.7.2 is the bounded recovery release for a protocol-7 upgrade
+KeeperAuthority 1.7.3 is the bounded recovery release for a protocol-7 upgrade
 that may have committed Authority schema 6 before Provider Host machine-key
 initialization failed. Protocol 7 and schema 6 are unchanged.
 
@@ -72,7 +72,7 @@ upgrade nor rollback path can strand a manifest/config mismatch.
 After the one separately authorized start, supported diagnostics must show all of
 the following before Phase 2 continues:
 
-- service version 1.7.2, protocol 7, schema 6;
+- service version 1.7.3, protocol 7, schema 6;
 - the expected service-key identity;
 - the expected registration, qualification, and attempt counts;
 - no active or uncertain provider work;

@@ -34,7 +34,7 @@
 - The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
   attempt histories require a future paged signed-snapshot/fence protocol.
-- This source requires KeeperAuthority 1.7.2, protocol 7, and schema 6. Application
+- This source requires KeeperAuthority 1.7.3, protocol 7, and schema 6. Application
   packaging never installs, restarts, updates, or reconfigures that service.
 - The Codex subscription provider is authoring-only. Independent approval remains
   paused until a separately qualified reviewer provider is available.

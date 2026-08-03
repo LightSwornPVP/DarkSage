@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Correct the Provider Host machine-key security-descriptor binding, validate
+  the exact non-exportable CNG identity and protected owner/DACL policy, and
+  reconcile an exact interrupted key without deleting or recreating it.
 - Replace the default Keeper desktop with a PySide6/Qt Quick executive control center using the official lighthouse identity, 13 source-backed product areas, durable Keeper Assistant conversation, responsive layouts, and protected-path-redacted service health.
 - Add a pinned standalone Windows build plus hashed per-user install, repair, upgrade, one-generation rollback, status, and data-preserving uninstall lifecycle.
 - Require an authenticated Executive commit receipt before KeeperAuthority can bind

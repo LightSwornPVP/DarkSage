@@ -20,9 +20,15 @@ _RSA_SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420"
 _NCRYPT_MACHINE_KEY_FLAG = 0x00000020
 _NCRYPT_SILENT_FLAG = 0x00000040
 _NCRYPT_PAD_PKCS1_FLAG = 0x00000002
+_OWNER_SECURITY_INFORMATION = 0x00000001
 _DACL_SECURITY_INFORMATION = 0x00000004
+_KEY_SECURITY_INFORMATION = (
+    _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
+)
 _SDDL_REVISION_1 = 1
 _RESTRICTED_CODE_SID = "S-1-5-12"
+_SOFTWARE_KEY_STORAGE_PROVIDER = "Microsoft Software Key Storage Provider"
+_MAX_CNG_PROPERTY_BYTES = 1024 * 1024
 
 
 class _BcryptRsaKeyBlob(ctypes.Structure):
@@ -342,21 +348,34 @@ def _open_key(
     _check(
         api.NCryptOpenStorageProvider(
             ctypes.byref(provider),
-            "Microsoft Software Key Storage Provider",
+            _SOFTWARE_KEY_STORAGE_PROVIDER,
             0,
         ),
         "provider open",
     )
+    if machine_key:
+        try:
+            _validate_machine_storage_provider(api, provider)
+        except BaseException:
+            api.NCryptFreeObject(provider)
+            raise
     flags = _NCRYPT_SILENT_FLAG | (
         _NCRYPT_MACHINE_KEY_FLAG if machine_key else 0
     )
     status = api.NCryptOpenKey(provider, ctypes.byref(key), name, 0, flags)
     if status == 0:
-        if owner_sid is not None:
-            _protect_user_key(api, key, owner_sid)
-        elif machine_access_sids:
-            _protect_machine_key(api, key, machine_access_sids)
-        return provider, key
+        try:
+            if machine_key:
+                _validate_machine_key(api, key, name)
+            if owner_sid is not None:
+                _protect_user_key(api, key, owner_sid)
+            elif machine_access_sids:
+                _protect_machine_key(api, key, machine_access_sids)
+            return provider, key
+        except BaseException:
+            api.NCryptFreeObject(key)
+            api.NCryptFreeObject(provider)
+            raise
     if status & 0xFFFFFFFF not in {0x80090016, 0x8009000D}:
         api.NCryptFreeObject(provider)
         _check(status, "key open")
@@ -392,6 +411,8 @@ def _open_key(
             "key length",
         )
         _check(api.NCryptFinalizeKey(key, _NCRYPT_SILENT_FLAG), "key finalization")
+        if machine_key:
+            _validate_machine_key(api, key, name)
         if owner_sid is not None:
             _protect_user_key(api, key, owner_sid)
         elif machine_access_sids:
@@ -423,19 +444,148 @@ def _protect_machine_key(
     api: Any, key: ctypes.c_void_p, access_sids: tuple[str, ...]
 ) -> None:
     """Persist an exact machine-key DACL supplied by elevated lifecycle code."""
-    with _key_security_descriptor_for_sddl(
-        _machine_key_security_sddl(access_sids)
-    ) as (descriptor, length):
+    expected_sddl = _machine_key_security_sddl(access_sids)
+    with _key_security_descriptor_for_sddl(expected_sddl) as (
+        descriptor,
+        length,
+    ):
         _check(
             api.NCryptSetProperty(
                 key,
                 "Security Descr",
                 descriptor,
                 length,
-                _DACL_SECURITY_INFORMATION,
+                _KEY_SECURITY_INFORMATION,
             ),
-            "machine-key DACL",
+            "machine-key owner and DACL",
         )
+    _verify_machine_key_security(api, key, expected_sddl)
+
+
+def _validate_machine_storage_provider(
+    api: Any, provider: ctypes.c_void_p
+) -> None:
+    support = _ncrypt_dword_property(api, provider, "Security Descr Support")
+    if support != 1:
+        raise PermissionError(
+            "Provider Host machine-key storage provider cannot enforce security "
+            "descriptors"
+        )
+
+
+def _validate_machine_key(
+    api: Any, key: ctypes.c_void_p, expected_name: str
+) -> None:
+    """Reject a same-name object unless every non-secret key property agrees."""
+    properties = {
+        "name": _ncrypt_string_property(api, key, "Name"),
+        "unique_name": _ncrypt_string_property(api, key, "Unique Name"),
+        "algorithm": _ncrypt_string_property(api, key, "Algorithm Name"),
+        "length": _ncrypt_dword_property(api, key, "Length"),
+        "export_policy": _ncrypt_dword_property(api, key, "Export Policy"),
+    }
+    if (
+        properties["name"] != expected_name
+        or not properties["unique_name"]
+        or properties["algorithm"] != "RSA"
+        or properties["length"] != 3072
+        or properties["export_policy"] != 0
+    ):
+        raise PermissionError(
+            "existing Provider Host machine-key identity differs"
+        )
+
+
+def _verify_machine_key_security(
+    api: Any, key: ctypes.c_void_p, expected_sddl: str
+) -> None:
+    live = _ncrypt_property(
+        api,
+        key,
+        "Security Descr",
+        flags=_KEY_SECURITY_INFORMATION,
+    )
+    live_buffer = ctypes.create_string_buffer(live)
+    live_descriptor = ctypes.cast(live_buffer, wintypes.LPVOID)
+    with _key_security_descriptor_for_sddl(expected_sddl) as (
+        expected_descriptor,
+        _expected_length,
+    ):
+        expected = _security_descriptor_to_sddl(
+            expected_descriptor, _KEY_SECURITY_INFORMATION
+        )
+    actual = _security_descriptor_to_sddl(
+        live_descriptor, _KEY_SECURITY_INFORMATION
+    )
+    if actual != expected:
+        raise PermissionError(
+            "Provider Host machine-key security policy did not verify exactly"
+        )
+
+
+def _ncrypt_property(
+    api: Any,
+    handle: ctypes.c_void_p,
+    name: str,
+    *,
+    flags: int = 0,
+) -> bytes:
+    required = wintypes.DWORD()
+    _check(
+        api.NCryptGetProperty(
+            handle,
+            name,
+            None,
+            0,
+            ctypes.byref(required),
+            flags,
+        ),
+        f"{name} property size",
+    )
+    if required.value <= 0 or required.value > _MAX_CNG_PROPERTY_BYTES:
+        raise PermissionError(f"Provider Host CNG {name} property size is invalid")
+    buffer = ctypes.create_string_buffer(required.value)
+    copied = wintypes.DWORD()
+    _check(
+        api.NCryptGetProperty(
+            handle,
+            name,
+            buffer,
+            required.value,
+            ctypes.byref(copied),
+            flags,
+        ),
+        f"{name} property",
+    )
+    if copied.value != required.value:
+        raise PermissionError(f"Provider Host CNG {name} property changed")
+    return buffer.raw[: copied.value]
+
+
+def _ncrypt_string_property(
+    api: Any, handle: ctypes.c_void_p, name: str
+) -> str:
+    raw = _ncrypt_property(api, handle, name)
+    if len(raw) < 2 or len(raw) % 2:
+        raise PermissionError(f"Provider Host CNG {name} property is invalid")
+    try:
+        value = raw.decode("utf-16-le")
+    except UnicodeDecodeError as error:
+        raise PermissionError(
+            f"Provider Host CNG {name} property is invalid"
+        ) from error
+    if not value.endswith("\x00") or "\x00" in value[:-1]:
+        raise PermissionError(f"Provider Host CNG {name} property is invalid")
+    return value[:-1]
+
+
+def _ncrypt_dword_property(
+    api: Any, handle: ctypes.c_void_p, name: str
+) -> int:
+    raw = _ncrypt_property(api, handle, name)
+    if len(raw) != ctypes.sizeof(wintypes.DWORD):
+        raise PermissionError(f"Provider Host CNG {name} property is invalid")
+    return int.from_bytes(raw, "little")
 
 
 @contextmanager
@@ -454,20 +604,7 @@ def _key_security_descriptor(
 def _key_security_descriptor_for_sddl(
     sddl: str,
 ) -> Iterator[tuple[wintypes.LPVOID, int]]:
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.LPVOID),
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = (
-        wintypes.BOOL
-    )
-    kernel32.GetSecurityDescriptorLength.argtypes = [wintypes.LPVOID]
-    kernel32.GetSecurityDescriptorLength.restype = wintypes.DWORD
-    kernel32.LocalFree.restype = wintypes.HLOCAL
+    advapi32, kernel32 = _security_descriptor_apis()
     descriptor = wintypes.LPVOID()
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl,
@@ -480,12 +617,75 @@ def _key_security_descriptor_for_sddl(
             "Provider Host key DACL creation failed",
         )
     try:
-        length = int(kernel32.GetSecurityDescriptorLength(descriptor))
+        length = int(advapi32.GetSecurityDescriptorLength(descriptor))
         if length <= 0:
             raise OSError("Provider Host key DACL length is invalid")
         yield descriptor, length
     finally:
         kernel32.LocalFree(descriptor)
+
+
+def _security_descriptor_to_sddl(
+    descriptor: wintypes.LPVOID, security_information: int
+) -> str:
+    advapi32, kernel32 = _security_descriptor_apis()
+    value = wintypes.LPWSTR()
+    length = wintypes.DWORD()
+    if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        _SDDL_REVISION_1,
+        security_information,
+        ctypes.byref(value),
+        ctypes.byref(length),
+    ):
+        raise OSError(
+            ctypes.get_last_error(),
+            "Provider Host key security policy read-back failed",
+        )
+    try:
+        if not value.value or length.value <= 1:
+            raise PermissionError(
+                "Provider Host key security policy read-back is invalid"
+            )
+        return str(value.value)
+    finally:
+        kernel32.LocalFree(value)
+
+
+def _security_descriptor_apis() -> tuple[Any, Any]:
+    if os.name != "nt":
+        raise RuntimeError("Provider Host security descriptors require Windows")
+    try:
+        advapi32: Any = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.LPVOID),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = (
+            wintypes.BOOL
+        )
+        advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = (
+            wintypes.BOOL
+        )
+        advapi32.GetSecurityDescriptorLength.argtypes = [wintypes.LPVOID]
+        advapi32.GetSecurityDescriptorLength.restype = wintypes.DWORD
+        kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+        kernel32.LocalFree.restype = wintypes.HLOCAL
+    except AttributeError as error:
+        raise RuntimeError(
+            "required Windows security descriptor API is unavailable"
+        ) from error
+    return advapi32, kernel32
 
 
 def _key_security_sddl(owner_sid: str) -> str:
@@ -505,7 +705,7 @@ def _machine_key_security_sddl(access_sids: tuple[str, ...]) -> str:
     ):
         raise ValueError("Provider Host machine-key access policy is invalid")
     grants = "".join(f"(A;;GA;;;{sid})" for sid in access_sids)
-    return f"D:P(D;;GA;;;{_RESTRICTED_CODE_SID}){grants}"
+    return f"O:BAD:P(D;;GA;;;{_RESTRICTED_CODE_SID}){grants}"
 
 
 def _check(status: int, operation: str) -> None:
@@ -524,6 +724,7 @@ def _ncrypt() -> Any:
     api.NCryptOpenKey.argtypes = [handle, ctypes.POINTER(handle), wintypes.LPCWSTR, dword, dword]
     api.NCryptCreatePersistedKey.argtypes = [handle, ctypes.POINTER(handle), wintypes.LPCWSTR, wintypes.LPCWSTR, dword, dword]
     api.NCryptSetProperty.argtypes = [handle, wintypes.LPCWSTR, pointer, dword, dword]
+    api.NCryptGetProperty.argtypes = [handle, wintypes.LPCWSTR, pointer, dword, ctypes.POINTER(dword), dword]
     api.NCryptFinalizeKey.argtypes = [handle, dword]
     api.NCryptExportKey.argtypes = [handle, handle, wintypes.LPCWSTR, pointer, pointer, dword, ctypes.POINTER(dword), dword]
     api.NCryptSignHash.argtypes = [handle, pointer, pointer, dword, pointer, dword, ctypes.POINTER(dword), dword]
@@ -533,6 +734,7 @@ def _ncrypt() -> Any:
         api.NCryptOpenKey,
         api.NCryptCreatePersistedKey,
         api.NCryptSetProperty,
+        api.NCryptGetProperty,
         api.NCryptFinalizeKey,
         api.NCryptExportKey,
         api.NCryptSignHash,

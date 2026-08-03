@@ -19,7 +19,7 @@ SID = "S-1-5-21-1000"
 
 
 def test_recovery_release_keeps_protocol_and_schema_stable() -> None:
-    assert SERVICE_VERSION == "1.7.2"
+    assert SERVICE_VERSION == "1.7.3"
     assert PROTOCOL_VERSION == 7
     assert SERVICE_SCHEMA_VERSION == 6
 
@@ -37,7 +37,7 @@ def test_provider_host_identity_failure_leaves_core_available_and_fails_closed(
 
     assert not worker.is_alive()
     diagnostics = core._diagnostics({}, SID)
-    assert diagnostics["service_version"] == "1.7.2"
+    assert diagnostics["service_version"] == "1.7.3"
     assert diagnostics["schema_version"] == 6
     assert diagnostics["provider_host"] == {
         "installed": False,
@@ -166,7 +166,7 @@ def test_schema_five_upgrade_preserves_counts_and_service_key(
 def test_machine_key_policy_is_exact_and_restricted_first() -> None:
     access = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
     assert signing._machine_key_security_sddl(access) == (
-        "D:P(D;;GA;;;S-1-5-12)"
+        "O:BAD:P(D;;GA;;;S-1-5-12)"
         "(A;;GA;;;S-1-5-18)"
         "(A;;GA;;;S-1-5-32-544)"
         "(A;;GA;;;S-1-5-80-123)"
@@ -177,8 +177,13 @@ def test_machine_key_policy_is_exact_and_restricted_first() -> None:
         signing._machine_key_security_sddl(("S-1-5-18", "S-1-5-18"))
 
 
-def test_runtime_machine_key_open_never_creates_missing_key() -> None:
+def test_runtime_machine_key_open_never_creates_missing_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
+    monkeypatch.setattr(
+        signing, "_validate_machine_storage_provider", lambda *_: None
+    )
 
     class Api:
         def NCryptOpenStorageProvider(self, *_: object) -> int:
@@ -258,9 +263,7 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
         "S-1-5-80-123",
     )
     assert signer_calls[1]["create_if_missing"] is False
-    assert signer_calls[1]["machine_access_sids"] == ()
-    assert signer_calls[2]["create_if_missing"] is False
-    assert signer_calls[2]["machine_access_sids"] == (
+    assert signer_calls[1]["machine_access_sids"] == (
         "S-1-5-18",
         "S-1-5-32-544",
         "S-1-5-80-123",
@@ -268,7 +271,7 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
     manifest["provider_host_authority_identity"] = {"changed": True}
     with pytest.raises(PermissionError, match="differs"):
         service_install._provision_provider_host_authority_identity(manifest)
-    assert len(signer_calls) == 3
+    assert len(signer_calls) == 2
 
 
 def test_recovery_preimage_is_exclusive_hashed_and_rerun_safe(
