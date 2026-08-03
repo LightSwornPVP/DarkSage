@@ -301,13 +301,43 @@ def test_recovery_preimage_is_exclusive_hashed_and_rerun_safe(
     monkeypatch.setattr(
         service_install, "_require_service_stopped", lambda _: None
     )
+    applied_security: list[dict[str, Any]] = []
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(
+        service_install,
+        "apply_path_security",
+        lambda path, policy: applied_security.append(policy),
+    )
     destination = tmp_path / "preimage"
 
     with pytest.raises(PermissionError, match="disjoint"):
         service_install.verified_recovery_backup(data / "nested-preimage")
 
+    denied_destination = tmp_path / "denied-preimage"
+    monkeypatch.setattr(
+        service_install,
+        "apply_path_security",
+        lambda *_: (_ for _ in ()).throw(
+            PermissionError("synthetic recovery ACL rejection")
+        ),
+    )
+    with pytest.raises(PermissionError, match="ACL rejection"):
+        service_install.verified_recovery_backup(denied_destination)
+    assert not denied_destination.exists()
+    monkeypatch.setattr(
+        service_install,
+        "apply_path_security",
+        lambda path, policy: applied_security.append(policy),
+    )
+
     result = service_install.verified_recovery_backup(destination)
 
+    assert len(applied_security) == 1
+    applied_aces = applied_security[0]["aces"]
+    assert isinstance(applied_aces, list)
+    assert [
+        item["trustee_sid"] for item in applied_aces
+    ] == ["S-1-5-18", "S-1-5-32-544", "S-1-5-80-123"]
     assert len(result["tree_sha256"]) == 64
     assert Path(str(result["manifest"])).is_file()
     assert (destination / "authority.db").read_bytes() == (

@@ -272,6 +272,8 @@ def test_upgrade_installs_exact_frozen_bytes_and_captures_exact_rollback(
         "build_service_package",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upgrade rebuilt package")),
     )
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "apply_path_security", lambda *_: None)
     preimage_manifest = _capture_recovery_preimage(
         service_root, tmp_path / "recovery-preimage"
     )
