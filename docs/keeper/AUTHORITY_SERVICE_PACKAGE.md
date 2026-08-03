@@ -49,14 +49,20 @@ authorized digest. It does not rebuild from source:
 python -m keeper.authority_service.service_install upgrade-package `
   --package C:\tmp\keeper-authority-release\keeper-authority.pyz `
   --expected-sha256 <AUTHORIZED_NEW_SHA256> `
-  --expected-current-sha256 <AUTHORIZED_INSTALLED_SHA256>
+  --expected-current-sha256 <AUTHORIZED_INSTALLED_SHA256> `
+  --recovery-preimage-manifest <AUTHORIZED_PREIMAGE_MANIFEST_PATH>
 ```
 
 The lifecycle verifies the candidate before reading or replacing the installed
 package, requires the installed package to match its separately authorized
 current digest, captures and verifies those exact old bytes as rollback, copies the candidate to a
 staging file, re-verifies the staged bytes, atomically replaces the installed
-package, and records the exact package and source-tree identities. The service
+package. Before replacement it persists an exact claim binding the candidate,
+current package, rollback artifact, release metadata, Provider Host identity, and
+the revalidated stopped-state recovery preimage. A retry reconciles only those
+recorded identities and safely completes the same operation; the exact
+claim-recorded backup remains eligible for supported rollback. It then records the
+exact package and source-tree identities. The service
 must already be stopped through the separately authorized lifecycle.
 
 Rollback restores the exact captured installed byte stream. Release handoffs

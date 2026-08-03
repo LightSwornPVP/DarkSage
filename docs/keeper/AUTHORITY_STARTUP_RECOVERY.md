@@ -40,10 +40,20 @@ manifest, and records the public manifest/tree identities in the lifecycle
 manifest. A retry must use a new destination; it never overwrites a preimage.
 
 The authorized upgrade then uses `upgrade-package` with the exact candidate and
-current-package SHA-256 values. It captures the exact package rollback artifact,
+current-package SHA-256 values plus the exact sibling preimage-manifest path. The
+lifecycle re-hashes that manifest and both stopped-state trees, requires the
+preimage to be canonically disjoint from protected state, and binds its manifest,
+tree, and destination identities into a durable package-upgrade claim before
+replacement. It captures the exact package rollback artifact,
 provisions/verifies the Provider Host identity, installs frozen candidate bytes,
 and records the public identity. Any identity or lifecycle mismatch rejects before
 package replacement.
+
+If execution is interrupted after the claim, invoking the same exact authorized
+upgrade reconciles only the recorded old or candidate digest and completes the
+same operation. The exact claim-recorded backup is also accepted by the supported
+rollback command before an upgrade event exists. Any third digest fails closed as
+uncertain. Upgrade event creation and claim removal are one atomic manifest write.
 
 ## Post-start acceptance
 
@@ -57,6 +67,7 @@ the following before Phase 2 continues:
 - Provider Host state `NOT_CONFIGURED`, `INITIALIZING`, `UNAVAILABLE`, or the
   expected enrolled state, without any provider execution;
 - package and lifecycle provenance matching the authorized hashes.
+- no outstanding `package_upgrade_claim` or `package_rollback_claim`.
 
 `UNAVAILABLE` with `IDENTITY_INITIALIZATION_FAILED` is a safe diagnostic state,
 not permission to enroll, register, qualify, retry, or execute. Those operations

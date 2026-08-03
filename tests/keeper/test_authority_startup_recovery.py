@@ -303,6 +303,9 @@ def test_recovery_preimage_is_exclusive_hashed_and_rerun_safe(
     )
     destination = tmp_path / "preimage"
 
+    with pytest.raises(PermissionError, match="disjoint"):
+        service_install.verified_recovery_backup(data / "nested-preimage")
+
     result = service_install.verified_recovery_backup(destination)
 
     assert len(result["tree_sha256"]) == 64
@@ -314,3 +317,8 @@ def test_recovery_preimage_is_exclusive_hashed_and_rerun_safe(
         service_install.verified_recovery_backup(destination)
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert persisted["recovery_preimages"] == [result]
+    (data / "authority.db").write_bytes(b"changed-after-preimage")
+    with pytest.raises(PermissionError, match="no longer matches"):
+        service_install._verified_recovery_preimage(
+            persisted, Path(str(result["manifest"]))
+        )

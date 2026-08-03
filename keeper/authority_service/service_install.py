@@ -373,6 +373,13 @@ def verified_recovery_backup(destination: Path) -> dict[str, Any]:
         )
     destination = destination.resolve()
     evidence_path = destination.with_name(destination.name + "-manifest.json")
+    protected_root = SERVICE_ROOT.resolve()
+    if _paths_overlap(destination, protected_root) or _paths_overlap(
+        evidence_path, protected_root
+    ):
+        raise PermissionError(
+            "recovery preimage must be disjoint from protected service state"
+        )
     if destination.exists() or evidence_path.exists():
         raise PermissionError("recovery preimage destination already exists")
     source_files = _recovery_tree_files(source)
@@ -433,10 +440,81 @@ def _canonical_sha256(value: object) -> str:
     ).hexdigest().upper()
 
 
+def _paths_overlap(first: Path, second: Path) -> bool:
+    first = first.resolve()
+    second = second.resolve()
+    return (
+        first == second
+        or first.is_relative_to(second)
+        or second.is_relative_to(first)
+    )
+
+
+def _verified_recovery_preimage(
+    manifest: dict[str, Any], evidence_path: Path
+) -> dict[str, str]:
+    """Revalidate the exact stopped-state preimage bound to an upgrade."""
+    evidence_path = evidence_path.resolve(strict=True)
+    attributes = int(getattr(evidence_path.lstat(), "st_file_attributes", 0))
+    if evidence_path.is_symlink() or attributes & 0x400 or not evidence_path.is_file():
+        raise PermissionError("recovery preimage manifest is not a regular file")
+    protected_root = SERVICE_ROOT.resolve(strict=True)
+    if _paths_overlap(evidence_path, protected_root):
+        raise PermissionError(
+            "recovery preimage manifest must be disjoint from protected service state"
+        )
+    recorded = manifest.get("recovery_preimages")
+    if not isinstance(recorded, list):
+        raise PermissionError("recovery preimage is not lifecycle-recorded")
+    matches = [
+        item
+        for item in recorded
+        if isinstance(item, dict)
+        and Path(str(item.get("manifest", ""))).resolve() == evidence_path
+    ]
+    if len(matches) != 1:
+        raise PermissionError("recovery preimage identity is not unique")
+    event = matches[0]
+    manifest_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest().upper()
+    if str(event.get("manifest_sha256", "")).upper() != manifest_sha256:
+        raise PermissionError("recovery preimage manifest digest differs")
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PermissionError("recovery preimage manifest is invalid") from error
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        raise PermissionError("recovery preimage manifest schema is invalid")
+    source = Path(str(evidence.get("source", ""))).resolve(strict=True)
+    expected_source = (SERVICE_ROOT / "data").resolve(strict=True)
+    destination = Path(str(evidence.get("destination", ""))).resolve(strict=True)
+    if source != expected_source or _paths_overlap(destination, protected_root):
+        raise PermissionError("recovery preimage path identity differs")
+    if str(event.get("destination", "")) != str(destination):
+        raise PermissionError("recovery preimage destination differs")
+    copied_files = _recovery_tree_files(destination)
+    source_files = _recovery_tree_files(source)
+    evidence_files = evidence.get("files")
+    tree_sha256 = _canonical_sha256(copied_files)
+    if (
+        evidence_files != copied_files
+        or source_files != copied_files
+        or str(evidence.get("tree_sha256", "")).upper() != tree_sha256
+        or str(event.get("tree_sha256", "")).upper() != tree_sha256
+    ):
+        raise PermissionError("recovery preimage no longer matches protected state")
+    return {
+        "destination": str(destination),
+        "manifest": str(evidence_path),
+        "manifest_sha256": manifest_sha256,
+        "tree_sha256": tree_sha256,
+    }
+
+
 def upgrade_package(
     package_source: Path,
     expected_package_sha256: str,
     expected_current_sha256: str,
+    recovery_preimage_manifest: Path,
 ) -> dict[str, Any]:
     _require_admin()
     candidate = verify_service_package(package_source, expected_package_sha256)
@@ -444,16 +522,56 @@ def upgrade_package(
         raise PermissionError("Authority upgrade candidate must be outside protected service state")
     manifest = _load_completed_manifest()
     _require_service_stopped("upgrade")
+    preimage = _verified_recovery_preimage(manifest, recovery_preimage_manifest)
     package = SERVICE_ROOT / "bin" / "keeper-authority.pyz"
-    if not package.is_file() or not _recorded_file_matches(manifest, package):
-        raise PermissionError(
-            "installed Authority Service package does not match its manifest"
-        )
-    current = verify_rollback_package(package, expected_current_sha256)
-    old_digest = current.package_sha256
-    backup_path = (
+    if not package.is_file():
+        raise PermissionError("installed Authority Service package is unavailable")
+    current_digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    expected_current_sha256 = expected_current_sha256.upper()
+    completed = _completed_upgrade(
+        manifest,
+        package,
+        candidate.package_sha256,
+        expected_current_sha256,
+        preimage,
+    )
+    if completed is not None:
+        founder_verifier = _migrate_founder_capability_configuration(manifest)
+        return _upgrade_result(manifest, completed, founder_verifier)
+    claim = manifest.get("package_upgrade_claim")
+    if claim is None:
+        if (
+            current_digest != expected_current_sha256
+            or not _recorded_file_matches(manifest, package)
+        ):
+            raise PermissionError(
+                "installed Authority Service package does not match its manifest"
+            )
+        current = verify_rollback_package(package, expected_current_sha256)
+        old_digest = current.package_sha256
+    else:
+        old_digest = expected_current_sha256
+    expected_backup_path = (
         SERVICE_ROOT / "backups" / f"keeper-authority-{old_digest}.pyz"
     )
+    preliminary_claim = {
+        "schema_version": 1,
+        "previous_package_sha256": old_digest,
+        "package_sha256": candidate.package_sha256,
+        "source_tree_sha256": candidate.manifest["source_tree_sha256"],
+        "service_version": candidate.manifest["service_version"],
+        "protocol_version": candidate.manifest["protocol_version"],
+        "schema_version_target": candidate.manifest["service_schema_version"],
+        "backup_path": str(expected_backup_path),
+        "recovery_preimage": preimage,
+    }
+    if claim is not None and (
+        not isinstance(claim, dict)
+        or any(claim.get(key) != value for key, value in preliminary_claim.items())
+        or not isinstance(claim.get("claimed_at"), str)
+    ):
+        raise PermissionError("Authority package upgrade claim differs")
+    backup_path = expected_backup_path
     if not backup_path.exists():
         shutil.copy2(package, backup_path)
         _record_file(manifest, backup_path)
@@ -475,54 +593,132 @@ def upgrade_package(
         provider_host_identity = _provision_provider_host_authority_identity(
             manifest
         )
+    if _verified_recovery_preimage(
+        manifest, recovery_preimage_manifest
+    ) != preimage:
+        raise PermissionError("recovery preimage changed during upgrade preparation")
+    expected_claim = {
+        **preliminary_claim,
+        "provider_host_authority_key_id": (
+            provider_host_identity["key_id"]
+            if provider_host_identity is not None
+            else None
+        ),
+        "recovery_preimage": preimage,
+    }
+    if claim is None:
+        claim = dict(expected_claim)
+        claim["claimed_at"] = _now()
+        manifest["package_upgrade_claim"] = claim
+        _persist_manifest(manifest)
+    elif (
+        not isinstance(claim, dict)
+        or any(claim.get(key) != value for key, value in expected_claim.items())
+        or not isinstance(claim.get("claimed_at"), str)
+    ):
+        raise PermissionError("Authority package upgrade claim differs")
+    current_digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
+    if current_digest not in {old_digest, candidate.package_sha256}:
+        raise PermissionError("Authority package upgrade state is uncertain")
     temporary = package.with_suffix(".pyz.upgrade")
-    if temporary.exists():
-        raise PermissionError(
-            "Authority Service upgrade staging file already exists"
-        )
     try:
-        shutil.copy2(candidate.path, temporary)
-        staged = verify_service_package(temporary, candidate.package_sha256)
-        new_digest = staged.package_sha256
-        os.replace(temporary, package)
+        if current_digest == old_digest:
+            if temporary.exists():
+                attributes = int(
+                    getattr(temporary.lstat(), "st_file_attributes", 0)
+                )
+                if temporary.is_symlink() or attributes & 0x400 or not temporary.is_file():
+                    raise PermissionError(
+                        "Authority Service upgrade staging path is unsafe"
+                    )
+                temporary.unlink()
+            shutil.copy2(candidate.path, temporary)
+            staged = verify_service_package(temporary, candidate.package_sha256)
+            os.replace(temporary, package)
+            current_digest = staged.package_sha256
     finally:
         if temporary.exists():
             temporary.unlink()
-    _record_file(manifest, package)
-    manifest.setdefault("upgrades", []).append(
-        {
-            "upgraded_at": _now(),
-            "previous_package_sha256": old_digest,
-            "package_sha256": new_digest,
-            "source_tree_sha256": candidate.manifest["source_tree_sha256"],
-            "service_version": candidate.manifest["service_version"],
-            "protocol_version": candidate.manifest["protocol_version"],
-            "schema_version": candidate.manifest["service_schema_version"],
-            "backup_path": str(backup_path),
-            "provider_host_authority_key_id": (
-                provider_host_identity["key_id"]
-                if provider_host_identity is not None
-                else None
-            ),
-        }
-    )
-    manifest["package_source_tree_sha256"] = candidate.manifest["source_tree_sha256"]
-    _persist_manifest(manifest)
-    # The new package deliberately accepts schema 2 in fail-closed mode, so
-    # a configuration-migration failure cannot make the stopped service
-    # unstartable. Launch authorization remains disabled until schema 3 lands.
+    if current_digest != candidate.package_sha256:
+        raise PermissionError("installed Authority package digest differs")
     founder_verifier = _migrate_founder_capability_configuration(manifest)
+    event = _complete_package_upgrade(manifest, package, claim)
+    return _upgrade_result(manifest, event, founder_verifier)
+
+
+def _completed_upgrade(
+    manifest: dict[str, Any],
+    package: Path,
+    candidate_sha256: str,
+    previous_sha256: str,
+    preimage: dict[str, str],
+) -> dict[str, Any] | None:
+    recorded = manifest.get("upgrades")
+    if not isinstance(recorded, list) or not recorded:
+        return None
+    latest = recorded[-1]
+    if not isinstance(latest, dict):
+        return None
+    if (
+        latest.get("package_sha256") != candidate_sha256
+        or latest.get("previous_package_sha256") != previous_sha256
+        or latest.get("recovery_preimage") != preimage
+    ):
+        return None
+    if not _recorded_file_matches(manifest, package):
+        raise PermissionError("completed Authority package differs from its manifest")
+    return latest
+
+
+def _complete_package_upgrade(
+    manifest: dict[str, Any], package: Path, claim: dict[str, Any]
+) -> dict[str, Any]:
+    _record_file(manifest, package)
+    event = {
+        "upgraded_at": _now(),
+        "upgrade_claimed_at": claim["claimed_at"],
+        "previous_package_sha256": claim["previous_package_sha256"],
+        "package_sha256": claim["package_sha256"],
+        "source_tree_sha256": claim["source_tree_sha256"],
+        "service_version": claim["service_version"],
+        "protocol_version": claim["protocol_version"],
+        "schema_version": claim["schema_version_target"],
+        "backup_path": claim["backup_path"],
+        "provider_host_authority_key_id": claim[
+            "provider_host_authority_key_id"
+        ],
+        "recovery_preimage": claim["recovery_preimage"],
+    }
+    manifest.setdefault("upgrades", []).append(event)
+    manifest["package_source_tree_sha256"] = claim["source_tree_sha256"]
+    manifest.pop("package_upgrade_claim", None)
+    _persist_manifest(manifest)
+    return event
+
+
+def _upgrade_result(
+    manifest: dict[str, Any],
+    event: dict[str, Any],
+    founder_verifier: dict[str, object],
+) -> dict[str, Any]:
+    backup = verify_rollback_package(
+        Path(str(event["backup_path"])),
+        str(event["previous_package_sha256"]),
+    )
     return {
-        "package": str(package),
-        "package_sha256": new_digest,
-        "backup": str(backup_path),
-        "backup_sha256": rollback.package_sha256,
-        "source_tree_sha256": candidate.manifest["source_tree_sha256"],
-        "service_version": candidate.manifest["service_version"],
-        "protocol_version": candidate.manifest["protocol_version"],
-        "schema_version": candidate.manifest["service_schema_version"],
+        "package": str(SERVICE_ROOT / "bin" / "keeper-authority.pyz"),
+        "package_sha256": event["package_sha256"],
+        "backup": str(backup.path),
+        "backup_sha256": backup.package_sha256,
+        "source_tree_sha256": event["source_tree_sha256"],
+        "service_version": event["service_version"],
+        "protocol_version": event["protocol_version"],
+        "schema_version": event["schema_version"],
         "founder_issuer_key_id": founder_verifier["key_id"],
-        "provider_host_authority_identity": provider_host_identity,
+        "provider_host_authority_identity": manifest.get(
+            "provider_host_authority_identity"
+        ),
+        "recovery_preimage": event["recovery_preimage"],
     }
 
 
@@ -585,13 +781,23 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
     manifest = _load_completed_manifest()
     _require_service_stopped("rollback")
     recorded = manifest.get("upgrades")
-    if not isinstance(recorded, list) or not recorded:
+    latest = recorded[-1] if isinstance(recorded, list) and recorded else None
+    upgrade_claim = manifest.get("package_upgrade_claim")
+    if isinstance(latest, dict):
+        rollback_identity = latest
+        upgraded_digest = str(latest.get("package_sha256", "")).upper()
+        interrupted_upgrade = False
+    elif isinstance(upgrade_claim, dict):
+        rollback_identity = upgrade_claim
+        upgraded_digest = str(
+            upgrade_claim.get("package_sha256", "")
+        ).upper()
+        interrupted_upgrade = True
+    else:
         raise PermissionError("Authority package rollback is not recorded")
-    latest = recorded[-1]
     if (
-        not isinstance(latest, dict)
-        or latest.get("backup_path") != str(rollback.path)
-        or str(latest.get("previous_package_sha256", "")).upper()
+        rollback_identity.get("backup_path") != str(rollback.path)
+        or str(rollback_identity.get("previous_package_sha256", "")).upper()
         != rollback.package_sha256
     ):
         raise PermissionError("Authority package rollback identity differs")
@@ -601,7 +807,6 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
     if not package.is_file():
         raise PermissionError("installed Authority Service package is unavailable")
     current_digest = hashlib.sha256(package.read_bytes()).hexdigest().upper()
-    upgraded_digest = str(latest.get("package_sha256", "")).upper()
     claim = manifest.get("package_rollback_claim")
     expected_claim = {
         "replaced_package_sha256": upgraded_digest,
@@ -609,9 +814,14 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
         "source_backup_path": str(rollback.path),
     }
     if claim is None:
-        if (
-            current_digest != upgraded_digest
-            or not _recorded_file_matches(manifest, package)
+        supported_digests = (
+            {upgraded_digest, rollback.package_sha256}
+            if interrupted_upgrade
+            else {upgraded_digest}
+        )
+        if current_digest not in supported_digests or (
+            not interrupted_upgrade
+            and not _recorded_file_matches(manifest, package)
         ):
             raise PermissionError(
                 "installed Authority package is not the recorded upgrade"
@@ -662,6 +872,7 @@ def _complete_package_rollback(
     }
     manifest.setdefault("rollbacks", []).append(event)
     manifest.pop("package_rollback_claim", None)
+    manifest.pop("package_upgrade_claim", None)
     _persist_manifest(manifest)
     return {
         "package": str(package),
@@ -939,6 +1150,9 @@ def parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--package", type=Path, required=True)
     upgrade.add_argument("--expected-sha256", required=True)
     upgrade.add_argument("--expected-current-sha256", required=True)
+    upgrade.add_argument(
+        "--recovery-preimage-manifest", type=Path, required=True
+    )
     rollback_package_command = commands.add_parser("rollback-package")
     rollback_package_command.add_argument("--package", type=Path, required=True)
     rollback_package_command.add_argument("--expected-sha256", required=True)
@@ -979,6 +1193,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 options.package,
                 options.expected_sha256,
                 options.expected_current_sha256,
+                options.recovery_preimage_manifest,
             )
         elif options.command == "rollback-package":
             value = rollback_package(options.package, options.expected_sha256)
