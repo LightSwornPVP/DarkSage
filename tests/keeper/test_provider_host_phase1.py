@@ -910,6 +910,49 @@ def test_provider_host_install_repair_update_rollback_uninstall_and_recovery(
     assert installer.logs.is_dir()
 
 
+def test_provider_host_171_to_174_update_is_inert_and_preserves_empty_state(
+    tmp_path: Path,
+) -> None:
+    old_artifact, old_manifest, _ = _host_distribution(
+        tmp_path / "host-171", version="1.7.1", marker=b"host-171"
+    )
+    new_artifact, new_manifest, new_digest = _host_distribution(
+        tmp_path / "host-174", version="1.7.4", marker=b"host-174"
+    )
+    installer = ProviderHostInstaller(tmp_path / "install", tmp_path / "startup")
+    installer.install(
+        old_artifact,
+        version="1.7.1",
+        expected_package_sha256=old_manifest,
+    )
+    assert list(installer.state.iterdir()) == []
+    assert list(installer.logs.iterdir()) == []
+
+    drains: list[str] = []
+    result = installer.update(
+        new_artifact,
+        version="1.7.4",
+        expected_package_sha256=new_manifest,
+        drain=lambda: drains.append("drained"),
+    )
+
+    assert result.version == "1.7.4"
+    assert result.previous_version == "1.7.1"
+    assert result.artifact_sha256 == new_digest
+    assert drains == ["drained"]
+    assert list(installer.state.iterdir()) == []
+    assert list(installer.logs.iterdir()) == []
+    assert not (installer.state / "enrollment-receipt.json").exists()
+    assert not (installer.state / "provider-host.db").exists()
+    status = installer.status()
+    assert status["transaction_pending"] is False
+    assert status["current"]["version"] == "1.7.4"  # type: ignore[index]
+    assert status["current"]["previous_version"] == "1.7.1"  # type: ignore[index]
+    assert str(Path(result.artifact_path).resolve()) in Path(
+        result.startup_path
+    ).read_text(encoding="utf-8")
+
+
 def test_provider_host_package_manifest_rejects_tamper_omission_and_extra_file(
     tmp_path: Path,
 ) -> None:

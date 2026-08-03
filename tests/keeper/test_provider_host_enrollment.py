@@ -32,7 +32,11 @@ from keeper.authority_service.store import AuthorityStore
 from keeper.executive.founder_capability import TestFounderCapabilityVerifier
 from keeper.executive.founder_auth import TestFounderAuthenticator
 from keeper.provider_host.bootstrap import ProviderHostBootstrap
-from keeper.provider_host.cli import _config, _revoked_status
+from keeper.provider_host.cli import (
+    _config,
+    _revoked_status,
+    _validate_authority_compatibility,
+)
 from keeper.provider_host.enrollment_client import ProviderHostEnrollmentClient
 from keeper.provider_host.enrollment import (
     ENROLLMENT_PROOF_PURPOSE,
@@ -1232,3 +1236,38 @@ def test_production_enrollment_cli_fails_closed_on_factory_error(
     monkeypatch.setattr(cli, "_enrollment_client_factory", unavailable)
     assert cli.main(["enroll", "--generation", "1"]) == 2
     assert "exact production enrollment unavailable" in capsys.readouterr().err
+
+
+def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
+    _validate_authority_compatibility(
+        {
+            "service_version": "1.7.4",
+            "protocol_version": 7,
+            "schema_version": 6,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("service_version", "1.7.3"),
+        ("service_version", "1.7.5"),
+        ("protocol_version", 6),
+        ("protocol_version", 8),
+        ("schema_version", 5),
+        ("schema_version", 7),
+    ],
+)
+def test_provider_host_rejects_authority_release_contract_mismatch(
+    field: str, value: object
+) -> None:
+    diagnostics: dict[str, object] = {
+        "service_version": "1.7.4",
+        "protocol_version": 7,
+        "schema_version": 6,
+    }
+    diagnostics[field] = value
+
+    with pytest.raises(PermissionError, match="exact matching KeeperAuthority"):
+        _validate_authority_compatibility(diagnostics)
