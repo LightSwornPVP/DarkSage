@@ -34,12 +34,12 @@
 - The signed restore fence contains one project-scoped Authority snapshot and is
   bounded by the Authority protocol message limit. Extremely large personal-use
   attempt histories require a future paged signed-snapshot/fence protocol.
-- This source requires KeeperAuthority 1.7.6, protocol 7, and schema 6. Application
+- This source requires KeeperAuthority 1.7.7, protocol 7, and schema 6. Application
   packaging never installs, restarts, updates, or reconfigures that service.
 - The Codex subscription provider is authoring-only. Independent approval remains
   paused until a separately qualified reviewer provider is available.
 - Provider Host installation and enrollment are mechanically separate. The
-  1.7.6 Host is release-locked to KeeperAuthority 1.7.6, protocol 7, and schema 6;
+  1.7.7 Host is release-locked to KeeperAuthority 1.7.7, protocol 7, and schema 6;
   older or newer Authority releases fail closed before enrollment. Source 1.7.1
   added the Founder-authenticated protocol-7 enrollment proposal/grant/proof/
   receipt/revocation lifecycle and permits an enrolled Host to start without a

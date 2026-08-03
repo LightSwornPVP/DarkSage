@@ -18,6 +18,7 @@ from keeper.authority_service.restricted_process import (
     WindowsSessionQueryStatus,
     _create_process_with_bounded_restricted_impersonation,
     authenticated_client_environment,
+    authenticated_client_profile_path,
     authenticated_client_windows_session_state,
     authenticated_named_pipe_client,
     authenticated_named_pipe_client_token,
@@ -930,10 +931,14 @@ def test_authenticated_client_environment_uses_exact_impersonation_token(
         "_environment_from_block",
         parse_after_reversion,
     )
+    def check_level(token: int) -> int:
+        checked.append(token)
+        return 2
+
     monkeypatch.setattr(
         restricted_process_module,
         "require_impersonation_level",
-        lambda token: checked.append(token) or 2,
+        check_level,
     )
 
     environment = authenticated_client_environment(84)
@@ -1103,6 +1108,135 @@ def test_authenticated_client_environment_cleanup_failure_rejects_result(
     assert userenv.create_calls == 1
     assert userenv.destroyed == [ctypes.addressof(userenv.buffer)]
     assert advapi32.events[-1] == "no-token"
+
+
+def test_authenticated_client_profile_path_has_exact_worker_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
+    checked: list[int] = []
+    profile = tmp_path / "Founder"
+    profile.mkdir()
+    original_resolve = Path.resolve
+
+    def guarded_resolve(path: Path, strict: bool = False) -> Path:
+        if path == profile:
+            advapi32.events.append("resolve-profile")
+            assert getattr(advapi32.local, "impersonating", False)
+            assert threading.get_ident() != advapi32.service_thread_id
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+    monkeypatch.setattr(
+        restricted_process_module,
+        "require_impersonation_level",
+        lambda token: checked.append(token) or 2,
+    )
+
+    assert authenticated_client_profile_path(84, str(profile)) == str(profile)
+    assert checked == [84]
+    assert advapi32.events.count("impersonate") == 1
+    assert advapi32.events.count("resolve-profile") == 1
+    assert advapi32.events.count("revert") == 1
+    assert advapi32.events.index("impersonate") < advapi32.events.index(
+        "resolve-profile"
+    )
+    assert advapi32.events.index("resolve-profile") < advapi32.events.index(
+        "revert"
+    )
+    assert advapi32.events[-1] == "no-token"
+
+
+def test_authenticated_client_profile_path_impersonation_failure_does_not_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32(impersonate_result=False)
+    kernel32 = _FakeLaunchKernel32()
+    profile = tmp_path / "Founder"
+    profile.mkdir()
+    resolves = 0
+    original_resolve = Path.resolve
+
+    def guarded_resolve(path: Path, strict: bool = False) -> Path:
+        nonlocal resolves
+        if path == profile:
+            resolves += 1
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(PermissionError, match="path impersonation failed"):
+        authenticated_client_profile_path(84, str(profile))
+    assert resolves == 0
+    assert advapi32.events.count("revert") == 0
+
+
+def test_authenticated_client_profile_path_resolution_failure_still_reverts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    advapi32 = _FakeLaunchAdvapi32()
+    kernel32 = _FakeLaunchKernel32()
+    profile = tmp_path / "Founder"
+    profile.mkdir()
+    original_resolve = Path.resolve
+
+    def denied_resolve(path: Path, strict: bool = False) -> Path:
+        if path == profile:
+            assert getattr(advapi32.local, "impersonating", False)
+            raise PermissionError("synthetic path denial")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(Path, "resolve", denied_resolve)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(PermissionError, match="synthetic path denial"):
+        authenticated_client_profile_path(84, str(profile))
+    assert advapi32.events.count("revert") == 1
+    assert advapi32.events[-1] == "no-token"
+
+
+@pytest.mark.parametrize(
+    ("advapi32", "expected"),
+    [
+        (
+            _FakeLaunchAdvapi32(revert_result=False),
+            ProviderLaunchIdentityUncertain,
+        ),
+        (
+            _FakeLaunchAdvapi32(service_post_verification_error=6),
+            ProviderServiceIdentityUncertain,
+        ),
+    ],
+)
+def test_authenticated_client_profile_path_discards_result_when_identity_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    advapi32: _FakeLaunchAdvapi32,
+    expected: type[BaseException],
+) -> None:
+    kernel32 = _FakeLaunchKernel32()
+    profile = tmp_path / "Founder"
+    profile.mkdir()
+    monkeypatch.setattr(restricted_process_module, "_advapi32", lambda: advapi32)
+    monkeypatch.setattr(restricted_process_module, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(
+        restricted_process_module, "require_impersonation_level", lambda token: 2
+    )
+
+    with pytest.raises(expected):
+        authenticated_client_profile_path(84, str(profile))
 
 
 def test_environment_error_five_reports_stage_and_does_not_destroy_null_block(

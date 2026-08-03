@@ -1132,6 +1132,124 @@ def authenticated_client_environment(token: int) -> dict[str, str]:
     return first
 
 
+def authenticated_client_profile_path(token: int, profile: str) -> str:
+    """Resolve one authenticated client's profile on a disposable worker.
+
+    The worker impersonates only the exact named-pipe client token and performs
+    only the read-only canonical path resolution.  The resolved value is not
+    returned to Authority code until reversion and an explicit no-token check
+    both succeed.  The service caller thread never impersonates.
+    """
+    if not isinstance(profile, str) or not profile or not Path(profile).is_absolute():
+        raise PermissionError("authenticated-client profile path is invalid")
+    require_impersonation_level(token)
+    advapi32 = _advapi32()
+    kernel32 = _kernel32()
+    try:
+        _assert_thread_not_impersonating(advapi32=advapi32, kernel32=kernel32)
+    except BaseException as error:
+        raise ProviderServiceIdentityUncertain(
+            "Authority service thread identity is not clean before profile path lookup"
+        ) from error
+    completed = threading.Event()
+    outcome: list[str | BaseException] = []
+
+    def worker() -> None:
+        resolved: str | None = None
+        resolution_error: BaseException | None = None
+        try:
+            _assert_thread_not_impersonating(
+                advapi32=advapi32,
+                kernel32=kernel32,
+            )
+            ctypes.set_last_error(0)
+            if not advapi32.ImpersonateLoggedOnUser(token):
+                error = ctypes.get_last_error()
+                try:
+                    _assert_thread_not_impersonating(
+                        advapi32=advapi32,
+                        kernel32=kernel32,
+                    )
+                except BaseException as verification_error:
+                    outcome.append(verification_error)
+                else:
+                    outcome.append(
+                        PermissionError(
+                            "authenticated-client profile path impersonation failed "
+                            f"(win32_error={error}, "
+                            f"symbolic={_win32_error_name(error)})"
+                        )
+                    )
+                return
+            try:
+                resolved = str(Path(profile).resolve(strict=True))
+            except BaseException as error:
+                resolution_error = error
+            finally:
+                reverted = bool(advapi32.RevertToSelf())
+                revert_error = 0 if reverted else ctypes.get_last_error()
+            try:
+                _assert_thread_not_impersonating(
+                    advapi32=advapi32,
+                    kernel32=kernel32,
+                )
+            except BaseException as verification_error:
+                outcome.append(
+                    ProviderLaunchIdentityUncertain(
+                        "authenticated-client profile path identity reversion "
+                        "could not be verified"
+                    )
+                )
+                outcome.append(verification_error)
+                return
+            if not reverted:
+                outcome.append(
+                    ProviderLaunchIdentityUncertain(
+                        "authenticated-client profile path identity could not be "
+                        "reverted "
+                        f"(win32_error={revert_error}, "
+                        f"symbolic={_win32_error_name(revert_error)})"
+                    )
+                )
+                return
+            if resolution_error is not None:
+                outcome.append(resolution_error)
+                return
+            if resolved is None:
+                outcome.append(
+                    PermissionError(
+                        "authenticated-client profile path produced no result"
+                    )
+                )
+                return
+            outcome.append(resolved)
+        except BaseException as error:
+            outcome.append(error)
+        finally:
+            completed.set()
+
+    validation_thread = threading.Thread(
+        target=worker,
+        name="KeeperAuthenticatedClientProfilePath",
+        daemon=True,
+    )
+    validation_thread.start()
+    completed.wait()
+    validation_thread.join()
+    try:
+        _assert_thread_not_impersonating(advapi32=advapi32, kernel32=kernel32)
+    except BaseException as error:
+        raise ProviderServiceIdentityUncertain(
+            "Authority service thread identity is not clean after profile path lookup"
+        ) from error
+    if not outcome:
+        raise PermissionError("authenticated-client profile path produced no outcome")
+    first = outcome[0]
+    if isinstance(first, BaseException):
+        raise first
+    return first
+
+
 def token_environment(token: int) -> dict[str, str]:
     """Build a user environment from a profile primary token."""
     return _token_environment(

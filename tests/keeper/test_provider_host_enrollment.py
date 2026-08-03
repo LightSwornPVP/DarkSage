@@ -377,8 +377,8 @@ def _update_bootstrap_package(
     executable = package / "KeeperProviderHost.exe"
     library = package / "lib" / "runtime.dll"
     library.parent.mkdir()
-    executable.write_bytes(b"MZ-provider-host-bootstrap-1.7.6")
-    library.write_bytes(b"runtime-1.7.6")
+    executable.write_bytes(b"MZ-provider-host-bootstrap-1.7.7")
+    library.write_bytes(b"runtime-1.7.7")
     files = [
         {
             "path": path.relative_to(package).as_posix(),
@@ -393,7 +393,7 @@ def _update_bootstrap_package(
             {
                 "schema_version": 1,
                 "product": "KeeperProviderHost",
-                "version": "1.7.6",
+                "version": "1.7.7",
                 "files": files,
             }
         ),
@@ -402,7 +402,7 @@ def _update_bootstrap_package(
     manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     bootstrap.installer.update(
         executable,
-        version="1.7.6",
+        version="1.7.7",
         expected_package_sha256=manifest_digest,
         drain=lambda: None,
     )
@@ -1195,13 +1195,18 @@ def test_production_observer_remeasures_exact_user_host_before_enrollment(
         "authenticated_client_environment",
         lambda token: {"USERPROFILE": str(profile), "PATH": str(tmp_path)},
     )
-
-    @contextmanager
-    def identity(token: int):  # type: ignore[no-untyped-def]
-        assert token == 42
-        yield
-
-    monkeypatch.setattr(observer_module, "impersonate_token", identity)
+    monkeypatch.setattr(
+        observer_module,
+        "authenticated_client_profile_path",
+        lambda token, value: str(Path(value).resolve(strict=True)),
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_authenticated_client_provider_host_path_observation",
+        lambda token, **values: observer_module._read_provider_host_path_observation(
+            **values
+        ),
+    )
     signature = {
         "certificate_thumbprint": None,
         "publisher_subject": None,
@@ -1262,6 +1267,189 @@ def test_production_observer_remeasures_exact_user_host_before_enrollment(
     wrong["user_binding"]["session_id"] = 2
     with pytest.raises(PermissionError, match="binding differs"):
         observer.validate_provider_host_enrollment_proposal(wrong, SID)
+
+
+def test_provider_host_path_validation_uses_only_disposable_client_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+    import keeper.authority_service.observer as observer_module
+    import keeper.authority_service.restricted_process as restricted_process_module
+
+    events: list[str] = []
+    local = threading.local()
+    service_thread = threading.get_ident()
+
+    class Kernel32:
+        @staticmethod
+        def GetCurrentThread() -> int:
+            return threading.get_ident()
+
+        @staticmethod
+        def CloseHandle(handle: object) -> bool:
+            del handle
+            return True
+
+    class Advapi32:
+        @staticmethod
+        def OpenThreadToken(
+            thread: int, access: int, open_as_self: bool, output: object
+        ) -> bool:
+            del thread, output
+            assert access == 0x0008
+            assert open_as_self is True
+            if getattr(local, "impersonating", False):
+                events.append("token-present")
+                return True
+            ctypes.set_last_error(1008)
+            events.append("no-token")
+            return False
+
+        @staticmethod
+        def ImpersonateLoggedOnUser(token: int) -> bool:
+            assert token == 42
+            assert threading.get_ident() != service_thread
+            local.impersonating = True
+            events.append("impersonate")
+            return True
+
+        @staticmethod
+        def RevertToSelf() -> bool:
+            events.append("revert")
+            local.impersonating = False
+            return True
+
+    def read_only_observation(**values: object) -> dict[str, Any]:
+        assert values == {
+            "profile": r"C:\Users\Founder",
+            "installation": {"executable_path": r"C:\Host\KeeperProviderHost.exe"},
+            "observed_sid": SID,
+        }
+        assert getattr(local, "impersonating", False)
+        assert threading.get_ident() != service_thread
+        events.append("read-only-host-paths")
+        return {"validated": True}
+
+    monkeypatch.setattr(
+        restricted_process_module, "_advapi32", lambda: Advapi32()
+    )
+    monkeypatch.setattr(
+        restricted_process_module, "_kernel32", lambda: Kernel32()
+    )
+    monkeypatch.setattr(
+        observer_module, "require_impersonation_level", lambda token: 2
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_read_provider_host_path_observation",
+        read_only_observation,
+    )
+
+    result = observer_module._authenticated_client_provider_host_path_observation(
+        42,
+        profile=r"C:\Users\Founder",
+        installation={"executable_path": r"C:\Host\KeeperProviderHost.exe"},
+        observed_sid=SID,
+    )
+
+    assert result == {"validated": True}
+    assert events == [
+        "no-token",
+        "no-token",
+        "impersonate",
+        "read-only-host-paths",
+        "revert",
+        "no-token",
+        "no-token",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["impersonate", "revert"])
+def test_provider_host_path_validation_fails_closed_without_returning_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    import ctypes
+    import keeper.authority_service.observer as observer_module
+    import keeper.authority_service.restricted_process as restricted_process_module
+
+    events: list[str] = []
+    local = threading.local()
+
+    class Kernel32:
+        @staticmethod
+        def GetCurrentThread() -> int:
+            return threading.get_ident()
+
+        @staticmethod
+        def CloseHandle(handle: object) -> bool:
+            del handle
+            return True
+
+    class Advapi32:
+        @staticmethod
+        def OpenThreadToken(
+            thread: int, access: int, open_as_self: bool, output: object
+        ) -> bool:
+            del thread, access, open_as_self, output
+            if getattr(local, "impersonating", False):
+                events.append("token-present")
+                return True
+            ctypes.set_last_error(1008)
+            events.append("no-token")
+            return False
+
+        @staticmethod
+        def ImpersonateLoggedOnUser(token: int) -> bool:
+            del token
+            events.append("impersonate")
+            if failure == "impersonate":
+                ctypes.set_last_error(5)
+                return False
+            local.impersonating = True
+            return True
+
+        @staticmethod
+        def RevertToSelf() -> bool:
+            events.append("revert")
+            if failure == "revert":
+                ctypes.set_last_error(5)
+                return False
+            local.impersonating = False
+            return True
+
+    def read_only_observation(**values: object) -> dict[str, Any]:
+        del values
+        events.append("read-only-host-paths")
+        return {"must_not_escape": True}
+
+    monkeypatch.setattr(
+        restricted_process_module, "_advapi32", lambda: Advapi32()
+    )
+    monkeypatch.setattr(
+        restricted_process_module, "_kernel32", lambda: Kernel32()
+    )
+    monkeypatch.setattr(
+        observer_module, "require_impersonation_level", lambda token: 2
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_read_provider_host_path_observation",
+        read_only_observation,
+    )
+
+    with pytest.raises((PermissionError, RuntimeError)):
+        observer_module._authenticated_client_provider_host_path_observation(
+            42,
+            profile=r"C:\Users\Founder",
+            installation={},
+            observed_sid=SID,
+        )
+    if failure == "impersonate":
+        assert "read-only-host-paths" not in events
+    else:
+        assert events.count("read-only-host-paths") == 1
+        assert events.count("revert") == 1
 
 
 def test_lost_enrollment_authorization_response_resumes_exact_grant(
@@ -1511,7 +1699,7 @@ def test_production_enrollment_cli_fails_closed_on_factory_error(
 def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
     _validate_authority_compatibility(
         {
-            "service_version": "1.7.6",
+            "service_version": "1.7.7",
             "protocol_version": 7,
             "schema_version": 6,
         }
@@ -1521,8 +1709,8 @@ def test_provider_host_accepts_only_exact_authority_release_contract() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("service_version", "1.7.4"),
-        ("service_version", "1.7.7"),
+        ("service_version", "1.7.6"),
+        ("service_version", "1.7.8"),
         ("protocol_version", 6),
         ("protocol_version", 8),
         ("schema_version", 5),
@@ -1533,7 +1721,7 @@ def test_provider_host_rejects_authority_release_contract_mismatch(
     field: str, value: object
 ) -> None:
     diagnostics: dict[str, object] = {
-        "service_version": "1.7.6",
+        "service_version": "1.7.7",
         "protocol_version": 7,
         "schema_version": 6,
     }
