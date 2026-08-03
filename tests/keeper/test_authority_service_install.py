@@ -607,6 +607,26 @@ def test_founder_configuration_migration_reconciles_write_interruption(
         "_founder_verifier_configuration",
         _production_verifier_fixture,
     )
+    real_copy = shutil.copy2
+    interrupted_backup = False
+
+    def copy_then_interrupt(source: Path, destination: Path) -> Path:
+        nonlocal interrupted_backup
+        result = Path(real_copy(source, destination))
+        if not interrupted_backup and result.parent == service_root / "backups":
+            interrupted_backup = True
+            raise RuntimeError("simulated configuration backup interruption")
+        return result
+
+    monkeypatch.setattr(shutil, "copy2", copy_then_interrupt)
+    with pytest.raises(RuntimeError, match="backup interruption"):
+        service_install._migrate_founder_capability_configuration(manifest)
+    orphan_backup = next((service_root / "backups").iterdir())
+    assert orphan_backup.is_file()
+    assert not service_install._recorded_file_matches(manifest, orphan_backup)
+    assert "configuration_migration_claim" not in manifest
+    monkeypatch.setattr(shutil, "copy2", real_copy)
+
     real_atomic_write = atomic_write_json
     interrupted = False
 
@@ -717,6 +737,19 @@ def test_rollback_reconciles_interrupted_configuration_claim(
         service_install._migrate_founder_capability_configuration(manifest)
     interrupted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert "configuration_migration_claim" in interrupted
+
+    wrong_backup = tmp_path / "wrong-but-byte-identical-old.pyz"
+    wrong_backup.write_bytes(backup_path.read_bytes())
+    before_wrong_request = {
+        "manifest": manifest_path.read_bytes(),
+        "config": config.read_bytes(),
+        "package": package.read_bytes(),
+    }
+    with pytest.raises(PermissionError, match="rollback identity differs"):
+        service_install.rollback_package(wrong_backup, old_digest)
+    assert manifest_path.read_bytes() == before_wrong_request["manifest"]
+    assert config.read_bytes() == before_wrong_request["config"]
+    assert package.read_bytes() == before_wrong_request["package"]
 
     monkeypatch.setattr(service_install, "atomic_write_json", real_atomic_write)
     result = service_install.rollback_package(backup_path, old_digest)

@@ -780,8 +780,6 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
     rollback = verify_rollback_package(package_source, expected_package_sha256)
     manifest = _load_completed_manifest()
     _require_service_stopped("rollback")
-    if manifest.get("configuration_migration_claim") is not None:
-        _migrate_founder_capability_configuration(manifest)
     recorded = manifest.get("upgrades")
     latest = recorded[-1] if isinstance(recorded, list) and recorded else None
     upgrade_claim = manifest.get("package_upgrade_claim")
@@ -828,16 +826,19 @@ def rollback_package(package_source: Path, expected_package_sha256: str) -> dict
             raise PermissionError(
                 "installed Authority package is not the recorded upgrade"
             )
-        claim = dict(expected_claim)
-        claim["claimed_at"] = _now()
-        manifest["package_rollback_claim"] = claim
-        _persist_manifest(manifest)
     elif (
         not isinstance(claim, dict)
         or any(claim.get(key) != value for key, value in expected_claim.items())
         or not isinstance(claim.get("claimed_at"), str)
     ):
         raise PermissionError("Authority package rollback claim differs")
+    if manifest.get("configuration_migration_claim") is not None:
+        _migrate_founder_capability_configuration(manifest)
+    if claim is None:
+        claim = dict(expected_claim)
+        claim["claimed_at"] = _now()
+        manifest["package_rollback_claim"] = claim
+        _persist_manifest(manifest)
     if current_digest == rollback.package_sha256:
         return _complete_package_rollback(manifest, package, rollback, claim)
     if current_digest != upgraded_digest:
@@ -934,10 +935,16 @@ def _migrate_founder_capability_configuration(
         old_digest = current_digest
         backup_path = SERVICE_ROOT / "backups" / f"service-{old_digest}.json"
         if backup_path.exists():
-            if not _recorded_file_matches(manifest, backup_path):
+            backup_digest = hashlib.sha256(
+                backup_path.read_bytes()
+            ).hexdigest().upper()
+            if backup_digest != old_digest:
                 raise PermissionError(
                     "Authority Service configuration backup is untrusted"
                 )
+            if not _recorded_file_matches(manifest, backup_path):
+                _record_file(manifest, backup_path)
+                _persist_manifest(manifest)
         else:
             shutil.copy2(config, backup_path)
             _record_file(manifest, backup_path)
