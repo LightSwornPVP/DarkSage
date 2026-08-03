@@ -37,7 +37,13 @@ from keeper.authority_service.service_package import (
     verify_service_package,
 )
 from keeper.authority_service.windows_identity import current_process_sid
-from keeper.provider_host.signing import WindowsCngEnvelopeIdentity
+from keeper.provider_host.signing import (
+    ProviderHostCngKeyNotProvisioned,
+    ProviderHostCngPolicyMismatch,
+    RsaPublicIdentity,
+    WindowsCngEnvelopeIdentity,
+    machine_key_security_policy_sha256,
+)
 from keeper.executive.founder_capability import (
     ProductionFounderCapabilityIssuer,
     ProductionFounderCapabilityVerifier,
@@ -756,12 +762,38 @@ def _provision_provider_host_authority_identity(
         "S-1-5-32-544",
         service_sid,
     )
+    policy_sha256 = machine_key_security_policy_sha256(access_sids)
     existing = manifest.get("provider_host_authority_identity")
+    claim = manifest.get("provider_host_authority_identity_claim")
+    if existing is not None and claim is not None:
+        raise PermissionError(
+            "Provider Host Authority identity lifecycle is ambiguous"
+        )
     if existing is not None and (
         not isinstance(existing, dict)
         or existing.get("schema_version") != 1
         or existing.get("key_name") != PROVIDER_HOST_AUTHORITY_KEY_NAME
         or existing.get("access_sids") != list(access_sids)
+        or existing.get("security_policy_sha256", policy_sha256)
+        != policy_sha256
+        or set(existing)
+        not in (
+            {
+                "schema_version",
+                "key_name",
+                "key_id",
+                "public_identity",
+                "access_sids",
+            },
+            {
+                "schema_version",
+                "key_name",
+                "key_id",
+                "public_identity",
+                "access_sids",
+                "security_policy_sha256",
+            },
+        )
     ):
         raise PermissionError(
             "Provider Host Authority identity differs from its lifecycle record"
@@ -771,26 +803,244 @@ def _provision_provider_host_authority_identity(
         "key_name": PROVIDER_HOST_AUTHORITY_KEY_NAME,
         "machine_key": True,
     }
-    signer = WindowsCngEnvelopeIdentity(
-        **identity_arguments,
-        create_if_missing=existing is None,
-        machine_access_sids=access_sids,
-    )
+    if existing is not None:
+        signer = WindowsCngEnvelopeIdentity(
+            **identity_arguments,
+            create_if_missing=False,
+            machine_access_sids=access_sids,
+        )
+    elif claim is not None:
+        claim = _validated_provider_host_authority_identity_claim(
+            claim, access_sids
+        )
+        if claim["operation"] == "CREATE":
+            signer = WindowsCngEnvelopeIdentity(
+                **identity_arguments,
+                create_if_missing=True,
+                machine_access_sids=access_sids,
+                reconcile_interrupted_machine_key=True,
+            )
+        else:
+            signer = _reconcile_claimed_legacy_provider_host_identity(
+                identity_arguments, access_sids, claim
+            )
+    else:
+        try:
+            signer = WindowsCngEnvelopeIdentity(
+                **identity_arguments,
+                create_if_missing=False,
+                machine_access_sids=access_sids,
+            )
+        except ProviderHostCngKeyNotProvisioned:
+            claim = {
+                **_provider_host_authority_identity_claim(access_sids),
+                "claimed_at": _now(),
+            }
+            manifest["provider_host_authority_identity_claim"] = claim
+            _persist_manifest(manifest)
+            signer = WindowsCngEnvelopeIdentity(
+                **identity_arguments,
+                create_if_missing=True,
+                machine_access_sids=access_sids,
+            )
+        except ProviderHostCngPolicyMismatch:
+            legacy = WindowsCngEnvelopeIdentity(
+                **identity_arguments,
+                create_if_missing=False,
+                machine_access_sids=access_sids,
+                inspect_recoverable_legacy_machine_key=True,
+            )
+            legacy_policy_sha256 = (
+                legacy.recoverable_legacy_policy_sha256
+            )
+            if not isinstance(legacy_policy_sha256, str):
+                raise PermissionError(
+                    "Provider Host legacy identity policy is unavailable"
+                )
+            claim = {
+                **_provider_host_authority_identity_claim(
+                    access_sids,
+                    operation="RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP",
+                    observed_key_id=legacy.key_id,
+                    observed_public_identity=legacy.public_configuration(),
+                    observed_policy_sha256=legacy_policy_sha256,
+                ),
+                "claimed_at": _now(),
+            }
+            manifest["provider_host_authority_identity_claim"] = claim
+            _persist_manifest(manifest)
+            signer = _reconcile_claimed_legacy_provider_host_identity(
+                identity_arguments, access_sids, claim
+            )
     public = signer.public_configuration()
+    if isinstance(claim, dict) and claim.get("operation") == (
+        "RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP"
+    ) and (
+        signer.key_id != claim.get("observed_key_id")
+        or public != claim.get("observed_public_identity")
+    ):
+        raise PermissionError(
+            "Provider Host legacy identity changed during reconciliation"
+        )
     record = {
         "schema_version": 1,
         "key_name": PROVIDER_HOST_AUTHORITY_KEY_NAME,
         "key_id": signer.key_id,
         "public_identity": public,
         "access_sids": list(access_sids),
+        "security_policy_sha256": policy_sha256,
     }
-    if existing is not None and existing != record:
+    if existing is not None and any(
+        existing.get(key) != value
+        for key, value in record.items()
+        if key != "security_policy_sha256"
+    ):
         raise PermissionError(
             "Provider Host Authority identity differs from its lifecycle record"
         )
     manifest["provider_host_authority_identity"] = record
+    manifest.pop("provider_host_authority_identity_claim", None)
     _persist_manifest(manifest)
     return record
+
+
+def _reconcile_claimed_legacy_provider_host_identity(
+    identity_arguments: dict[str, Any],
+    access_sids: tuple[str, ...],
+    claim: dict[str, Any],
+) -> WindowsCngEnvelopeIdentity:
+    """Revalidate a claimed legacy key before the only authorized policy write."""
+    exact_target = False
+    try:
+        observed = WindowsCngEnvelopeIdentity(
+            **identity_arguments,
+            create_if_missing=False,
+            machine_access_sids=access_sids,
+        )
+        exact_target = True
+    except ProviderHostCngPolicyMismatch:
+        observed = WindowsCngEnvelopeIdentity(
+            **identity_arguments,
+            create_if_missing=False,
+            machine_access_sids=access_sids,
+            inspect_recoverable_legacy_machine_key=True,
+        )
+        if observed.recoverable_legacy_policy_sha256 != claim.get(
+            "observed_policy_sha256"
+        ):
+            raise PermissionError(
+                "Provider Host legacy policy changed before reconciliation"
+            )
+    observed_public = observed.public_configuration()
+    if (
+        observed.key_id != claim.get("observed_key_id")
+        or observed_public != claim.get("observed_public_identity")
+    ):
+        raise PermissionError(
+            "Provider Host legacy identity changed before reconciliation"
+        )
+    if exact_target:
+        return observed
+    reconciled = WindowsCngEnvelopeIdentity(
+        **identity_arguments,
+        create_if_missing=False,
+        machine_access_sids=access_sids,
+        reconcile_interrupted_machine_key=True,
+    )
+    if (
+        reconciled.key_id != claim.get("observed_key_id")
+        or reconciled.public_configuration()
+        != claim.get("observed_public_identity")
+    ):
+        raise PermissionError(
+            "Provider Host legacy identity changed during reconciliation"
+        )
+    return reconciled
+
+
+def _provider_host_authority_identity_claim(
+    access_sids: tuple[str, ...],
+    *,
+    operation: str = "CREATE",
+    observed_key_id: str | None = None,
+    observed_public_identity: dict[str, object] | None = None,
+    observed_policy_sha256: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "operation": operation,
+        "provider": "Microsoft Software Key Storage Provider",
+        "key_name": PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        "algorithm": "RSA",
+        "length": 3072,
+        "export_policy": 0,
+        "owner_sid": "S-1-5-32-544",
+        "group_sid": "S-1-5-32-544",
+        "access_sids": list(access_sids),
+        "security_policy_sha256": machine_key_security_policy_sha256(
+            access_sids
+        ),
+        "observed_key_id": observed_key_id,
+        "observed_public_identity": observed_public_identity,
+        "observed_policy_sha256": observed_policy_sha256,
+    }
+
+
+def _validated_provider_host_authority_identity_claim(
+    value: object, access_sids: tuple[str, ...]
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(
+        value.get("claimed_at"), str
+    ):
+        raise PermissionError(
+            "Provider Host Authority identity claim differs"
+        )
+    operation = value.get("operation")
+    if operation == "CREATE":
+        expected = _provider_host_authority_identity_claim(access_sids)
+    elif operation == "RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP":
+        observed_key_id = value.get("observed_key_id")
+        observed_public_identity = value.get("observed_public_identity")
+        observed_policy_sha256 = value.get("observed_policy_sha256")
+        if (
+            not isinstance(observed_key_id, str)
+            or not isinstance(observed_public_identity, dict)
+            or not isinstance(observed_policy_sha256, str)
+            or len(observed_policy_sha256) != 64
+            or any(
+                character not in "0123456789ABCDEF"
+                for character in observed_policy_sha256
+            )
+        ):
+            raise PermissionError(
+                "Provider Host Authority identity claim differs"
+            )
+        public = RsaPublicIdentity.from_configuration(
+            observed_public_identity
+        )
+        if public.key_id != observed_key_id:
+            raise PermissionError(
+                "Provider Host Authority identity claim differs"
+            )
+        expected = _provider_host_authority_identity_claim(
+            access_sids,
+            operation=operation,
+            observed_key_id=observed_key_id,
+            observed_public_identity=dict(observed_public_identity),
+            observed_policy_sha256=observed_policy_sha256,
+        )
+    else:
+        raise PermissionError(
+            "Provider Host Authority identity claim differs"
+        )
+    if (
+        any(value.get(key) != expected_value for key, expected_value in expected.items())
+        or set(value) != {*expected, "claimed_at"}
+    ):
+        raise PermissionError(
+            "Provider Host Authority identity claim differs"
+        )
+    return dict(value)
 
 
 def rollback_package(package_source: Path, expected_package_sha256: str) -> dict[str, Any]:

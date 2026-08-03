@@ -13,6 +13,28 @@ KEY_NAME = "DarkSage.KeeperAuthority.ProviderHost.v1"
 ACCESS_SIDS = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
 
 
+def _descriptor_bytes(sddl: str) -> bytes:
+    with signing._key_security_descriptor_for_sddl(sddl) as (
+        descriptor,
+        length,
+    ):
+        return ctypes.string_at(descriptor, length)
+
+
+def _machine_sddl(
+    *,
+    owner: str = "BA",
+    group: str = "BA",
+    control: str = "P",
+    aces: str | None = None,
+) -> str:
+    value = aces or (
+        "(D;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+        "(A;;GA;;;S-1-5-80-123)"
+    )
+    return f"O:{owner}G:{group}D:{control}{value}"
+
+
 class FakeCngApi:
     def __init__(
         self,
@@ -107,6 +129,7 @@ class FakeCngApi:
             self.security_set_calls += 1
             assert flags == (
                 signing._OWNER_SECURITY_INFORMATION
+                | signing._GROUP_SECURITY_INFORMATION
                 | signing._DACL_SECURITY_INFORMATION
             )
             if self.fail_security_set_once:
@@ -157,7 +180,9 @@ class FakeCngApi:
         return 0
 
 
-def _open(api: FakeCngApi) -> tuple[ctypes.c_void_p, ctypes.c_void_p]:
+def _open(
+    api: FakeCngApi, *, reconcile: bool = False, inspect_legacy: bool = False
+) -> tuple[ctypes.c_void_p, ctypes.c_void_p]:
     return signing._open_key(
         api,
         KEY_NAME,
@@ -165,6 +190,8 @@ def _open(api: FakeCngApi) -> tuple[ctypes.c_void_p, ctypes.c_void_p]:
         owner_sid=None,
         create_if_missing=True,
         machine_access_sids=ACCESS_SIDS,
+        reconcile_interrupted_machine_key=reconcile,
+        inspect_recoverable_legacy_machine_key=inspect_legacy,
     )
 
 
@@ -172,14 +199,25 @@ def test_security_descriptor_bindings_use_advapi32() -> None:
     advapi32, kernel32 = signing._security_descriptor_apis()
     assert advapi32.GetSecurityDescriptorLength.argtypes == [wintypes.LPVOID]
     assert advapi32.GetSecurityDescriptorLength.restype is wintypes.DWORD
+    assert advapi32.GetSecurityDescriptorOwner.restype is wintypes.BOOL
+    assert advapi32.GetSecurityDescriptorGroup.restype is wintypes.BOOL
+    assert advapi32.GetSecurityDescriptorDacl.restype is wintypes.BOOL
+    assert advapi32.GetSecurityDescriptorControl.restype is wintypes.BOOL
+    assert advapi32.GetAclInformation.restype is wintypes.BOOL
+    assert advapi32.GetAce.restype is wintypes.BOOL
+    assert advapi32.IsValidSid.restype is wintypes.BOOL
+    assert advapi32.MapGenericMask.restype is None
     assert not hasattr(kernel32, "GetSecurityDescriptorLength")
     with signing._key_security_descriptor_for_sddl(
         signing._machine_key_security_sddl(ACCESS_SIDS)
     ) as (descriptor, length):
         assert length > 0
-        assert signing._security_descriptor_to_sddl(
-            descriptor, signing._KEY_SECURITY_INFORMATION
-        ).startswith("O:BAD:P")
+        policy = signing._canonical_machine_key_security_policy(
+            descriptor, ACCESS_SIDS
+        )
+        assert policy.owner_sid == "S-1-5-32-544"
+        assert policy.group_sid == "S-1-5-32-544"
+        assert policy.control == signing._EXPECTED_DESCRIPTOR_CONTROL
 
 
 def test_missing_security_descriptor_export_fails_closed(
@@ -207,10 +245,13 @@ def test_no_orphan_creates_one_exact_protected_machine_key() -> None:
 
 def test_matching_orphan_is_reconciled_without_recreation() -> None:
     api = FakeCngApi(existing=True)
+    api.security_descriptor = _descriptor_bytes(
+        signing._machine_key_security_sddl(ACCESS_SIDS)
+    )
     provider, key = _open(api)
     assert api.create_calls == 0
     assert api.finalize_calls == 0
-    assert api.security_set_calls == 1
+    assert api.security_set_calls == 0
     assert api.security_descriptor is not None
     api.NCryptFreeObject(key)
     api.NCryptFreeObject(provider)
@@ -260,7 +301,7 @@ def test_acl_readback_failure_closes_every_handle() -> None:
     with pytest.raises(OSError, match="Security Descr property"):
         _open(api)
     assert api.create_calls == 0
-    assert api.security_set_calls == 1
+    assert api.security_set_calls == 0
     assert api.free_calls == [api.key_handle, api.provider_handle]
 
 
@@ -275,7 +316,7 @@ def test_interrupted_new_key_reconciles_on_exact_retry() -> None:
     assert api.security_descriptor is None
     assert api.free_calls == [api.key_handle, api.provider_handle]
 
-    provider, key = _open(api)
+    provider, key = _open(api, reconcile=True)
     assert api.create_calls == 1
     assert api.finalize_calls == 1
     assert api.security_set_calls == 2
@@ -284,14 +325,233 @@ def test_interrupted_new_key_reconciles_on_exact_retry() -> None:
     api.NCryptFreeObject(provider)
 
 
-def test_changed_acl_readback_rejects_adoption(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_legacy_primary_group_gap_is_inspectable_then_reconciled() -> None:
     api = FakeCngApi(existing=True)
-    values = iter(["O:BAD:P(A;;GA;;;SY)", "O:BAD:P(A;;GR;;;SY)"])
-    monkeypatch.setattr(
-        signing, "_security_descriptor_to_sddl", lambda *_: next(values)
+    api.security_descriptor = _descriptor_bytes(
+        _machine_sddl(group="SY")
     )
-    with pytest.raises(PermissionError, match="did not verify exactly"):
+
+    with pytest.raises(signing.ProviderHostCngPolicyMismatch):
         _open(api)
+    assert api.security_set_calls == 0
+
+    provider, key = _open(api, inspect_legacy=True)
+    legacy_hash = signing._recoverable_legacy_machine_key_policy_sha256(
+        api, key, ACCESS_SIDS
+    )
+    assert len(legacy_hash) == 64
+    assert api.security_set_calls == 0
+    api.NCryptFreeObject(key)
+    api.NCryptFreeObject(provider)
+
+
+def test_legacy_absent_primary_group_is_inspectable() -> None:
+    api = FakeCngApi(existing=True)
+    api.security_descriptor = _descriptor_bytes(
+        "O:BAD:P(D;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+        "(A;;GA;;;S-1-5-80-123)"
+    )
+
+    with pytest.raises(signing.ProviderHostCngPolicyMismatch):
+        _open(api)
+    provider, key = _open(api, inspect_legacy=True)
+    assert len(
+        signing._recoverable_legacy_machine_key_policy_sha256(
+            api, key, ACCESS_SIDS
+        )
+    ) == 64
+    api.NCryptFreeObject(key)
+    api.NCryptFreeObject(provider)
+
+    provider, key = _open(api, reconcile=True)
+    assert api.security_set_calls == 1
+    signing._verify_machine_key_security(api, key, ACCESS_SIDS)
+    api.NCryptFreeObject(key)
+    api.NCryptFreeObject(provider)
+
+
+def test_legacy_inspection_rejects_any_non_group_policy_difference() -> None:
+    api = FakeCngApi(existing=True)
+    api.security_descriptor = _descriptor_bytes(
+        _machine_sddl(
+            group="SY",
+            aces=(
+                "(D;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+                "(A;;GR;;;S-1-5-80-123)"
+            ),
+        )
+    )
+
+    with pytest.raises(PermissionError, match="authorization set differs"):
+        _open(api, inspect_legacy=True)
+    assert api.security_set_calls == 0
+
+
+def test_changed_acl_readback_rejects_adoption() -> None:
+    api = FakeCngApi(existing=True)
+    api.security_descriptor = _descriptor_bytes(
+        _machine_sddl(
+            aces=(
+                "(D;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+                "(A;;GR;;;S-1-5-80-123)"
+            )
+        )
+    )
+    with pytest.raises(
+        signing.ProviderHostCngPolicyMismatch, match="did not verify exactly"
+    ):
+        _open(api)
+    assert api.security_set_calls == 0
     assert api.free_calls == [api.key_handle, api.provider_handle]
+
+
+def test_software_ksp_generic_rights_normalization_is_semantically_exact() -> None:
+    expected = signing._machine_key_security_sddl(ACCESS_SIDS)
+    normalized = _machine_sddl(
+        aces=(
+            "(D;;0xd01f01ff;;;RC)(A;;0xd01f01ff;;;SY)"
+            "(A;;0xd01f01ff;;;BA)(A;;0xd01f01ff;;;S-1-5-80-123)"
+        )
+    )
+    with signing._key_security_descriptor_for_sddl(expected) as (
+        expected_descriptor,
+        _expected_length,
+    ):
+        expected_policy = signing._canonical_machine_key_security_policy(
+            expected_descriptor, ACCESS_SIDS
+        )
+    with signing._key_security_descriptor_for_sddl(normalized) as (
+        live_descriptor,
+        _live_length,
+    ):
+        live_policy = signing._canonical_machine_key_security_policy(
+            live_descriptor, ACCESS_SIDS
+        )
+    assert live_policy == expected_policy
+    assert all(
+        ace.access_mask == signing._SOFTWARE_KSP_FULL_CONTROL
+        for ace in live_policy.aces
+    )
+
+
+def test_reordered_equivalent_explicit_allows_are_accepted() -> None:
+    reordered = _machine_sddl(
+        aces=(
+            "(D;;GA;;;RC)(A;;GA;;;S-1-5-80-123)"
+            "(A;;GA;;;BA)(A;;GA;;;SY)"
+        )
+    )
+    with signing._key_security_descriptor_for_sddl(reordered) as (
+        descriptor,
+        _length,
+    ):
+        policy = signing._canonical_machine_key_security_policy(
+            descriptor, ACCESS_SIDS
+        )
+    assert [ace.sid for ace in policy.aces] == [
+        "S-1-5-12",
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-80-123",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("sddl", "message"),
+    [
+        (_machine_sddl(owner="SY"), "owner.*DACL control"),
+        (_machine_sddl(group="SY"), "owner.*DACL control"),
+        (_machine_sddl(control=""), "owner.*DACL control"),
+        (
+            _machine_sddl(
+                aces=(
+                    "(A;;GA;;;SY)(D;;GA;;;RC)(A;;GA;;;BA)"
+                    "(A;;GA;;;S-1-5-80-123)"
+                )
+            ),
+            "ACE order is noncanonical",
+        ),
+        (
+            _machine_sddl(
+                aces=(
+                    "(D;;GA;;;RC)(A;ID;GA;;;SY)(A;;GA;;;BA)"
+                    "(A;;GA;;;S-1-5-80-123)"
+                )
+            ),
+            "ACE type or flags differ",
+        ),
+        (
+            _machine_sddl(
+                aces=(
+                    "(D;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+                    "(A;;GA;;;S-1-5-80-123)(A;;GA;;;BU)"
+                )
+            ),
+            "authorization set differs",
+        ),
+        (
+            _machine_sddl(
+                aces=(
+                    "(D;;GA;;;RC)(A;;GA;;;SY)"
+                    "(A;;GA;;;S-1-5-80-123)"
+                )
+            ),
+            "authorization set differs",
+        ),
+        (
+            _machine_sddl(
+                aces=(
+                    "(D;;GR;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+                    "(A;;GA;;;S-1-5-80-123)"
+                )
+            ),
+            "authorization set differs",
+        ),
+        (
+            _machine_sddl(
+                aces=(
+                    "(D;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)"
+                    "(A;;0x001f01fb;;;S-1-5-80-123)"
+                )
+            ),
+            "authorization set differs",
+        ),
+    ],
+)
+def test_machine_key_policy_rejects_nonexact_semantics(
+    sddl: str, message: str
+) -> None:
+    with signing._key_security_descriptor_for_sddl(sddl) as (
+        descriptor,
+        _length,
+    ):
+        with pytest.raises(PermissionError, match=message):
+            signing._canonical_machine_key_security_policy(
+                descriptor, ACCESS_SIDS
+            )
+
+
+def test_machine_key_policy_rejects_missing_dacl() -> None:
+    with signing._key_security_descriptor_for_sddl("O:BAG:BA") as (
+        descriptor,
+        _length,
+    ):
+        with pytest.raises(PermissionError, match="DACL is absent or null"):
+            signing._canonical_machine_key_security_policy(
+                descriptor, ACCESS_SIDS
+            )
+
+
+def test_machine_key_policy_rejects_unresolved_service_sid() -> None:
+    with pytest.raises(ValueError, match="access policy is invalid"):
+        signing._machine_key_security_sddl(
+            ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-unresolved")
+        )
+
+
+def test_machine_key_policy_hash_is_sanitized_and_deterministic() -> None:
+    first = signing.machine_key_security_policy_sha256(ACCESS_SIDS)
+    second = signing.machine_key_security_policy_sha256(ACCESS_SIDS)
+    assert first == second
+    assert len(first) == 64
+    assert first == first.upper()

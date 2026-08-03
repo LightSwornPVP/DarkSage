@@ -19,7 +19,7 @@ SID = "S-1-5-21-1000"
 
 
 def test_recovery_release_keeps_protocol_and_schema_stable() -> None:
-    assert SERVICE_VERSION == "1.7.3"
+    assert SERVICE_VERSION == "1.7.4"
     assert PROTOCOL_VERSION == 7
     assert SERVICE_SCHEMA_VERSION == 6
 
@@ -37,7 +37,7 @@ def test_provider_host_identity_failure_leaves_core_available_and_fails_closed(
 
     assert not worker.is_alive()
     diagnostics = core._diagnostics({}, SID)
-    assert diagnostics["service_version"] == "1.7.3"
+    assert diagnostics["service_version"] == "1.7.4"
     assert diagnostics["schema_version"] == 6
     assert diagnostics["provider_host"] == {
         "installed": False,
@@ -166,7 +166,7 @@ def test_schema_five_upgrade_preserves_counts_and_service_key(
 def test_machine_key_policy_is_exact_and_restricted_first() -> None:
     access = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
     assert signing._machine_key_security_sddl(access) == (
-        "O:BAD:P(D;;GA;;;S-1-5-12)"
+        "O:S-1-5-32-544G:S-1-5-32-544D:P(D;;GA;;;S-1-5-12)"
         "(A;;GA;;;S-1-5-18)"
         "(A;;GA;;;S-1-5-32-544)"
         "(A;;GA;;;S-1-5-80-123)"
@@ -218,11 +218,13 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
 ) -> None:
     persisted: list[dict[str, Any]] = []
     signer_calls: list[dict[str, object]] = []
+    provisioned = False
 
     class Signer:
         key_id = "keeper-provider-host-rsa:synthetic"
 
         def __init__(self, **values: object) -> None:
+            nonlocal provisioned
             signer_calls.append(dict(values))
             assert values["identity"] == (
                 "keeper-authority-provider-host:provisioned"
@@ -231,6 +233,12 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
                 service_install.PROVIDER_HOST_AUTHORITY_KEY_NAME
             )
             assert values["machine_key"] is True
+            if not values["create_if_missing"] and not provisioned:
+                raise service_install.ProviderHostCngKeyNotProvisioned(
+                    "synthetic identity is absent"
+                )
+            if values["create_if_missing"]:
+                provisioned = True
 
         def public_configuration(self) -> dict[str, object]:
             return {
@@ -255,15 +263,17 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
     second = service_install._provision_provider_host_authority_identity(manifest)
 
     assert first == second
-    assert len(persisted) == 2
-    assert signer_calls[0]["create_if_missing"] is True
-    assert signer_calls[0]["machine_access_sids"] == (
+    assert len(persisted) == 3
+    assert signer_calls[0]["create_if_missing"] is False
+    assert signer_calls[1]["create_if_missing"] is True
+    assert signer_calls[1]["machine_access_sids"] == (
         "S-1-5-18",
         "S-1-5-32-544",
         "S-1-5-80-123",
     )
-    assert signer_calls[1]["create_if_missing"] is False
-    assert signer_calls[1]["machine_access_sids"] == (
+    assert signer_calls[1].get("reconcile_interrupted_machine_key") is None
+    assert signer_calls[2]["create_if_missing"] is False
+    assert signer_calls[2]["machine_access_sids"] == (
         "S-1-5-18",
         "S-1-5-32-544",
         "S-1-5-80-123",
@@ -271,7 +281,440 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
     manifest["provider_host_authority_identity"] = {"changed": True}
     with pytest.raises(PermissionError, match="differs"):
         service_install._provision_provider_host_authority_identity(manifest)
-    assert len(signer_calls) == 2
+    assert len(signer_calls) == 3
+
+
+def test_interrupted_identity_claim_reconciles_once_and_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict[str, Any]] = []
+    signer_calls: list[dict[str, object]] = []
+
+    class Signer:
+        key_id = "keeper-provider-host-rsa:synthetic"
+
+        def __init__(self, **values: object) -> None:
+            signer_calls.append(dict(values))
+
+        def public_configuration(self) -> dict[str, object]:
+            return {
+                "schema_version": 1,
+                "identity": "keeper-authority-provider-host:provisioned",
+                "key_id": self.key_id,
+                "algorithm": "RSA-PKCS1-SHA256",
+                "exponent": "AQAB",
+                "modulus": "synthetic",
+            }
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    monkeypatch.setattr(
+        service_install,
+        "_persist_manifest",
+        lambda value: persisted.append(json.loads(json.dumps(value))),
+    )
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+
+    result = service_install._provision_provider_host_authority_identity(
+        manifest
+    )
+
+    assert result["key_id"] == "keeper-provider-host-rsa:synthetic"
+    assert "provider_host_authority_identity_claim" not in manifest
+    assert signer_calls == [
+        {
+            "identity": "keeper-authority-provider-host:provisioned",
+            "key_name": service_install.PROVIDER_HOST_AUTHORITY_KEY_NAME,
+            "machine_key": True,
+            "create_if_missing": True,
+            "machine_access_sids": access_sids,
+            "reconcile_interrupted_machine_key": True,
+        }
+    ]
+    assert persisted[-1].get("provider_host_authority_identity") == result
+
+
+def test_mismatched_unclaimed_identity_fails_without_creating_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Signer:
+        def __init__(self, **_values: object) -> None:
+            raise PermissionError("synthetic policy mismatch")
+
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    monkeypatch.setattr(
+        service_install,
+        "_persist_manifest",
+        lambda value: persisted.append(json.loads(json.dumps(value))),
+    )
+    manifest: dict[str, Any] = {}
+
+    with pytest.raises(PermissionError, match="policy mismatch"):
+        service_install._provision_provider_host_authority_identity(manifest)
+
+    assert "provider_host_authority_identity_claim" not in manifest
+    assert persisted == []
+
+
+def test_identity_record_and_claim_are_rejected_as_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity": {
+            "schema_version": 1,
+            "key_name": service_install.PROVIDER_HOST_AUTHORITY_KEY_NAME,
+            "key_id": "keeper-provider-host-rsa:synthetic",
+            "public_identity": {},
+            "access_sids": list(access_sids),
+            "security_policy_sha256": (
+                service_install.machine_key_security_policy_sha256(access_sids)
+            ),
+        },
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        },
+    }
+
+    with pytest.raises(PermissionError, match="lifecycle is ambiguous"):
+        service_install._provision_provider_host_authority_identity(manifest)
+
+
+def test_changed_identity_claim_rejects_before_key_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer_called = False
+
+    class Signer:
+        def __init__(self, **_values: object) -> None:
+            nonlocal signer_called
+            signer_called = True
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    claim = service_install._provider_host_authority_identity_claim(access_sids)
+    claim["security_policy_sha256"] = "0" * 64
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **claim,
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+
+    with pytest.raises(PermissionError, match="identity claim differs"):
+        service_install._provision_provider_host_authority_identity(manifest)
+
+    assert signer_called is False
+
+
+def test_unclaimed_legacy_orphan_is_publicly_bound_before_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict[str, Any]] = []
+    calls: list[dict[str, object]] = []
+    public = signing._public_configuration(
+        "keeper-authority-provider-host:provisioned",
+        b"\x80" + b"\x00" * 383,
+        b"\x03",
+    )
+
+    class Signer:
+        recoverable_legacy_policy_sha256: str | None = None
+
+        def __init__(self, **values: object) -> None:
+            calls.append(dict(values))
+            self.key_id = str(public["key_id"])
+            if values.get("inspect_recoverable_legacy_machine_key") is True:
+                self.recoverable_legacy_policy_sha256 = "A" * 64
+            elif values.get("reconcile_interrupted_machine_key") is not True:
+                raise service_install.ProviderHostCngPolicyMismatch(
+                    "synthetic primary-group gap"
+                )
+
+        def public_configuration(self) -> dict[str, object]:
+            return dict(public)
+
+    service_install.RsaPublicIdentity.from_configuration(public)
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    monkeypatch.setattr(
+        service_install,
+        "_persist_manifest",
+        lambda value: persisted.append(json.loads(json.dumps(value))),
+    )
+    manifest: dict[str, Any] = {}
+
+    result = service_install._provision_provider_host_authority_identity(
+        manifest
+    )
+
+    assert result["key_id"] == public["key_id"]
+    claim_snapshot = persisted[-2]["provider_host_authority_identity_claim"]
+    assert claim_snapshot["operation"] == (
+        "RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP"
+    )
+    assert claim_snapshot["observed_key_id"] == public["key_id"]
+    assert claim_snapshot["observed_public_identity"] == public
+    assert claim_snapshot["observed_policy_sha256"] == "A" * 64
+    assert "provider_host_authority_identity_claim" not in persisted[-1]
+    assert calls[0]["create_if_missing"] is False
+    assert calls[1]["inspect_recoverable_legacy_machine_key"] is True
+    assert calls[2]["create_if_missing"] is False
+    assert calls[2].get("reconcile_interrupted_machine_key") is None
+    assert calls[3]["inspect_recoverable_legacy_machine_key"] is True
+    assert calls[4]["create_if_missing"] is False
+    assert calls[4]["reconcile_interrupted_machine_key"] is True
+
+
+def test_legacy_reconciliation_rejects_public_identity_substitution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = signing._public_configuration(
+        "keeper-authority-provider-host:provisioned",
+        b"\x80" + b"\x00" * 383,
+        b"\x03",
+    )
+    changed = {**observed, "identity": "changed"}
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids,
+                operation="RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP",
+                observed_key_id=str(observed["key_id"]),
+                observed_public_identity=observed,
+                observed_policy_sha256="A" * 64,
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+
+    class Signer:
+        key_id = observed["key_id"]
+
+        def __init__(self, **_values: object) -> None:
+            pass
+
+        def public_configuration(self) -> dict[str, object]:
+            return dict(changed)
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+
+    with pytest.raises(PermissionError, match="changed before reconciliation"):
+        service_install._provision_provider_host_authority_identity(manifest)
+
+
+def test_persisted_legacy_claim_resumes_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = signing._public_configuration(
+        "keeper-authority-provider-host:provisioned",
+        b"\x80" + b"\x00" * 383,
+        b"\x03",
+    )
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids,
+                operation="RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP",
+                observed_key_id=str(public["key_id"]),
+                observed_public_identity=public,
+                observed_policy_sha256="A" * 64,
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+    calls: list[dict[str, object]] = []
+
+    class Signer:
+        key_id = public["key_id"]
+        recoverable_legacy_policy_sha256: str | None = None
+
+        def __init__(self, **values: object) -> None:
+            calls.append(dict(values))
+            if values.get("inspect_recoverable_legacy_machine_key") is True:
+                self.recoverable_legacy_policy_sha256 = "A" * 64
+            elif values.get("reconcile_interrupted_machine_key") is not True:
+                raise service_install.ProviderHostCngPolicyMismatch(
+                    "synthetic primary-group gap"
+                )
+
+        def public_configuration(self) -> dict[str, object]:
+            return dict(public)
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    monkeypatch.setattr(service_install, "_persist_manifest", lambda _value: None)
+
+    result = service_install._provision_provider_host_authority_identity(
+        manifest
+    )
+
+    assert result["key_id"] == public["key_id"]
+    assert "provider_host_authority_identity_claim" not in manifest
+    assert len(calls) == 3
+    assert calls[0]["create_if_missing"] is False
+    assert calls[0].get("reconcile_interrupted_machine_key") is None
+    assert calls[1]["inspect_recoverable_legacy_machine_key"] is True
+    assert calls[2]["create_if_missing"] is False
+    assert calls[2]["reconcile_interrupted_machine_key"] is True
+
+
+def test_persisted_legacy_claim_rejects_policy_change_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = signing._public_configuration(
+        "keeper-authority-provider-host:provisioned",
+        b"\x80" + b"\x00" * 383,
+        b"\x03",
+    )
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids,
+                operation="RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP",
+                observed_key_id=str(public["key_id"]),
+                observed_public_identity=public,
+                observed_policy_sha256="A" * 64,
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+    calls: list[dict[str, object]] = []
+
+    class Signer:
+        key_id = public["key_id"]
+        recoverable_legacy_policy_sha256: str | None = None
+
+        def __init__(self, **values: object) -> None:
+            calls.append(dict(values))
+            if values.get("inspect_recoverable_legacy_machine_key") is True:
+                self.recoverable_legacy_policy_sha256 = "B" * 64
+            elif values.get("reconcile_interrupted_machine_key") is True:
+                raise AssertionError("policy write must not be attempted")
+            else:
+                raise service_install.ProviderHostCngPolicyMismatch(
+                    "synthetic primary-group gap"
+                )
+
+        def public_configuration(self) -> dict[str, object]:
+            return dict(public)
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+
+    with pytest.raises(PermissionError, match="policy changed before"):
+        service_install._provision_provider_host_authority_identity(manifest)
+
+    assert len(calls) == 2
+    assert all(call["create_if_missing"] is False for call in calls)
+
+
+def test_persisted_legacy_claim_never_recreates_a_missing_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = signing._public_configuration(
+        "keeper-authority-provider-host:provisioned",
+        b"\x80" + b"\x00" * 383,
+        b"\x03",
+    )
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids,
+                operation="RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP",
+                observed_key_id=str(public["key_id"]),
+                observed_public_identity=public,
+                observed_policy_sha256="A" * 64,
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+    calls: list[dict[str, object]] = []
+
+    class Signer:
+        def __init__(self, **values: object) -> None:
+            calls.append(dict(values))
+            raise service_install.ProviderHostCngKeyNotProvisioned(
+                "synthetic key missing"
+            )
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+
+    with pytest.raises(
+        service_install.ProviderHostCngKeyNotProvisioned, match="missing"
+    ):
+        service_install._provision_provider_host_authority_identity(manifest)
+
+    assert len(calls) == 1
+    assert calls[0]["create_if_missing"] is False
+
+
+def test_persisted_legacy_claim_accepts_already_exact_target_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = signing._public_configuration(
+        "keeper-authority-provider-host:provisioned",
+        b"\x80" + b"\x00" * 383,
+        b"\x03",
+    )
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    manifest: dict[str, Any] = {
+        "provider_host_authority_identity_claim": {
+            **service_install._provider_host_authority_identity_claim(
+                access_sids,
+                operation="RECONCILE_LEGACY_1_7_3_PRIMARY_GROUP",
+                observed_key_id=str(public["key_id"]),
+                observed_public_identity=public,
+                observed_policy_sha256="A" * 64,
+            ),
+            "claimed_at": "2026-08-03T00:00:00+00:00",
+        }
+    }
+    calls: list[dict[str, object]] = []
+
+    class Signer:
+        key_id = public["key_id"]
+
+        def __init__(self, **values: object) -> None:
+            calls.append(dict(values))
+
+        def public_configuration(self) -> dict[str, object]:
+            return dict(public)
+
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    monkeypatch.setattr(service_install, "_persist_manifest", lambda _value: None)
+
+    result = service_install._provision_provider_host_authority_identity(
+        manifest
+    )
+
+    assert result["key_id"] == public["key_id"]
+    assert "provider_host_authority_identity_claim" not in manifest
+    assert len(calls) == 1
+    assert calls[0]["create_if_missing"] is False
+    assert calls[0].get("reconcile_interrupted_machine_key") is None
 
 
 def test_recovery_preimage_is_exclusive_hashed_and_rerun_safe(
