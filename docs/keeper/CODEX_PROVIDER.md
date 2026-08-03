@@ -1,7 +1,7 @@
 # Codex subscription provider and Keeper Provider Host
 
 Keeper 1.0 supports the official standalone Windows Codex CLI as an
-authoring-only provider through KeeperAuthority 1.7.3, Authority protocol 7,
+authoring-only provider through KeeperAuthority 1.7.4, Authority protocol 7,
 schema 6, and the per-user `keeper-provider-host/1` protocol. The Provider Host
 is an unelevated execution deputy. It cannot register, qualify, reserve, approve,
 spend, change policy, or fabricate Authority state.

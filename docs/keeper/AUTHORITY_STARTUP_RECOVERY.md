@@ -1,6 +1,6 @@
-# KeeperAuthority 1.7.3 startup recovery
+# KeeperAuthority 1.7.4 startup recovery
 
-KeeperAuthority 1.7.3 is the bounded recovery release for a protocol-7 upgrade
+KeeperAuthority 1.7.4 is the bounded recovery release for a protocol-7 upgrade
 that may have committed Authority schema 6 before Provider Host machine-key
 initialization failed. Protocol 7 and schema 6 are unchanged.
 
@@ -53,6 +53,13 @@ provisions/verifies the Provider Host identity, installs frozen candidate bytes,
 and records the public identity. Any identity or lifecycle mismatch rejects before
 package replacement.
 
+The one legacy 1.7.3 orphan state is reconciled through a separate durable
+identity claim. Its provider, key name, public key, owner, exact closed DACL,
+descriptor controls, and observed policy hash are bound before the only missing
+primary-group normalization is written. No other unclaimed mismatch is repaired.
+Claim retry opens existing-only and revalidates the claimed public identity and
+pre-write policy; it cannot recreate a missing key or write a substituted key.
+
 If execution is interrupted after the claim, invoking the same exact authorized
 upgrade reconciles only the recorded old or candidate digest and completes the
 same operation. The exact claim-recorded backup is also accepted by the supported
@@ -72,7 +79,7 @@ upgrade nor rollback path can strand a manifest/config mismatch.
 After the one separately authorized start, supported diagnostics must show all of
 the following before Phase 2 continues:
 
-- service version 1.7.3, protocol 7, schema 6;
+- service version 1.7.4, protocol 7, schema 6;
 - the expected service-key identity;
 - the expected registration, qualification, and attempt counts;
 - no active or uncertain provider work;
