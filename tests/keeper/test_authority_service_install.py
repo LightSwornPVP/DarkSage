@@ -785,3 +785,19 @@ def test_lazy_package_exports_preserve_public_compatibility() -> None:
     assert AgentProvider.__name__ == "AgentProvider"
     assert CliProvider.__name__ == "CliProvider"
     assert MockProvider.__name__ == "MockProvider"
+
+
+def test_identity_verification_command_uses_read_only_verifier(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    expected = {"verified": True, "key_id": "synthetic"}
+    monkeypatch.setattr(
+        service_install,
+        "verify_provider_host_authority_identity",
+        lambda: expected,
+    )
+
+    assert service_install.main(
+        ["verify-provider-host-authority-identity"]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == expected

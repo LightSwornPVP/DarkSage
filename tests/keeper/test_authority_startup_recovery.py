@@ -284,6 +284,133 @@ def test_elevated_provisioning_is_durable_idempotent_and_mismatch_safe(
     assert len(signer_calls) == 3
 
 
+def test_provider_host_authority_identity_verification_is_exact_and_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    public = {
+        "schema_version": 1,
+        "identity": "keeper-authority-provider-host:provisioned",
+        "key_id": "keeper-provider-host-rsa:synthetic",
+        "algorithm": "RSA-PKCS1-SHA256",
+        "exponent": "AQAB",
+        "modulus": "synthetic",
+    }
+    record = {
+        "schema_version": 1,
+        "key_name": service_install.PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        "key_id": "keeper-provider-host-rsa:synthetic",
+        "public_identity": public,
+        "access_sids": list(access_sids),
+        "security_policy_sha256": "A" * 64,
+    }
+    signer_calls: list[dict[str, object]] = []
+
+    class Signer:
+        key_id = "keeper-provider-host-rsa:synthetic"
+
+        def __init__(self, **values: object) -> None:
+            signer_calls.append(dict(values))
+
+        def public_configuration(self) -> dict[str, object]:
+            return dict(public)
+
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(service_install, "account_sid", lambda _: access_sids[-1])
+    monkeypatch.setattr(
+        service_install,
+        "machine_key_security_policy_sha256",
+        lambda _: "A" * 64,
+    )
+    monkeypatch.setattr(
+        service_install,
+        "_load_completed_manifest",
+        lambda: {"provider_host_authority_identity": record},
+    )
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+    monkeypatch.setattr(
+        service_install,
+        "_persist_manifest",
+        lambda _: pytest.fail("read-only verification persisted the manifest"),
+    )
+
+    result = service_install.verify_provider_host_authority_identity()
+
+    assert result == {"verified": True, **record}
+    assert signer_calls == [
+        {
+            "identity": "keeper-authority-provider-host:provisioned",
+            "key_name": service_install.PROVIDER_HOST_AUTHORITY_KEY_NAME,
+            "machine_key": True,
+            "create_if_missing": False,
+            "machine_access_sids": access_sids,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {},
+        {"provider_host_authority_identity": {"changed": True}},
+        {
+            "provider_host_authority_identity": {},
+            "provider_host_authority_identity_claim": {"state": "CLAIMED"},
+        },
+    ],
+)
+def test_provider_host_authority_identity_verification_rejects_untrusted_state(
+    monkeypatch: pytest.MonkeyPatch, manifest: dict[str, object]
+) -> None:
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(
+        service_install, "_load_completed_manifest", lambda: manifest
+    )
+    monkeypatch.setattr(service_install, "account_sid", lambda _: "S-1-5-80-123")
+    with pytest.raises(PermissionError, match="identity"):
+        service_install.verify_provider_host_authority_identity()
+
+
+def test_provider_host_authority_identity_verification_rejects_live_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    access_sids = ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-123")
+    record = {
+        "schema_version": 1,
+        "key_name": service_install.PROVIDER_HOST_AUTHORITY_KEY_NAME,
+        "key_id": "keeper-provider-host-rsa:recorded",
+        "public_identity": {"key_id": "keeper-provider-host-rsa:recorded"},
+        "access_sids": list(access_sids),
+        "security_policy_sha256": "A" * 64,
+    }
+
+    class Signer:
+        key_id = "keeper-provider-host-rsa:different"
+
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def public_configuration(self) -> dict[str, object]:
+            return {"key_id": self.key_id}
+
+    monkeypatch.setattr(service_install, "_require_admin", lambda: None)
+    monkeypatch.setattr(service_install, "account_sid", lambda _: access_sids[-1])
+    monkeypatch.setattr(
+        service_install,
+        "machine_key_security_policy_sha256",
+        lambda _: "A" * 64,
+    )
+    monkeypatch.setattr(
+        service_install,
+        "_load_completed_manifest",
+        lambda: {"provider_host_authority_identity": record},
+    )
+    monkeypatch.setattr(service_install, "WindowsCngEnvelopeIdentity", Signer)
+
+    with pytest.raises(PermissionError, match="differs"):
+        service_install.verify_provider_host_authority_identity()
+
+
 def test_interrupted_identity_claim_reconciles_once_and_clears(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
