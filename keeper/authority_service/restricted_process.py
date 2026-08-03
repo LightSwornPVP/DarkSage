@@ -373,12 +373,18 @@ def impersonate_token(token: int) -> Iterator[None]:
             )
 
 
-def _assert_thread_not_impersonating() -> None:
+def _assert_thread_not_impersonating(
+    *,
+    advapi32: Any | None = None,
+    kernel32: Any | None = None,
+) -> None:
     """Prove the current thread has no impersonation token."""
+    advapi = advapi32 if advapi32 is not None else _advapi32()
+    kernel = kernel32 if kernel32 is not None else _kernel32()
     thread_token = wintypes.HANDLE()
     ctypes.set_last_error(0)
-    if _advapi32().OpenThreadToken(
-        _kernel32().GetCurrentThread(),
+    if advapi.OpenThreadToken(
+        kernel.GetCurrentThread(),
         _TOKEN_QUERY,
         True,
         ctypes.byref(thread_token),
@@ -389,7 +395,7 @@ def _assert_thread_not_impersonating() -> None:
             )
         finally:
             if thread_token.value:
-                _kernel32().CloseHandle(thread_token)
+                kernel.CloseHandle(thread_token)
     error = ctypes.get_last_error()
     if error != _ERROR_NO_TOKEN:
         raise ProviderLaunchIdentityUncertain(
@@ -982,20 +988,148 @@ def authenticated_client_windows_session_state(
 
 
 def authenticated_client_environment(token: int) -> dict[str, str]:
-    """Build a user environment from the exact authenticated pipe token.
+    """Build a user environment on a disposable authenticated-client worker.
 
-    ``CreateEnvironmentBlock`` supports an impersonation token with
-    ``TOKEN_QUERY`` access.  Keeping the environment lookup on the captured
-    named-pipe token avoids converting the process token to a primary token
-    for a read-only profile lookup.  The service thread does not impersonate
-    the client while this API is called.
+    The Authority caller thread never impersonates.  The worker enters the
+    exact captured named-pipe client identity immediately before the single
+    ``CreateEnvironmentBlock`` call, reverts immediately afterward, and must
+    prove it no longer has a thread token before the environment is parsed or
+    returned to Authority code.
     """
     require_impersonation_level(token)
-    return _token_environment(
-        token,
-        token_type="authenticated-impersonation",
-        required_access="TOKEN_QUERY",
+    advapi32 = _advapi32()
+    kernel32 = _kernel32()
+    userenv = _userenv()
+    try:
+        _assert_thread_not_impersonating(
+            advapi32=advapi32,
+            kernel32=kernel32,
+        )
+    except BaseException as error:
+        raise ProviderServiceIdentityUncertain(
+            "Authority service thread identity is not clean before profile "
+            "environment lookup"
+        ) from error
+    completed = threading.Event()
+    outcome: list[dict[str, str] | BaseException] = []
+
+    def worker() -> None:
+        block = wintypes.LPVOID()
+        try:
+            _assert_thread_not_impersonating(
+                advapi32=advapi32,
+                kernel32=kernel32,
+            )
+            ctypes.set_last_error(0)
+            if not advapi32.ImpersonateLoggedOnUser(token):
+                error = ctypes.get_last_error()
+                try:
+                    _assert_thread_not_impersonating(
+                        advapi32=advapi32,
+                        kernel32=kernel32,
+                    )
+                except BaseException as verification_error:
+                    outcome.append(verification_error)
+                else:
+                    outcome.append(
+                        PermissionError(
+                            "authenticated-client profile impersonation failed "
+                            f"(win32_error={error}, "
+                            f"symbolic={_win32_error_name(error)})"
+                        )
+                    )
+                return
+            created = False
+            create_error = 0
+            try:
+                created = bool(
+                    userenv.CreateEnvironmentBlock(
+                        ctypes.byref(block), token, False
+                    )
+                )
+                if not created:
+                    create_error = ctypes.get_last_error()
+            finally:
+                reverted = bool(advapi32.RevertToSelf())
+                revert_error = 0 if reverted else ctypes.get_last_error()
+            try:
+                _assert_thread_not_impersonating(
+                    advapi32=advapi32,
+                    kernel32=kernel32,
+                )
+            except BaseException as verification_error:
+                _destroy_environment_block(userenv, block)
+                outcome.append(
+                    ProviderLaunchIdentityUncertain(
+                        "authenticated-client profile identity reversion "
+                        "could not be verified"
+                    )
+                )
+                outcome.append(verification_error)
+                return
+            if not reverted:
+                _destroy_environment_block(userenv, block)
+                outcome.append(
+                    ProviderLaunchIdentityUncertain(
+                        "authenticated-client profile identity could not be "
+                        "reverted "
+                        f"(win32_error={revert_error}, "
+                        f"symbolic={_win32_error_name(revert_error)})"
+                    )
+                )
+                return
+            if not created:
+                outcome.append(
+                    PermissionError(
+                        "provider profile environment is unavailable "
+                        "(api=CreateEnvironmentBlock, "
+                        "token_type=authenticated-impersonation, "
+                        "required_access=TOKEN_QUERY, "
+                        f"win32_error={create_error}, "
+                        f"symbolic={_win32_error_name(create_error)})"
+                    )
+                )
+                return
+            try:
+                environment = _environment_from_block(block)
+            finally:
+                _destroy_environment_block(userenv, block, required=True)
+            outcome.append(environment)
+        except BaseException as error:
+            try:
+                _destroy_environment_block(userenv, block)
+            except BaseException as cleanup_error:
+                outcome.append(cleanup_error)
+            outcome.append(error)
+        finally:
+            completed.set()
+
+    validation_thread = threading.Thread(
+        target=worker,
+        name="KeeperAuthenticatedClientProfileEnvironment",
+        daemon=True,
     )
+    validation_thread.start()
+    completed.wait()
+    validation_thread.join()
+    try:
+        _assert_thread_not_impersonating(
+            advapi32=advapi32,
+            kernel32=kernel32,
+        )
+    except BaseException as error:
+        raise ProviderServiceIdentityUncertain(
+            "Authority service thread identity is not clean after profile "
+            "environment lookup"
+        ) from error
+    if not outcome:
+        raise PermissionError(
+            "authenticated-client profile environment produced no outcome"
+        )
+    first = outcome[0]
+    if isinstance(first, BaseException):
+        raise first
+    return first
 
 
 def token_environment(token: int) -> dict[str, str]:
@@ -1013,8 +1147,9 @@ def _token_environment(
     token_type: str,
     required_access: str,
 ) -> dict[str, str]:
+    userenv = _userenv()
     block = wintypes.LPVOID()
-    if not _userenv().CreateEnvironmentBlock(ctypes.byref(block), token, False):
+    if not userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
         error = ctypes.get_last_error()
         raise PermissionError(
             "provider profile environment is unavailable "
@@ -1023,25 +1158,48 @@ def _token_environment(
             f"win32_error={error}, symbolic={_win32_error_name(error)})"
         )
     try:
-        pointer = ctypes.cast(block, ctypes.POINTER(ctypes.c_wchar))
-        characters: list[str] = []
-        index = 0
-        while True:
-            character = pointer[index]
-            if character == "\0" and pointer[index + 1] == "\0":
-                break
-            characters.append(character)
-            index += 1
-        result: dict[str, str] = {}
-        for entry in "".join(characters).split("\0"):
-            if not entry or "=" not in entry:
-                continue
-            name, value = entry.split("=", 1)
-            if name:
-                result[name] = value
-        return result
+        return _environment_from_block(block)
     finally:
-        _userenv().DestroyEnvironmentBlock(block)
+        _destroy_environment_block(userenv, block, required=True)
+
+
+def _environment_from_block(block: wintypes.LPVOID) -> dict[str, str]:
+    pointer = ctypes.cast(block, ctypes.POINTER(ctypes.c_wchar))
+    characters: list[str] = []
+    index = 0
+    while True:
+        character = pointer[index]
+        if character == "\0" and pointer[index + 1] == "\0":
+            break
+        characters.append(character)
+        index += 1
+    result: dict[str, str] = {}
+    for entry in "".join(characters).split("\0"):
+        if not entry or "=" not in entry:
+            continue
+        name, value = entry.split("=", 1)
+        if name:
+            result[name] = value
+    return result
+
+
+def _destroy_environment_block(
+    userenv: Any,
+    block: wintypes.LPVOID,
+    *,
+    required: bool = False,
+) -> None:
+    if not ctypes.cast(block, wintypes.LPVOID).value:
+        return
+    destroyed = bool(userenv.DestroyEnvironmentBlock(block))
+    block.value = None
+    if required and not destroyed:
+        error = ctypes.get_last_error()
+        raise PermissionError(
+            "provider profile environment cleanup failed "
+            f"(api=DestroyEnvironmentBlock, win32_error={error}, "
+            f"symbolic={_win32_error_name(error)})"
+        )
 
 
 def _win32_error_name(error: int) -> str:
