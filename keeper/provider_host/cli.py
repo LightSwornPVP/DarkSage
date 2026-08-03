@@ -6,10 +6,11 @@ import json
 import secrets
 import sys
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from keeper.authority_service.client import ProductionAuthorityServiceClient
 from keeper.authority_service.core import SERVICE_VERSION
+from keeper.authority_service.protocol import PROTOCOL_VERSION
 from keeper.authority_service.store import SERVICE_SCHEMA_VERSION
 from keeper.executive.founder_auth import ProductionFounderAuthenticator
 from keeper.provider_host.bootstrap import build_production_bootstrap
@@ -178,13 +179,7 @@ def _production_enrollment_client() -> ProviderHostEnrollmentClient:
         return _enrollment_client_factory()
     authority = ProductionAuthorityServiceClient()
     diagnostics = authority.require_live_identity()
-    if (
-        diagnostics.get("service_version") != SERVICE_VERSION
-        or diagnostics.get("schema_version") != SERVICE_SCHEMA_VERSION
-    ):
-        raise PermissionError(
-            "Provider Host enrollment requires the exact matching KeeperAuthority"
-        )
+    _validate_authority_compatibility(diagnostics)
     binding = current_user_binding()
     if str(diagnostics.get("client_sid", "")).casefold() != binding.user_sid.casefold():
         raise PermissionError("Provider Host enrollment client identity differs")
@@ -215,6 +210,19 @@ def _production_enrollment_client() -> ProviderHostEnrollmentClient:
         authenticator=authenticator,
         bootstrap=bootstrap,
     )
+
+
+def _validate_authority_compatibility(
+    diagnostics: Mapping[str, object],
+) -> None:
+    if (
+        diagnostics.get("service_version") != SERVICE_VERSION
+        or diagnostics.get("protocol_version") != PROTOCOL_VERSION
+        or diagnostics.get("schema_version") != SERVICE_SCHEMA_VERSION
+    ):
+        raise PermissionError(
+            "Provider Host enrollment requires the exact matching KeeperAuthority"
+        )
 
 
 def _build_runtime(config_path: Path) -> tuple[KeeperProviderHost, ProviderHostServer]:
